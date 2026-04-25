@@ -21,8 +21,8 @@ async function main() {
   const nameIdx = args.indexOf("--name");
   const repoName = nameIdx >= 0 ? args[nameIdx + 1] : sanitizeName(basename(resolve(folder)));
 
-  const token = mustEnv("GITHUB_TOKEN");
-  const owner = mustEnv("GITHUB_OWNER");
+  const token = mustEnv("GITHUB_TOKEN").trim();
+  const owner = mustEnv("GITHUB_OWNER").trim();
 
   if (!existsSync(folder)) {
     console.error(`folder not found: ${folder}`);

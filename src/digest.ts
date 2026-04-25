@@ -3,8 +3,8 @@ import { simpleGit } from "simple-git";
 import { mkdirSync, writeFileSync, existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
 
-const TOKEN = mustEnv("GITHUB_TOKEN");
-const VAULT_REPO = mustEnv("VAULT_REPO");
+const TOKEN = mustEnv("GITHUB_TOKEN").trim();
+const VAULT_REPO = mustEnv("VAULT_REPO").trim();
 const COMMITTER_NAME = process.env.COMMITTER_NAME ?? "clawbot";
 const COMMITTER_EMAIL = process.env.COMMITTER_EMAIL ?? "clawbot@users.noreply.github.com";
 const LOOKBACK_DAYS = Number(process.env.LOOKBACK_DAYS ?? 7);
