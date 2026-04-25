@@ -29,7 +29,7 @@ jobs:
       - name: Run digest
         env:
           GITHUB_TOKEN: ${{ secrets.CLAWBOT_PAT }}
-          VAULT_REPO: ${{ vars.VAULT_REPO }}
+          VAULT_REPO: RUBIEM-DEVELOPERS-REPO/main-brain
           LOOKBACK_DAYS: ${{ inputs.lookback_days || '7' }}
           COMMITTER_NAME: clawbot
           COMMITTER_EMAIL: clawbot@users.noreply.github.com
