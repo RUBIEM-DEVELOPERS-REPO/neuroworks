@@ -1,0 +1,36 @@
+name: daily-digest
+
+on:
+  schedule:
+    - cron: "30 6 * * *"  # 06:30 UTC daily
+  workflow_dispatch:
+    inputs:
+      lookback_days:
+        description: "How many days back to scan"
+        required: false
+        default: "7"
+
+jobs:
+  digest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install pnpm
+        run: npm i -g pnpm@10
+
+      - name: Install deps
+        run: pnpm install --frozen-lockfile=false
+
+      - name: Run digest
+        env:
+          GITHUB_TOKEN: ${{ secrets.CLAWBOT_PAT }}
+          VAULT_REPO: ${{ vars.VAULT_REPO }}
+          LOOKBACK_DAYS: ${{ inputs.lookback_days || '7' }}
+          COMMITTER_NAME: clawbot
+          COMMITTER_EMAIL: clawbot@users.noreply.github.com
+        run: pnpm digest

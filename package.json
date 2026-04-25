@@ -1,0 +1,24 @@
+{
+  "name": "clawbot",
+  "version": "0.1.0",
+  "description": "Cloud-side worker that feeds GitHub activity into the main-brain Obsidian vault.",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p .",
+    "digest": "tsx src/digest.ts",
+    "publish-folder": "tsx src/publish-folder.ts"
+  },
+  "dependencies": {
+    "@octokit/rest": "^21.0.2",
+    "simple-git": "^3.27.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.7.4",
+    "tsx": "^4.19.1",
+    "typescript": "^5.6.3"
+  }
+}
