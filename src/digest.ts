@@ -85,6 +85,16 @@ async function openIssues(owner: string, repo: string) {
   }
 }
 
+function fmtIdleRepoSection(r: { full: string; htmlUrl: string; description: string | null; private: boolean; pushedAt: string | null }, since: string) {
+  const lines: string[] = [];
+  lines.push(`### [${r.full}](${r.htmlUrl})${r.private ? " *(private)*" : ""}`);
+  if (r.description) lines.push(`> ${r.description}`);
+  lines.push(`_Last pushed: ${r.pushedAt ?? "—"}_`);
+  lines.push("");
+  lines.push(`_No commits, PRs, or issues since ${since}._`);
+  return lines.join("\n");
+}
+
 function fmtRepoSection(r: { full: string; htmlUrl: string; description: string | null; private: boolean; pushedAt: string | null }, commits: any[], prs: any[], issues: any[]) {
   const lines: string[] = [];
   lines.push(`### [${r.full}](${r.htmlUrl})${r.private ? " *(private)*" : ""}`);
@@ -146,9 +156,11 @@ async function main() {
       openIssues(r.owner, r.name),
     ]);
     totalCommits += commits.length; totalPrs += prs.length; totalIssues += issues.length;
-    if (commits.length === 0 && prs.length === 0 && issues.length === 0) continue;
-    const section = fmtRepoSection(r, commits, prs, issues);
-    sections.push(section);
+    const hasActivity = commits.length > 0 || prs.length > 0 || issues.length > 0;
+    const section = hasActivity
+      ? fmtRepoSection(r, commits, prs, issues)
+      : fmtIdleRepoSection(r, since);
+    if (hasActivity) sections.push(section);
     const perRepoPath = join(reposDir, `${r.owner}-${r.name}.md`);
     writeFileSync(perRepoPath, `# ${r.full}\n\n_Snapshot: ${today}_\n\n${section}\n`, "utf8");
   }
