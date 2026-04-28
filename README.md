@@ -18,11 +18,11 @@ Three entrypoints:
 
 2. **`pnpm publish-folder <path>`** — local utility you run on your machine. Takes a local folder, ensures it's a git repo, creates a matching private repo on GitHub, and pushes. Use it to publish folders the cloud bot can't see (company docs, notes, ad-hoc projects).
 
-3. **`pnpm dev`** (alias **`pnpm neuroworks`**) — launches the NeuroWorks local console (server + web) at http://127.0.0.1:5173. See below.
+3. **`pnpm dev`** (alias **`pnpm neuroworks`**) — launches the NeuroWorks local console (server + web) at http://127.0.0.1:7470. See below.
 
 ## NeuroWorks — local console
 
-Local-only browser app. Bind: `127.0.0.1:5173` (web) and `127.0.0.1:5174` (server). No auth — bound to loopback.
+Local-only browser app. Bind: `127.0.0.1:7470` (web) and `127.0.0.1:7471` (server). Picked outside the common 3000/5173/8080 ranges so it won't collide with other local dev servers (DPA System, aiia_command_center, etc.). No auth — bound to loopback.
 
 Pages:
 - **Dashboard** — vault path, Ollama health, last workflow run, latest digest preview, one-click "Run digest" trigger.
@@ -39,7 +39,7 @@ ollama serve &             # start Ollama if not already running
 pnpm dev                   # starts server + web concurrently
 ```
 
-Open http://127.0.0.1:5173.
+Open http://127.0.0.1:7470.
 
 ### Configuration
 
@@ -50,7 +50,7 @@ Open http://127.0.0.1:5173.
 - `VAULT_PATH` — local path to vault (`D:\Main brain`).
 - `OLLAMA_HOST` — defaults to `http://127.0.0.1:11434`.
 - `OLLAMA_MODEL` — defaults to `qwen3.5:0.8b`. Pull a stronger model for better summaries: `ollama pull llama3.1:8b`.
-- `NEUROWORKS_PORT` — server bind port (default `5174`).
+- `NEUROWORKS_PORT` — server bind port (default `7471`).
 
 ### How summaries work
 

@@ -8,7 +8,7 @@ import { tasksRouter } from "./routes/tasks.js";
 const app = express();
 app.use(express.json({ limit: "1mb" }));
 app.use((_req, res, next) => {
-  res.setHeader("Access-Control-Allow-Origin", "http://127.0.0.1:5173");
+  res.setHeader("Access-Control-Allow-Origin", "http://127.0.0.1:7470");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
   next();
