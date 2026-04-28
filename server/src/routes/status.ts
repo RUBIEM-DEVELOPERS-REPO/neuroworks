@@ -15,22 +15,25 @@ statusRouter.get("/", async (_req, res) => {
   }
   const ollama = await ollamaHealth();
   let lastWorkflow: any = null;
-  try {
-    const [owner, repo] = config.vaultRepo.split("/");
-    void owner; void repo;
-    const cbOwner = config.githubOwner;
-    const run = await latestRun(cbOwner, "clawbot", "daily-digest.yml");
-    if (run) {
-      lastWorkflow = {
-        id: run.id,
-        status: run.status,
-        conclusion: run.conclusion,
-        createdAt: run.created_at,
-        htmlUrl: run.html_url,
-      };
-    }
-  } catch (e: any) { lastWorkflow = { error: e.message }; }
+  if (config.ready) {
+    try {
+      const run = await latestRun(config.githubOwner, "clawbot", "daily-digest.yml");
+      if (run) {
+        lastWorkflow = {
+          id: run.id,
+          status: run.status,
+          conclusion: run.conclusion,
+          createdAt: run.created_at,
+          htmlUrl: run.html_url,
+        };
+      }
+    } catch (e: any) { lastWorkflow = { error: e.message }; }
+  } else {
+    lastWorkflow = { error: `degraded: missing env ${config.missing.join(", ")}` };
+  }
   res.json({
+    ready: config.ready,
+    missing: config.missing,
     vaultPath: config.vaultPath,
     vaultRepo: config.vaultRepo,
     githubOwner: config.githubOwner,

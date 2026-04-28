@@ -7,8 +7,12 @@ export default defineConfig({
     host: "127.0.0.1",
     port: 7470,
     strictPort: true,
+    open: "/dashboard",
     proxy: {
-      "/api": "http://127.0.0.1:7471",
+      "/api": {
+        target: "http://127.0.0.1:7471",
+        changeOrigin: false,
+      },
     },
   },
 });

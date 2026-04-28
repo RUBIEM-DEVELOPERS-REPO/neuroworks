@@ -36,6 +36,13 @@ export function Dashboard() {
         <p className="text-sm text-slate-400 mt-1">Live state of the second brain and clawbot.</p>
       </div>
 
+      {status.ready === false && (
+        <div className="bg-amber-950/40 border border-amber-800 rounded-lg p-4 text-sm">
+          <div className="font-medium text-amber-300">Degraded mode</div>
+          <div className="text-amber-200/80 mt-1">Missing env vars: <span className="font-mono">{status.missing.join(", ")}</span>. Copy <span className="font-mono">.env.example</span> → <span className="font-mono">.env</span> in <span className="font-mono">clawbot/</span> and fill them in, then restart.</div>
+        </div>
+      )}
+
       <div className="grid grid-cols-3 gap-4">
         <Card title="Vault">
           <div className="text-xs text-slate-400 font-mono break-all">{status.vaultPath}</div>

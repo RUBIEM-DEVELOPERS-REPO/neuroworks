@@ -15,7 +15,13 @@ app.use((_req, res, next) => {
 });
 app.options("*", (_req, res) => res.sendStatus(204));
 
-app.get("/api/health", (_req, res) => res.json({ ok: true, name: "neuroworks", version: "0.1.0" }));
+app.get("/api/health", (_req, res) => res.json({
+  ok: true,
+  name: "neuroworks",
+  version: "0.1.0",
+  ready: config.ready,
+  missing: config.missing,
+}));
 app.use("/api/status", statusRouter);
 app.use("/api/repos", reposRouter);
 app.use("/api/brain", brainRouter);
@@ -27,7 +33,8 @@ app.use((err: any, _req: any, res: any, _next: any) => {
 });
 
 app.listen(config.port, "127.0.0.1", () => {
-  console.log(`neuroworks server listening on http://127.0.0.1:${config.port}`);
-  console.log(`  vault: ${config.vaultPath}`);
-  console.log(`  ollama: ${config.ollamaHost} (${config.ollamaModel})`);
+  console.log(`\n  ▶ neuroworks server: http://127.0.0.1:${config.port}`);
+  console.log(`    web ui will open at: http://127.0.0.1:7470`);
+  console.log(`    vault:  ${config.vaultPath}`);
+  console.log(`    ollama: ${config.ollamaHost} (${config.ollamaModel})\n`);
 });
