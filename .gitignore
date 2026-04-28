@@ -4,3 +4,7 @@ dist/
 *.log
 .env
 .env.local
+
+# Vite
+web/dist/
+.DS_Store

@@ -1,7 +1,7 @@
 {
   "name": "clawbot",
-  "version": "0.1.0",
-  "description": "Cloud-side worker that feeds GitHub activity into the main-brain Obsidian vault.",
+  "version": "0.2.0",
+  "description": "Clawbot bot + NeuroWorks local control plane.",
   "private": true,
   "type": "module",
   "engines": {
@@ -10,7 +10,9 @@
   "scripts": {
     "build": "tsc -p .",
     "digest": "tsx src/digest.ts",
-    "publish-folder": "tsx src/publish-folder.ts"
+    "publish-folder": "tsx src/publish-folder.ts",
+    "dev": "concurrently -n server,web -c cyan,magenta \"pnpm -F clawbot-server dev\" \"pnpm -F clawbot-web dev\"",
+    "neuroworks": "pnpm dev"
   },
   "dependencies": {
     "@octokit/rest": "^21.0.2",
@@ -18,6 +20,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.7.4",
+    "concurrently": "^9.0.1",
     "tsx": "^4.19.1",
     "typescript": "^5.6.3"
   }
