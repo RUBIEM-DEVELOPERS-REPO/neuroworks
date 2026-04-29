@@ -8,6 +8,7 @@ import { config } from "../config.js";
 import { dispatchWorkflow, recentCommits, openPRs, openIssues, readme, octokit } from "../lib/github.js";
 import { writeVaultFile, commitAndPush, searchVault } from "../lib/vault.js";
 import { ollamaGenerate } from "../lib/ollama.js";
+import { syncDownloads } from "../lib/sync-downloads.js";
 
 export const templatesRouter = Router();
 
@@ -118,6 +119,7 @@ async function runner(templateId: string, inputs: Record<string, unknown>, push:
     case "search-brain":   return searchBrainRunner(inputs, push);
     case "add-note":       return addNoteRunner(inputs, push);
     case "browse-vault":   return { redirect: "/knowledge" };
+    case "sync-downloads": return syncDownloadsRunner(inputs, push);
     default: throw new Error(`no runner for ${templateId}`);
   }
 }
@@ -229,6 +231,15 @@ async function addNoteRunner(inputs: Record<string, unknown>, push: (m: string) 
   push("committing vault");
   const r = await commitAndPush(`note: ${title}`);
   return { path: rel, ...r };
+}
+
+async function syncDownloadsRunner(inputs: Record<string, unknown>, push: (m: string) => void) {
+  const source = (inputs.source as string | undefined) ?? "";
+  push("running download sync (read-only on sources)");
+  const r = syncDownloads({ source }, push);
+  push("committing inventory + state to vault");
+  const commit = await commitAndPush(`clawbot: downloads sync (${r.copiedThisRun.length} new)`);
+  return { ...r, commit };
 }
 
 function sanitizeName(name: string): string {

@@ -1,5 +1,7 @@
-import { readFileSync, readdirSync, statSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
+import { readFileSync, readdirSync, renameSync, statSync, writeFileSync, mkdirSync, existsSync, rmSync } from "node:fs";
 import { join, relative, resolve, sep } from "node:path";
+import { tmpdir } from "node:os";
+import { randomUUID } from "node:crypto";
 import { simpleGit } from "simple-git";
 import { config } from "../config.js";
 
@@ -44,16 +46,94 @@ export function writeVaultFile(rel: string, content: string) {
 
 export async function commitAndPush(message: string) {
   const git = simpleGit(VAULT);
-  const status = await git.status();
-  if (status.files.length === 0) return { committed: false };
   await git.add(".");
+  const before = await git.status();
+  if (before.staged.length === 0 && before.created.length === 0 && before.modified.length === 0 && before.deleted.length === 0 && before.renamed.length === 0) {
+    return { committed: false };
+  }
   await git.commit(message);
+
+  // Try push; on stale-ref, do a rebase with both tracked AND untracked files stashed, then retry.
   try {
     await git.push("origin", "HEAD");
     return { committed: true, pushed: true };
   } catch (e: any) {
-    return { committed: true, pushed: false, error: e.message };
+    const msg = String(e.message ?? e);
+    if (!/rejected|fetch first|non-fast-forward|fast-forward/i.test(msg)) {
+      return { committed: true, pushed: false, error: msg };
+    }
+    return rebaseWithSidesteppedConflicts(git, msg);
   }
+}
+
+// Pull --rebase, but if it fails because untracked-and-gitignored files would be overwritten by an
+// intermediate rebase commit, move those specific files aside, retry, and restore them. This is what
+// happens when older history added files that are now gitignored locally (e.g. the notepad sync).
+async function rebaseWithSidesteppedConflicts(git: ReturnType<typeof simpleGit>, originalErr: string, attempt = 0): Promise<any> {
+  let conflictPaths: string[] = [];
+  const matchAttempt = async (): Promise<{ ok: true } | { ok: false; err: string }> => {
+    try {
+      try { await git.raw(["rebase", "--abort"]); } catch {}
+      await git.fetch("origin", "main");
+      await git.pull("origin", "main", { "--rebase": "true" });
+      await git.push("origin", "HEAD");
+      return { ok: true };
+    } catch (e: any) {
+      return { ok: false, err: String(e.message ?? e) };
+    }
+  };
+
+  // First attempt — already failed (we got here because the basic push + rebase didn't work).
+  // Parse the conflict paths from the original push/rebase error and move them aside.
+  conflictPaths = parseUntrackedConflicts(originalErr);
+
+  if (conflictPaths.length === 0 && attempt === 0) {
+    // No specific paths to sidestep — try a plain rebase
+    const r = await matchAttempt();
+    if (r.ok) return { committed: true, pushed: true, rebased: true };
+    if (attempt >= 3) return { committed: true, pushed: false, rebased: true, error: r.err };
+    return rebaseWithSidesteppedConflicts(git, r.err, attempt + 1);
+  }
+
+  // Move conflict paths aside, retry, restore
+  const stashRoot = join(tmpdir(), `clawbot-presync-${randomUUID()}`);
+  mkdirSync(stashRoot, { recursive: true });
+  const moved: { src: string; tmp: string }[] = [];
+  for (const p of conflictPaths) {
+    const src = resolve(VAULT, p);
+    if (!existsSync(src)) continue;
+    const tmp = join(stashRoot, p.replace(/[\\/]/g, "_"));
+    try { renameSync(src, tmp); moved.push({ src, tmp }); } catch {}
+  }
+  try {
+    const r = await matchAttempt();
+    if (r.ok) return { committed: true, pushed: true, rebased: true, sidestepped: moved.length };
+    if (attempt < 3) {
+      // Maybe more conflicts surfaced
+      return rebaseWithSidesteppedConflicts(git, r.err, attempt + 1);
+    }
+    return { committed: true, pushed: false, rebased: true, error: r.err, sidestepped: moved.length };
+  } finally {
+    for (const m of moved) {
+      try { renameSync(m.tmp, m.src); } catch {}
+    }
+    try { rmSync(stashRoot, { recursive: true, force: true }); } catch {}
+  }
+}
+
+function parseUntrackedConflicts(stderr: string): string[] {
+  // git emits one path per line, each prefixed with a tab, between the headline and "Please move..."
+  const lines = stderr.split(/\r?\n/);
+  const paths: string[] = [];
+  for (const line of lines) {
+    if (line.startsWith("\t") || /^\s\s+/.test(line)) {
+      const p = line.trim();
+      if (p && !p.startsWith("hint:") && !p.toLowerCase().includes("please move") && !p.includes("Aborting")) {
+        paths.push(p);
+      }
+    }
+  }
+  return paths;
 }
 
 export function searchVault(query: string, limit = 50): { path: string; line: number; preview: string }[] {

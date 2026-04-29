@@ -93,6 +93,19 @@ export const templates: Template[] = [
     requiresApproval: false,
     estimateSeconds: 1,
   },
+  {
+    id: "sync-downloads",
+    role: "Knowledge",
+    title: "Sync downloads to vault",
+    description: "Mirror new files from your Downloads folder into the vault. Source files are never moved or deleted — clawbot only copies.",
+    icon: "download",
+    agent: "clawbot",
+    inputs: [
+      { name: "source", label: "Source folder", type: "text", placeholder: "leave blank for ~/Downloads/" },
+    ],
+    requiresApproval: false,
+    estimateSeconds: 60,
+  },
 ];
 
 export const roles = [
