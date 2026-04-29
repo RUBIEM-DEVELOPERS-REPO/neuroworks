@@ -1,5 +1,12 @@
-import "dotenv/config";
+import { config as loadEnv } from "dotenv";
 import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { dirname } from "node:path";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+// .env lives at clawbot/.env (one level above server/). Try repo root first, then server-local fallback.
+loadEnv({ path: resolve(__dirname, "../../../.env") });
+loadEnv({ path: resolve(__dirname, "../../.env") });
 
 const missing: string[] = [];
 
