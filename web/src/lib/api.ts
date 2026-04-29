@@ -8,17 +8,33 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
   return r.json() as Promise<T>;
 }
 
+export type TemplateInput = {
+  name: string; label: string;
+  type: "text" | "number" | "boolean" | "repo-picker" | "textarea";
+  required?: boolean; default?: string | number | boolean; placeholder?: string;
+};
+export type Template = {
+  id: string; role: "Engineering" | "Knowledge" | "Operations" | "Insights";
+  title: string; description: string; icon: string;
+  inputs: TemplateInput[]; requiresApproval: boolean; estimateSeconds: number; agent: string;
+};
+export type Role = { id: string; label: string; description: string; count: number };
+
 export const api = {
-  health: () => req<{ ok: boolean; name: string; version: string }>("/api/health"),
+  health: () => req<{ ok: boolean; name: string; version: string; ready: boolean; missing: string[] }>("/api/health"),
   status: () => req<any>("/api/status"),
   listRepos: () => req<{ repos: any[] }>("/api/repos"),
   getRepo: (owner: string, name: string) => req<any>(`/api/repos/${owner}/${name}`),
-  summarizeRepo: (owner: string, name: string) => req<{ jobId: string }>(`/api/repos/${owner}/${name}/summarize`, { method: "POST" }),
-  getJob: (id: string) => req<any>(`/api/repos/jobs/${id}`),
+  listTemplates: () => req<{ roles: Role[]; templates: Template[] }>("/api/templates"),
+  runTemplate: (id: string, inputs: Record<string, any>) => req<{ jobId: string; requiresApproval: boolean; status: string }>(`/api/templates/run/${id}`, { method: "POST", body: JSON.stringify(inputs) }),
+  getJob: (id: string) => req<any>(`/api/templates/jobs/${id}`),
+  listJobs: () => req<{ jobs: any[] }>("/api/templates/jobs"),
+  approveJob: (id: string) => req<{ jobId: string; status: string }>(`/api/templates/jobs/${id}/approve`, { method: "POST" }),
+  rejectJob: (id: string) => req<{ jobId: string; status: string }>(`/api/templates/jobs/${id}/reject`, { method: "POST" }),
+  intent: (text: string) => req<{ source: string; templateId: string | null; inputs: Record<string, any> }>("/api/templates/intent", { method: "POST", body: JSON.stringify({ text }) }),
   brainTree: (path = "") => req<{ path: string; entries: { name: string; path: string; type: "dir" | "file" }[] }>(`/api/brain/tree?path=${encodeURIComponent(path)}`),
   brainFile: (path: string) => req<{ path: string; content: string }>(`/api/brain/file?path=${encodeURIComponent(path)}`),
   brainSearch: (q: string) => req<{ q: string; results: { path: string; line: number; preview: string }[] }>(`/api/brain/search?q=${encodeURIComponent(q)}`),
   brainLatestDigest: () => req<{ content: string }>("/api/brain/digest/latest"),
   triggerDigest: (lookbackDays = 7) => req<{ jobId: string }>("/api/tasks/digest", { method: "POST", body: JSON.stringify({ lookbackDays: String(lookbackDays) }) }),
-  latestWorkflow: () => req<{ run: any }>("/api/tasks/workflow/latest"),
 };

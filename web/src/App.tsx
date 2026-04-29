@@ -1,10 +1,13 @@
 import { Routes, Route, Navigate } from "react-router-dom";
 import { Layout } from "./components/Layout";
 import { Dashboard } from "./pages/Dashboard";
-import { Repos } from "./pages/Repos";
-import { RepoDetail } from "./pages/RepoDetail";
-import { Brain } from "./pages/Brain";
 import { Tasks } from "./pages/Tasks";
+import { Templates } from "./pages/Templates";
+import { Approvals } from "./pages/Approvals";
+import { Activity } from "./pages/Activity";
+import { Knowledge } from "./pages/Knowledge";
+import { Admin } from "./pages/Admin";
+import { Settings } from "./pages/Settings";
 
 export default function App() {
   return (
@@ -12,10 +15,14 @@ export default function App() {
       <Routes>
         <Route path="/" element={<Navigate to="/dashboard" />} />
         <Route path="/dashboard" element={<Dashboard />} />
-        <Route path="/repos" element={<Repos />} />
-        <Route path="/repos/:owner/:name" element={<RepoDetail />} />
-        <Route path="/brain/*" element={<Brain />} />
         <Route path="/tasks" element={<Tasks />} />
+        <Route path="/templates" element={<Templates />} />
+        <Route path="/approvals" element={<Approvals />} />
+        <Route path="/activity" element={<Activity />} />
+        <Route path="/knowledge/*" element={<Knowledge />} />
+        <Route path="/admin" element={<Admin />} />
+        <Route path="/settings" element={<Settings />} />
+        <Route path="*" element={<Navigate to="/dashboard" />} />
       </Routes>
     </Layout>
   );

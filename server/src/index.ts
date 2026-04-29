@@ -4,6 +4,7 @@ import { statusRouter } from "./routes/status.js";
 import { reposRouter } from "./routes/repos.js";
 import { brainRouter } from "./routes/brain.js";
 import { tasksRouter } from "./routes/tasks.js";
+import { templatesRouter } from "./routes/templates.js";
 
 const app = express();
 app.use(express.json({ limit: "1mb" }));
@@ -26,6 +27,7 @@ app.use("/api/status", statusRouter);
 app.use("/api/repos", reposRouter);
 app.use("/api/brain", brainRouter);
 app.use("/api/tasks", tasksRouter);
+app.use("/api/templates", templatesRouter);
 
 app.use((err: any, _req: any, res: any, _next: any) => {
   console.error(err);

@@ -3,12 +3,18 @@ import { randomUUID } from "node:crypto";
 export type Job = {
   id: string;
   kind: string;
-  status: "pending" | "running" | "succeeded" | "failed";
+  status: "pending" | "awaiting-approval" | "running" | "succeeded" | "failed" | "rejected";
   startedAt: string;
   finishedAt?: string;
   log: string[];
   result?: unknown;
   error?: string;
+  template?: string;
+  title?: string;
+  inputs?: Record<string, unknown>;
+  requiresApproval?: boolean;
+  approvedAt?: string;
+  rejectedAt?: string;
 };
 
 const jobs = new Map<string, Job>();
