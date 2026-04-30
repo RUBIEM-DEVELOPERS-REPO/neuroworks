@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import { marked } from "marked";
 import { api } from "../lib/api";
 import { BrandMark } from "../components/BrandMark";
+import { ResultPanel } from "../components/ResultPanel";
 
 type Msg = {
   role: "user" | "assistant";
@@ -135,13 +136,7 @@ function Bubble({ m }: { m: Msg }) {
       <BrandMark size={28} />
       <div className="flex-1 max-w-[80%] space-y-2">
         <div className="bg-ink-900 border border-ink-800 rounded-2xl rounded-tl-sm px-4 py-3 text-sm text-cream-100 prose-vault" dangerouslySetInnerHTML={{ __html: marked.parse(m.content) as string }} />
-        {m.jobId && (
-          <Link to={`/tasks?focus=${m.jobId}`} className="inline-flex items-center gap-2 text-xs px-3 py-1.5 rounded-full bg-ink-850 hover:bg-ink-800 border border-ink-700 text-cream-200">
-            {m.requiresApproval ? "⏸ Awaiting approval" : "↗ Open task result"}
-            <span className="text-cream-300/50">·</span>
-            <span className="text-cream-300/70">{m.templateId}</span>
-          </Link>
-        )}
+        {m.jobId && <InlineJob jobId={m.jobId} requiresApproval={m.requiresApproval} templateId={m.templateId} />}
         {m.brainHits && m.brainHits.length > 0 && (
           <div className="bg-ink-950 border border-ink-800 rounded-lg p-3">
             <div className="text-[10px] uppercase tracking-wider text-cream-300/50 mb-2">Possible brain matches</div>
@@ -156,6 +151,64 @@ function Bubble({ m }: { m: Msg }) {
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+function InlineJob({ jobId, requiresApproval, templateId }: { jobId: string; requiresApproval?: boolean; templateId?: string }) {
+  const [job, setJob] = useState<any>(null);
+  useEffect(() => {
+    let alive = true;
+    let timer: any;
+    async function tick() {
+      try {
+        const j = await api.getJob(jobId);
+        if (!alive) return;
+        setJob(j);
+        if (j.status === "succeeded" || j.status === "failed" || j.status === "rejected") return;
+      } catch {}
+      timer = setTimeout(tick, 2000);
+    }
+    tick();
+    return () => { alive = false; if (timer) clearTimeout(timer); };
+  }, [jobId]);
+
+  if (!job) {
+    return (
+      <div className="text-xs text-cream-300/60 bg-ink-950 border border-ink-800 rounded-lg px-3 py-2">
+        Connecting to job <span className="font-mono">{jobId.slice(0, 8)}</span>…
+      </div>
+    );
+  }
+
+  const isPending = job.status === "running" || job.status === "pending";
+  const status = isPending ? "running" : job.status;
+
+  return (
+    <div className="space-y-2">
+      <div className={`flex items-center gap-2 text-xs px-3 py-1.5 rounded-full inline-flex ${
+        status === "succeeded" ? "bg-leaf-500/10 border border-leaf-500/30 text-leaf-400" :
+        status === "failed" || status === "rejected" ? "bg-coral-500/10 border border-coral-500/30 text-coral-400" :
+        status === "awaiting-approval" ? "bg-flame-500/10 border border-flame-500/30 text-flame-400" :
+        "bg-violet-500/10 border border-violet-500/30 text-violet-400"
+      }`}>
+        <span className={`w-1.5 h-1.5 rounded-full ${
+          status === "succeeded" ? "bg-leaf-500" :
+          status === "failed" || status === "rejected" ? "bg-coral-500" :
+          status === "awaiting-approval" ? "bg-flame-500" :
+          "bg-violet-500 animate-pulse"
+        }`} />
+        {status} · <span className="font-mono">{templateId ?? job.template}</span>
+        {requiresApproval && status === "awaiting-approval" && <Link to="/approvals" className="ml-1 underline">approve →</Link>}
+        {!isPending && <Link to={`/tasks?focus=${jobId}`} className="ml-1 underline opacity-70 hover:opacity-100">open in Tasks</Link>}
+      </div>
+      {!isPending && job.status === "succeeded" && <ResultPanel job={job} />}
+      {(job.status === "failed" || job.status === "rejected") && job.error && (
+        <pre className="text-[11px] font-mono text-coral-400 whitespace-pre-wrap bg-ink-950 border border-coral-500/20 rounded-md p-3 overflow-auto scrollbar-thin max-h-40">{job.error}</pre>
+      )}
+      {isPending && job.log?.length > 0 && (
+        <pre className="text-[10px] font-mono text-cream-300/70 whitespace-pre-wrap bg-ink-950 border border-ink-800 rounded-md p-2 max-h-32 overflow-auto scrollbar-thin">{job.log.slice(-6).join("\n")}</pre>
+      )}
     </div>
   );
 }

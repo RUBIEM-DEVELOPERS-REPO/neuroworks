@@ -80,33 +80,25 @@ chatRouter.post("/", async (req, res) => {
     }
   }
 
-  // 3. Plain chat via Ollama with brain-aware system prompt
-  const sys = `You are clawbot, an AI workforce agent inside NeuroWorks. The user has a personal Obsidian vault (the "second brain") with notes, daily digests, and project summaries you write. You can run these tools when the user asks — DO NOT pretend to run them yourself; mention them by name and the user's chat will trigger them.
-
-Available tools (templates):
-${templates.map(t => `- ${t.id}: ${t.title} — ${t.description}`).join("\n")}
-
-Style: warm, concise, plain language. Under 120 words. If the user is asking factual questions about their work or notes, suggest "search the knowledge base" or "summarize a project" as the right tool.`;
-
-  // Compact recent context — last 6 turns
-  const ctx = messages.slice(-6).map(m => `${m.role === "user" ? "User" : "Assistant"}: ${m.content}`).join("\n");
-
-  let reply = "";
-  try {
-    reply = await ollamaGenerate(ctx + "\nAssistant:", sys);
-  } catch (e: any) {
-    reply = `Sorry — I couldn't reach Ollama (${e.message}). The Engineering and Knowledge templates still work directly from the Templates page.`;
-  }
-
-  // If the user might have been asking for something searchable, also surface a quick brain search hit
-  let hint: { results: any[] } | null = null;
-  if (text.length > 4 && !templateId) {
-    const r = searchVault(text.slice(0, 80), 3);
-    if (r.length > 0) hint = { results: r };
-  }
-
-  res.json({ kind: "message", text: reply.trim(), brainHits: hint?.results ?? [] });
+  // 3. No template matched — route to general-task agent. The agent plans + executes
+  //    using primitives, optionally saves the plan as a custom template for next time.
+  const tpl = templates.find(t => t.id === "general-task")!;
+  const job = newJob(`insights:general-task`);
+  job.template = tpl.id;
+  job.title = `Ad-hoc: ${text.slice(0, 60)}`;
+  job.inputs = { task: text, save_as_template: true };
+  job.requiresApproval = false; // chat-driven NL flow trusts the agent's plan; explicit dialog form requires approval
+  res.json({
+    kind: "task",
+    jobId: job.id,
+    templateId: tpl.id,
+    requiresApproval: false,
+    text: `On it — I'll plan steps and run them. I'll show the result here when it's done.`,
+  });
+  void runJob(job, async (push) => runFromChat("general-task", { task: text, save_as_template: true }, push));
 });
+
+import { runFromChat } from "./templates.js";
 
 function inferInputs(templateId: string, text: string): Record<string, any> {
   const out: Record<string, any> = {};
@@ -149,19 +141,7 @@ function friendlyInputs(templateId: string, inputs: Record<string, any>): string
   return "";
 }
 
-// Lightweight runner to avoid circular import with templates router
 async function runTemplateInline(templateId: string, inputs: Record<string, unknown>, push: (m: string) => void) {
-  const { default: runViaTemplates } = await import("./templates.js")
-    .then(m => ({ default: (m as any).runFromChat })).catch(() => ({ default: null }));
-  if (runViaTemplates) return runViaTemplates(templateId, inputs, push);
-  // Fallback: hit our own /api/templates/run via internal call
-  const port = config.port;
-  const r = await fetch(`http://127.0.0.1:${port}/api/templates/run/${templateId}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(inputs),
-  });
-  const data = await r.json() as any;
-  push(`delegated to /api/templates/run/${templateId} (jobId=${data.jobId})`);
-  return data;
+  return runFromChat(templateId, inputs, push);
 }
+void config; void searchVault; void ollamaGenerate;

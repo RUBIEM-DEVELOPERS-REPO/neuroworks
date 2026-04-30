@@ -1,0 +1,72 @@
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join, resolve, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import type { Plan } from "./agent.js";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+// Persist outside the vault and outside the source tree — survives reinstalls.
+const STATE_DIR = resolve(__dirname, "../../../.neuroworks");
+const FILE = join(STATE_DIR, "custom-templates.json");
+
+export type CustomTemplate = {
+  id: string;            // custom-<slug>
+  role: "Custom";
+  title: string;
+  description: string;
+  origin: { task: string; createdAt: string };
+  plan: Plan;            // the verified plan to re-run
+  runCount: number;
+  lastRunAt?: string;
+};
+
+let cache: CustomTemplate[] | null = null;
+
+export function loadCustomTemplates(): CustomTemplate[] {
+  if (cache) return cache;
+  if (!existsSync(FILE)) { cache = []; return cache; }
+  try {
+    const data = JSON.parse(readFileSync(FILE, "utf8")) as CustomTemplate[];
+    cache = Array.isArray(data) ? data : [];
+  } catch { cache = []; }
+  return cache;
+}
+
+export function saveCustomTemplate(t: CustomTemplate): void {
+  const all = loadCustomTemplates();
+  const existing = all.findIndex(x => x.id === t.id);
+  if (existing >= 0) all[existing] = t;
+  else all.push(t);
+  persist(all);
+}
+
+export function bumpRunCount(id: string): void {
+  const all = loadCustomTemplates();
+  const t = all.find(x => x.id === id);
+  if (!t) return;
+  t.runCount = (t.runCount ?? 0) + 1;
+  t.lastRunAt = new Date().toISOString();
+  persist(all);
+}
+
+export function findCustomTemplate(id: string): CustomTemplate | undefined {
+  return loadCustomTemplates().find(t => t.id === id);
+}
+
+export function deleteCustomTemplate(id: string): boolean {
+  const all = loadCustomTemplates();
+  const idx = all.findIndex(t => t.id === id);
+  if (idx === -1) return false;
+  all.splice(idx, 1);
+  persist(all);
+  return true;
+}
+
+function persist(list: CustomTemplate[]): void {
+  mkdirSync(STATE_DIR, { recursive: true });
+  writeFileSync(FILE, JSON.stringify(list, null, 2), "utf8");
+  cache = list;
+}
+
+export function slugify(text: string): string {
+  return text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60) || "task";
+}

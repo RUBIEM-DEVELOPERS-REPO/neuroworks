@@ -94,6 +94,20 @@ export const templates: Template[] = [
     estimateSeconds: 1,
   },
   {
+    id: "general-task",
+    role: "Insights",
+    title: "Anything else (ad-hoc task)",
+    description: "Describe a task in plain English. Clawbot plans steps using its primitive tools (vault search/read/write, GitHub fetch, local LLM) and executes them. Successful runs auto-save as reusable templates.",
+    icon: "spark",
+    agent: "clawbot",
+    inputs: [
+      { name: "task", label: "Task description", type: "textarea", required: true, placeholder: "e.g. Find every note that mentions Cognify and write a one-page roll-up to 0-Inbox/cognify-rollup.md" },
+      { name: "save_as_template", label: "Save successful plan as a template", type: "boolean", default: true },
+    ],
+    requiresApproval: true,
+    estimateSeconds: 30,
+  },
+  {
     id: "sync-downloads",
     role: "Knowledge",
     title: "Sync downloads to vault",
@@ -113,4 +127,5 @@ export const roles = [
   { id: "Knowledge", label: "Knowledge", description: "Notes, search, capture", count: templates.filter(t => t.role === "Knowledge").length },
   { id: "Operations", label: "Operations", description: "Schedules, integrations", count: templates.filter(t => t.role === "Operations").length },
   { id: "Insights", label: "Insights", description: "Research, analysis", count: templates.filter(t => t.role === "Insights").length },
+  { id: "Custom", label: "Custom", description: "Saved from past ad-hoc runs", count: 0 },
 ];

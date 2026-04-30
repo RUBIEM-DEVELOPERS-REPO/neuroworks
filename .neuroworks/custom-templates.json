@@ -1,0 +1,51 @@
+[
+  {
+    "id": "custom-give-me-a-report-on-the-r-d-ai-research-project-in-my-pc",
+    "role": "Custom",
+    "title": "Search the Obsidian vault for R&D/ai research project information.",
+    "description": "Saved from chat: \"give me a report on the R&D/ai research project in my pc\"",
+    "origin": {
+      "task": "give me a report on the R&D/ai research project in my pc",
+      "createdAt": "2026-04-30T10:33:38.191Z"
+    },
+    "plan": {
+      "steps": [
+        {
+          "tool": "vault.search",
+          "args": {
+            "query": "R&D ai research project"
+          },
+          "rationale": "Search the Obsidian vault for information about the R&D/ai research project to gather relevant details."
+        }
+      ],
+      "summary": "Search the Obsidian vault for R&D/ai research project information."
+    },
+    "runCount": 1,
+    "lastRunAt": "2026-04-30T10:33:38.191Z"
+  },
+  {
+    "id": "custom-what-is-in-the-readme-of-the-clawbot-repo-on-github",
+    "role": "Custom",
+    "title": "Fetch clawbot repo overview to find README content.",
+    "description": "Saved from chat: \"what is in the README of the clawbot repo on github\"",
+    "origin": {
+      "task": "what is in the README of the clawbot repo on github",
+      "createdAt": "2026-04-30T11:59:16.758Z"
+    },
+    "plan": {
+      "steps": [
+        {
+          "tool": "github.read_repo",
+          "args": {
+            "owner": "RUBIEM-DEVELOPERS-REPO",
+            "name": "clawbot"
+          },
+          "rationale": "Get the clawbot repo overview including README file information"
+        }
+      ],
+      "summary": "Fetch clawbot repo overview to find README content."
+    },
+    "runCount": 1,
+    "lastRunAt": "2026-04-30T11:59:16.758Z"
+  }
+]

@@ -34,6 +34,7 @@ export function ResultPanel({ job }: { job: any }) {
     case "run-digest":     return <RunDigestResult job={job} />;
     case "sync-downloads": return <SyncDownloadsResult job={job} />;
     case "publish-folder": return <PublishFolderResult job={job} />;
+    case "general-task":   return <GeneralTaskResult job={job} />;
     default:               return <GenericResult job={job} />;
   }
 }
@@ -175,6 +176,42 @@ function PublishFolderResult({ job }: { job: any }) {
         <div>Branch: <span className="font-mono text-cream-200">{r.branch}</span></div>
         <div>Visibility: <span className={r.public ? "text-flame-400" : "text-leaf-400"}>{r.public ? "public" : "private"}</span></div>
       </div>
+    </Card>
+  );
+}
+
+function GeneralTaskResult({ job }: { job: any }) {
+  const r = job.result ?? {};
+  return (
+    <Card title={r.savedTemplateId ? `Done · saved as template` : "Done"}>
+      <MetaRow job={job} />
+      {r.answer && <div className="prose-vault" dangerouslySetInnerHTML={{ __html: marked.parse(r.answer) as string }} />}
+      {r.savedTemplateId && (
+        <div className="mt-3 text-xs text-leaf-400 bg-leaf-500/10 border border-leaf-500/30 rounded-md px-3 py-2">
+          ✓ Saved this run as a custom template — <span className="font-mono">{r.savedTemplateId}</span> — find it in Templates › Custom for one-click reruns.
+        </div>
+      )}
+      {r.plan?.steps?.length > 0 && (
+        <details className="mt-4">
+          <summary className="text-xs text-cream-300 cursor-pointer hover:text-cream-100">Plan executed ({r.plan.steps.length} step{r.plan.steps.length === 1 ? "" : "s"})</summary>
+          <ol className="mt-2 space-y-1.5 text-xs">
+            {r.plan.steps.map((s: any, i: number) => {
+              const run = r.runs?.[i];
+              return (
+                <li key={i} className="flex items-start gap-2">
+                  <span className={`mt-1 inline-block w-1.5 h-1.5 rounded-full shrink-0 ${run?.ok ? "bg-leaf-500" : run?.error ? "bg-coral-500" : "bg-cream-300/30"}`} />
+                  <div className="flex-1 min-w-0">
+                    <span className="font-mono text-violet-400">{s.tool}</span>
+                    {s.rationale && <span className="text-cream-300/60"> — {s.rationale}</span>}
+                    {run?.error && <div className="text-coral-400 mt-0.5">{run.error}</div>}
+                    {run?.durationMs != null && <span className="text-[10px] text-cream-300/40 ml-2 font-mono">{run.durationMs}ms</span>}
+                  </div>
+                </li>
+              );
+            })}
+          </ol>
+        </details>
+      )}
     </Card>
   );
 }

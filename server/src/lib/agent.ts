@@ -1,0 +1,200 @@
+import { findPrimitive, primitivesPromptCatalog, primitives } from "./primitives.js";
+import { ollamaGenerate } from "./ollama.js";
+
+export type PlanStep = { tool: string; args: Record<string, any>; rationale?: string };
+export type Plan = { steps: PlanStep[]; summary?: string };
+export type StepRun = { step: PlanStep; ok: boolean; result?: any; error?: string; durationMs: number };
+
+export type AgentResult = {
+  task: string;
+  plan: Plan;
+  runs: StepRun[];
+  answer: string;
+  hadWrites: boolean;
+};
+
+const PLAN_SYSTEM = `You are a task planner for clawbot. The user gives a task in plain English; you output ONLY a JSON object describing tool steps. No prose, no markdown fences.
+
+Output schema:
+{"steps":[{"tool":"<tool-name>","args":{<key>:<value>,...},"rationale":"why"}],"summary":"one sentence about the plan"}
+
+Rules:
+- Use ONLY tools from the catalog. Invented tools are an error.
+- Reference an earlier step's output via the literal placeholder "$step_<i>" (0-indexed) optionally with a path. Example: {"path":"$step_0.matches.0.path"}.
+- Keep plans minimal — 1 to 4 steps suits most tasks.
+- Don't write files unless the task explicitly asks for it.
+- If the task can't be fulfilled with the catalog, output {"steps":[]}.
+
+EXAMPLES:
+Task: "find notes about Cognify and tell me what they say"
+Plan:
+{"steps":[
+  {"tool":"vault.search","args":{"query":"Cognify"},"rationale":"find relevant notes"},
+  {"tool":"vault.read","args":{"path":"$step_0.matches.0.path"},"rationale":"read the top match in full"}
+],"summary":"Search for Cognify, read the top match."}
+
+Task: "what's in the README of the clawbot repo"
+Plan:
+{"steps":[
+  {"tool":"github.get_file","args":{"owner":"RUBIEM-DEVELOPERS-REPO","name":"clawbot","path":"README.md"},"rationale":"fetch README"}
+],"summary":"Fetch clawbot README."}
+
+Task: "summarize this URL: https://example.com/post"
+Plan:
+{"steps":[
+  {"tool":"web.fetch","args":{"url":"https://example.com/post"},"rationale":"fetch page"},
+  {"tool":"ollama.generate","args":{"prompt":"Summarize: $step_0.text","system":"Summarize the input concisely."},"rationale":"summarize"}
+],"summary":"Fetch URL, summarize."}
+
+Tool catalog:
+`;
+
+export async function plan(task: string): Promise<Plan> {
+  const sys = PLAN_SYSTEM + primitivesPromptCatalog();
+  const out = await ollamaGenerate(`Task: ${task}`, sys);
+  const json = extractJson(out);
+  if (!json) return { steps: [] };
+  if (!Array.isArray(json.steps)) return { steps: [] };
+  // Validate each step references a real tool
+  const steps: PlanStep[] = [];
+  for (const s of json.steps) {
+    if (!s || typeof s.tool !== "string") continue;
+    if (!findPrimitive(s.tool)) continue;
+    steps.push({ tool: s.tool, args: s.args ?? {}, rationale: s.rationale });
+  }
+  return { steps, summary: typeof json.summary === "string" ? json.summary : undefined };
+}
+
+export async function executePlan(p: Plan, push: (msg: string) => void): Promise<{ runs: StepRun[]; hadWrites: boolean }> {
+  const runs: StepRun[] = [];
+  let hadWrites = false;
+  for (let i = 0; i < p.steps.length; i++) {
+    const step = p.steps[i];
+    const tool = findPrimitive(step.tool)!;
+    if (!tool.readonly) hadWrites = true;
+    const args = resolveArgs(step.args, runs);
+    push(`step ${i + 1}/${p.steps.length}: ${step.tool}(${JSON.stringify(args).slice(0, 120)})`);
+    const t0 = Date.now();
+    try {
+      const result = await tool.handler(args);
+      runs.push({ step, ok: true, result, durationMs: Date.now() - t0 });
+    } catch (e: any) {
+      runs.push({ step, ok: false, error: String(e.message ?? e), durationMs: Date.now() - t0 });
+      push(`  ✗ ${e.message ?? e}`);
+      break;
+    }
+  }
+  return { runs, hadWrites };
+}
+
+export async function planAndExecute(task: string, push: (msg: string) => void, opts: { skipApprovalForReadOnly?: boolean } = {}): Promise<AgentResult> {
+  push(`planning task with local LLM`);
+  const p = await plan(task);
+  if (p.steps.length === 0) {
+    push(`could not plan with available tools — falling back to direct LLM answer`);
+    const reply = await ollamaGenerate(`Task: ${task}\n\nAnswer in 2-3 sentences. If you can't answer, say what context you'd need from the user's vault or GitHub.`);
+    return { task, plan: { steps: [] }, runs: [], answer: reply.trim(), hadWrites: false };
+  }
+  push(`plan: ${p.steps.length} step(s)${p.summary ? ` — ${p.summary}` : ""}`);
+
+  const { runs, hadWrites } = await executePlan(p, push);
+
+  // Synthesize a chat-friendly answer from the step results
+  const synth = await synthesize(task, p, runs);
+  return { task, plan: p, runs, answer: synth, hadWrites };
+  void opts;
+}
+
+async function synthesize(task: string, p: Plan, runs: StepRun[]): Promise<string> {
+  const succeeded = runs.filter(r => r.ok);
+  const failed = runs.filter(r => !r.ok);
+  if (succeeded.length === 0) {
+    return failed.length > 0 ? `I tried, but step ${runs.indexOf(failed[0]) + 1} (${failed[0].step.tool}) failed: ${failed[0].error}` : "I couldn't execute any step.";
+  }
+  const compact = succeeded.map((r, i) => ({ step: i + 1, tool: r.step.tool, result: compactResult(r.result) }));
+  const sys = "You are clawbot. Given a user task and the structured results of the steps you executed to fulfill it, write a concise plain-English answer (under 120 words, markdown allowed) that directly addresses the user's task. Cite specific paths or names from the results. Don't mention the planning machinery — speak as the assistant who did the work.";
+  const prompt = `Task: ${task}\n\nStep results:\n${JSON.stringify(compact, null, 2)}\n\nAnswer:`;
+  try { return (await ollamaGenerate(prompt, sys)).trim(); }
+  catch { return fallbackSynthesis(p, runs); }
+}
+
+function compactResult(r: any): any {
+  if (!r) return r;
+  if (typeof r === "string") return r.slice(0, 800);
+  if (Array.isArray(r)) return r.slice(0, 10);
+  if (typeof r === "object") {
+    const out: Record<string, any> = {};
+    for (const [k, v] of Object.entries(r)) {
+      if (Array.isArray(v)) out[k] = v.slice(0, 10);
+      else if (typeof v === "string") out[k] = v.slice(0, 1500);
+      else out[k] = v;
+    }
+    return out;
+  }
+  return r;
+}
+
+function fallbackSynthesis(p: Plan, runs: StepRun[]): string {
+  const ok = runs.filter(r => r.ok).length;
+  return `Ran ${ok}/${p.steps.length} step(s): ${p.steps.map(s => s.tool).join(" → ")}.`;
+}
+
+// Resolve $step_N or $step_N.path.to.value references in args
+function resolveArgs(args: Record<string, any>, runs: StepRun[]): Record<string, any> {
+  const resolved: Record<string, any> = {};
+  for (const [k, v] of Object.entries(args ?? {})) resolved[k] = resolveValue(v, runs);
+  return resolved;
+}
+
+function resolveValue(v: any, runs: StepRun[]): any {
+  if (typeof v !== "string") return v;
+  // Whole-string reference: "$step_2" or "$step_2.field.0.x"
+  const whole = v.match(/^\$step_(\d+)(\..+)?$/);
+  if (whole) {
+    const idx = Number(whole[1]);
+    const path = whole[2] ?? "";
+    const base = runs[idx]?.result;
+    if (base === undefined) return v;
+    return path ? deepGet(base, path) : base;
+  }
+  // Embedded $step_N inside a longer string
+  return v.replace(/\$step_(\d+)(\.[a-zA-Z0-9_.-]+)?/g, (_, n, p) => {
+    const base = runs[Number(n)]?.result;
+    if (base === undefined) return "";
+    const target = p ? deepGet(base, p) : base;
+    return typeof target === "string" ? target : JSON.stringify(target).slice(0, 4000);
+  });
+}
+
+function deepGet(obj: any, path: string): any {
+  const parts = path.replace(/^\./, "").split(".");
+  let cur = obj;
+  for (const part of parts) {
+    if (cur === null || cur === undefined) return undefined;
+    cur = cur[/^\d+$/.test(part) ? Number(part) : part];
+  }
+  return cur;
+}
+
+function extractJson(s: string): any {
+  // Strip code fences if present
+  const fenced = s.match(/```(?:json)?\s*([\s\S]+?)```/);
+  const raw = fenced ? fenced[1] : s;
+  // Find first {...} balanced enough to parse
+  const open = raw.indexOf("{");
+  if (open === -1) return null;
+  let depth = 0;
+  for (let i = open; i < raw.length; i++) {
+    if (raw[i] === "{") depth++;
+    else if (raw[i] === "}") {
+      depth--;
+      if (depth === 0) {
+        const slice = raw.slice(open, i + 1);
+        try { return JSON.parse(slice); } catch { return null; }
+      }
+    }
+  }
+  return null;
+}
+
+void primitives;

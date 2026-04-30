@@ -9,13 +9,22 @@ import { dispatchWorkflow, recentCommits, openPRs, openIssues, readme, octokit }
 import { writeVaultFile, commitAndPush, searchVault } from "../lib/vault.js";
 import { ollamaGenerate } from "../lib/ollama.js";
 import { syncDownloads } from "../lib/sync-downloads.js";
+import { planAndExecute, executePlan } from "../lib/agent.js";
+import { loadCustomTemplates, saveCustomTemplate, findCustomTemplate, bumpRunCount, slugify, type CustomTemplate } from "../lib/custom-templates.js";
 
 export const templatesRouter = Router();
 
 const NEEDS_GITHUB = new Set(["summarize-repo", "run-digest", "publish-folder"]);
 
 templatesRouter.get("/", (_req, res) => {
-  res.json({ roles, templates });
+  const custom = loadCustomTemplates().map(c => ({
+    id: c.id, role: "Custom" as const, title: c.title, description: c.description,
+    icon: "saved", agent: "clawbot",
+    inputs: [], requiresApproval: false, estimateSeconds: 30,
+    runCount: c.runCount, lastRunAt: c.lastRunAt,
+  }));
+  const allRoles = roles.map(r => r.id === "Custom" ? { ...r, count: custom.length } : r);
+  res.json({ roles: allRoles, templates: [...templates, ...custom] });
 });
 
 templatesRouter.get("/jobs", (_req, res) => res.json({ jobs: listJobs() }));
@@ -27,7 +36,14 @@ templatesRouter.get("/jobs/:id", (req, res) => {
 });
 
 templatesRouter.post("/run/:id", async (req, res) => {
-  const tpl = templates.find(t => t.id === req.params.id);
+  let tpl = templates.find(t => t.id === req.params.id);
+  let custom: CustomTemplate | undefined;
+  if (!tpl) {
+    custom = findCustomTemplate(req.params.id);
+    if (custom) {
+      tpl = { id: custom.id, role: "Insights", title: custom.title, description: custom.description, icon: "saved", agent: "clawbot", inputs: [], requiresApproval: false, estimateSeconds: 30 } as Template;
+    }
+  }
   if (!tpl) return res.status(404).json({ error: "template not found" });
   const inputs = (req.body ?? {}) as Record<string, unknown>;
 
@@ -53,7 +69,14 @@ templatesRouter.post("/run/:id", async (req, res) => {
   }
 
   res.json({ jobId: job.id, requiresApproval: false, status: "queued" });
-  void runJob(job, async (push) => runner(tpl.id, inputs, push));
+  void runJob(job, async (push) => {
+    if (custom) {
+      bumpRunCount(custom.id);
+      const { runs } = await executePlan(custom.plan, push);
+      return { fromCustom: custom.id, runs };
+    }
+    return runner(tpl.id, inputs, push);
+  });
 });
 
 templatesRouter.post("/jobs/:id/approve", async (req, res) => {
@@ -125,6 +148,7 @@ async function runner(templateId: string, inputs: Record<string, unknown>, push:
     case "add-note":       return addNoteRunner(inputs, push);
     case "browse-vault":   return { redirect: "/knowledge" };
     case "sync-downloads": return syncDownloadsRunner(inputs, push);
+    case "general-task":   return generalTaskRunner(inputs, push);
     default: throw new Error(`no runner for ${templateId}`);
   }
 }
@@ -236,6 +260,46 @@ async function addNoteRunner(inputs: Record<string, unknown>, push: (m: string) 
   push("committing vault");
   const r = await commitAndPush(`note: ${title}`);
   return { path: rel, ...r };
+}
+
+async function generalTaskRunner(inputs: Record<string, unknown>, push: (m: string) => void) {
+  const task = String(inputs.task ?? "").trim();
+  if (!task) throw new Error("missing 'task' input");
+  const saveAs = inputs.save_as_template !== false;
+  const r = await planAndExecute(task, push);
+
+  // If the agent wrote anything to the vault, also commit + push
+  if (r.hadWrites) {
+    push("agent wrote to vault — committing");
+    try {
+      const c = await commitAndPush(`clawbot: agent task — ${task.slice(0, 60)}`);
+      push(`vault commit: ${JSON.stringify(c)}`);
+    } catch (e: any) { push(`commit failed (non-fatal): ${e.message ?? e}`); }
+  }
+
+  let savedTemplateId: string | undefined;
+  const allOk = r.runs.length > 0 && r.runs.every(x => x.ok);
+  if (saveAs && allOk && r.plan.steps.length > 0) {
+    const id = `custom-${slugify(task)}`;
+    const tpl: CustomTemplate = {
+      id, role: "Custom",
+      title: r.plan.summary || task.slice(0, 80),
+      description: `Saved from chat: "${task}"`,
+      origin: { task, createdAt: new Date().toISOString() },
+      plan: r.plan,
+      runCount: 1, lastRunAt: new Date().toISOString(),
+    };
+    saveCustomTemplate(tpl);
+    savedTemplateId = id;
+    push(`saved as template: ${id}`);
+  }
+
+  return {
+    answer: r.answer,
+    plan: r.plan,
+    runs: r.runs.map(x => ({ tool: x.step.tool, ok: x.ok, durationMs: x.durationMs, error: x.error })),
+    savedTemplateId,
+  };
 }
 
 async function syncDownloadsRunner(inputs: Record<string, unknown>, push: (m: string) => void) {
