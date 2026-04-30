@@ -9,15 +9,21 @@ export const chatRouter = Router();
 
 type ChatMessage = { role: "user" | "assistant" | "system"; content: string; jobId?: string; templateId?: string };
 
-const ACTION_KEYWORDS: Record<string, string> = {
-  summarize: "summarize-repo", "summary of": "summarize-repo", "summarise": "summarize-repo",
-  digest: "run-digest", "daily digest": "run-digest",
-  publish: "publish-folder", "push to github": "publish-folder",
-  search: "search-brain", "find in": "search-brain", "look up": "search-brain",
-  "add note": "add-note", "save a note": "add-note", "note that": "add-note",
-  "sync downloads": "sync-downloads", "mirror downloads": "sync-downloads", "copy my downloads": "sync-downloads",
-  "browse vault": "browse-vault", "open vault": "browse-vault",
-};
+// Regex-based action routing. More forgiving than substring matching — handles
+// articles ("add a note"), question-style ("can you summarize…"), and synonyms.
+const ACTION_PATTERNS: { re: RegExp; templateId: string }[] = [
+  { re: /\b(?:sync|mirror|copy|pull)\s+(?:my\s+)?downloads?\b/i, templateId: "sync-downloads" },
+  { re: /\b(?:add|save|capture|create|drop|jot(?:\s+down)?|note)\s+(?:a\s+|an\s+|the\s+|new\s+)?note\b/i, templateId: "add-note" },
+  { re: /^\s*note\s+that\b/i, templateId: "add-note" },
+  { re: /\b(?:run|trigger|kick\s+off|start|do)\s+(?:the\s+)?(?:daily\s+)?digest\b/i, templateId: "run-digest" },
+  { re: /\bdigest(?:\s+(?:scan|run))?\s+(?:my\s+)?(?:repos?|projects?|github)/i, templateId: "run-digest" },
+  { re: /\b(?:summari[sz]e|summary\s+of|recap|tldr|brief\s+me\s+on)\s+/i, templateId: "summarize-repo" },
+  { re: /\b(?:publish|push|upload|create\s+(?:a\s+)?repo\s+from)\s+(?:the\s+)?folder\b/i, templateId: "publish-folder" },
+  { re: /\b(?:publish|upload)\s+["'`]?[a-zA-Z]:[\\/]/i, templateId: "publish-folder" },
+  { re: /\b(?:search|find|look\s*up|look\s+for|hunt|grep)\s+(?:my\s+|the\s+)?(?:notes?|vault|brain|knowledge|second\s+brain)\b/i, templateId: "search-brain" },
+  { re: /\b(?:what\s+do\s+I\s+know\s+about|do\s+I\s+have\s+(?:any\s+)?notes?\s+(?:about|on))\b/i, templateId: "search-brain" },
+  { re: /\b(?:browse|open|show)\s+(?:my\s+)?vault\b/i, templateId: "browse-vault" },
+];
 
 chatRouter.post("/", async (req, res) => {
   const messages = (req.body?.messages ?? []) as ChatMessage[];
@@ -25,12 +31,11 @@ chatRouter.post("/", async (req, res) => {
   const last = messages[messages.length - 1];
   if (last.role !== "user" || !last.content?.trim()) return res.status(400).json({ error: "last message must be a non-empty user turn" });
   const text = last.content.trim();
-  const lower = text.toLowerCase();
 
-  // 1. Try keyword routing — fastest, deterministic
+  // 1. Try regex-based action routing — fastest, deterministic
   let templateId: string | null = null;
-  for (const [kw, id] of Object.entries(ACTION_KEYWORDS)) {
-    if (lower.includes(kw)) { templateId = id; break; }
+  for (const p of ACTION_PATTERNS) {
+    if (p.re.test(text)) { templateId = p.templateId; break; }
   }
 
   // 2. If keyword routing matched and inputs can be inferred, run the task
@@ -118,12 +123,15 @@ function inferInputs(templateId: string, text: string): Record<string, any> {
     const m = text.match(/(\d+)\s*days?/);
     out.lookbackDays = m ? Number(m[1]) : 7;
   } else if (templateId === "add-note") {
-    // "add a note: <title>" or "note that <body>"
-    const m = text.match(/(?:add(?:\s+a)?\s+note(?::|\s+saying|\s+about)?\s*(.+))/i);
-    if (m) {
-      const rest = m[1].trim();
-      const parts = rest.split(/[—:]\s*/);
-      if (parts.length >= 2) { out.title = parts[0]; out.body = parts.slice(1).join(": "); }
+    // "add (a) note: <title> — <body>", "note that <body>", "save a note about <body>"
+    let rest = "";
+    let m = text.match(/(?:add|save|capture|create|drop|jot(?:\s+down)?)\s+(?:a\s+|an\s+|the\s+|new\s+)?note(?:\s+(?:that|saying|about|titled|on|for|re))?\s*[:\-—]?\s*(.+)/i);
+    if (m) rest = m[1].trim();
+    if (!rest) { m = text.match(/^\s*note\s+that\s+(.+)/i); if (m) rest = m[1].trim(); }
+    if (rest) {
+      // Split title/body on first " — " or " - " or ": "
+      const split = rest.match(/^(.+?)\s+[—\-:]\s+(.+)$/);
+      if (split) { out.title = split[1].trim(); out.body = split[2].trim(); }
       else { out.title = rest.slice(0, 80); out.body = rest; }
     }
   } else if (templateId === "publish-folder") {

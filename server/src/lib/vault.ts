@@ -53,17 +53,40 @@ export async function commitAndPush(message: string) {
   }
   await git.commit(message);
 
-  // Try push; on stale-ref, do a rebase with both tracked AND untracked files stashed, then retry.
+  // Time-box the push. Vault repos with large pack history can stall HTTP push
+  // for minutes before timing out — that hangs every clawbot task. We bound at
+  // 15s; if we can't push in that window, return success-with-deferred and let
+  // the user resolve the sync separately (the local commit is already durable).
+  const PUSH_TIMEOUT_MS = 15_000;
+
+  let pushErr: any = null;
   try {
-    await git.push("origin", "HEAD");
+    await raceTimeout(git.push("origin", "HEAD"), PUSH_TIMEOUT_MS, "push timeout");
     return { committed: true, pushed: true };
   } catch (e: any) {
+    pushErr = e;
     const msg = String(e.message ?? e);
+    if (msg === "push timeout") {
+      return { committed: true, pushed: false, error: "push exceeded 15s; commit is local-only — fix vault.git size or sync manually" };
+    }
     if (!/rejected|fetch first|non-fast-forward|fast-forward/i.test(msg)) {
       return { committed: true, pushed: false, error: msg };
     }
-    return rebaseWithSidesteppedConflicts(git, msg);
   }
+
+  // Stale-ref recovery path also bounded.
+  try {
+    return await raceTimeout(rebaseWithSidesteppedConflicts(git, String(pushErr.message ?? pushErr)), PUSH_TIMEOUT_MS * 2, "rebase timeout");
+  } catch (e: any) {
+    return { committed: true, pushed: false, error: String(e.message ?? e) };
+  }
+}
+
+function raceTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  return Promise.race<T>([
+    p,
+    new Promise<T>((_, reject) => setTimeout(() => reject(new Error(label)), ms)),
+  ]);
 }
 
 // Pull --rebase, but if it fails because untracked-and-gitignored files would be overwritten by an
