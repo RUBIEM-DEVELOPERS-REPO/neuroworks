@@ -111,6 +111,11 @@ function keywordMatch(text: string): Template | null {
   return best && best.s > 0 ? best.t : null;
 }
 
+// Exported for chat router (avoids circular re-fetch)
+export async function runFromChat(templateId: string, inputs: Record<string, unknown>, push: (m: string) => void) {
+  return runner(templateId, inputs, push);
+}
+
 async function runner(templateId: string, inputs: Record<string, unknown>, push: (m: string) => void): Promise<unknown> {
   switch (templateId) {
     case "summarize-repo": return summarizeRepoRunner(inputs, push);

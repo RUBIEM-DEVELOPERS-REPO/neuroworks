@@ -5,6 +5,7 @@ import { api } from "../lib/api";
 
 const primaryNav = [
   { to: "/dashboard", label: "Dashboard", icon: "◉" },
+  { to: "/chat", label: "Chat", icon: "◌" },
   { to: "/tasks", label: "Tasks", icon: "▤" },
   { to: "/approvals", label: "Approvals", icon: "✓", badgeKey: "approvals" },
   { to: "/activity", label: "Activity", icon: "≋", badgeKey: "activity" },
@@ -49,8 +50,8 @@ export function Layout({ children }: { children: ReactNode }) {
         </div>
 
         <div className="px-3 pb-3">
-          <Link to="/dashboard?new=1" className="w-full flex items-center justify-center gap-1.5 bg-ink-800 hover:bg-ink-700 border border-ink-700 hover:border-flame-500/40 rounded-md py-2 text-sm text-cream-100 transition-colors">
-            <span className="text-flame-400">+</span> New task
+          <Link to="/chat" className="w-full flex items-center justify-center gap-1.5 bg-ink-800 hover:bg-ink-700 border border-ink-700 hover:border-violet-500/40 rounded-md py-2 text-sm text-cream-100 transition-colors">
+            <span className="text-violet-400">+</span> New chat
           </Link>
         </div>
 

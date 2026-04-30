@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { api } from "../lib/api";
 import { Card } from "../components/Card";
+import { ResultPanel } from "../components/ResultPanel";
 
 export function Tasks() {
   const [params, setParams] = useSearchParams();
@@ -55,25 +56,7 @@ export function Tasks() {
         </div>
 
         <div className="col-span-1">
-          {focused ? (
-            <Card title={focused.title ?? focused.kind}>
-              <div className="text-xs text-cream-300/70 mb-3">
-                <div>Status: <span className={focused.status === "succeeded" ? "text-leaf-400" : focused.status === "failed" ? "text-coral-400" : "text-flame-400"}>{focused.status}</span></div>
-                <div>Started: {new Date(focused.startedAt).toLocaleString()}</div>
-                {focused.finishedAt && <div>Finished: {new Date(focused.finishedAt).toLocaleString()}</div>}
-              </div>
-              <div className="bg-ink-950 border border-ink-800 rounded-md p-3 max-h-72 overflow-auto scrollbar-thin">
-                <pre className="text-[11px] font-mono text-cream-200 whitespace-pre-wrap">{focused.log.join("\n")}</pre>
-              </div>
-              {focused.error && <div className="text-xs text-coral-400 mt-3">{focused.error}</div>}
-              {focused.result && (
-                <details className="mt-3">
-                  <summary className="text-xs text-cream-300 cursor-pointer hover:text-cream-100">Result</summary>
-                  <pre className="text-[11px] font-mono text-cream-200 mt-2 bg-ink-950 border border-ink-800 rounded p-3 overflow-auto scrollbar-thin">{JSON.stringify(focused.result, null, 2)}</pre>
-                </details>
-              )}
-            </Card>
-          ) : (
+          {focused ? <ResultPanel job={focused} /> : (
             <Card><div className="text-sm text-cream-300/60 text-center py-8">Pick a task to inspect it.</div></Card>
           )}
         </div>

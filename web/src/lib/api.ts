@@ -37,4 +37,5 @@ export const api = {
   brainSearch: (q: string) => req<{ q: string; results: { path: string; line: number; preview: string }[] }>(`/api/brain/search?q=${encodeURIComponent(q)}`),
   brainLatestDigest: () => req<{ content: string }>("/api/brain/digest/latest"),
   triggerDigest: (lookbackDays = 7) => req<{ jobId: string }>("/api/tasks/digest", { method: "POST", body: JSON.stringify({ lookbackDays: String(lookbackDays) }) }),
+  chat: (messages: { role: "user" | "assistant" | "system"; content: string }[]) => req<{ kind: "message" | "task"; text: string; jobId?: string; templateId?: string; requiresApproval?: boolean; brainHits?: { path: string; line: number; preview: string }[] }>("/api/chat", { method: "POST", body: JSON.stringify({ messages }) }),
 };

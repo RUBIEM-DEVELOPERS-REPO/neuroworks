@@ -8,6 +8,7 @@ import { Activity } from "./pages/Activity";
 import { Knowledge } from "./pages/Knowledge";
 import { Admin } from "./pages/Admin";
 import { Settings } from "./pages/Settings";
+import { Chat } from "./pages/Chat";
 
 export default function App() {
   return (
@@ -15,6 +16,7 @@ export default function App() {
       <Routes>
         <Route path="/" element={<Navigate to="/dashboard" />} />
         <Route path="/dashboard" element={<Dashboard />} />
+        <Route path="/chat" element={<Chat />} />
         <Route path="/tasks" element={<Tasks />} />
         <Route path="/templates" element={<Templates />} />
         <Route path="/approvals" element={<Approvals />} />
