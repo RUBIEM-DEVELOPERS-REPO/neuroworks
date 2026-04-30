@@ -8,3 +8,6 @@ dist/
 # Vite
 web/dist/
 .DS_Store
+
+# NeuroWorks runtime state (custom templates, future caches) — per-machine
+.neuroworks/
