@@ -183,6 +183,27 @@ function InlineJob({ jobId, requiresApproval, templateId }: { jobId: string; req
 
   const isPending = job.status === "running" || job.status === "pending";
   const status = isPending ? "running" : job.status;
+  const r = job.result ?? {};
+  const phase = r.phase as string | undefined;
+  const runs = (r.runs ?? []) as any[];
+  const totalSteps = r.plan?.steps?.length ?? 0;
+  const doneCount = runs.filter(x => x?.ok === true).length;
+  const inflightCount = runs.filter(x => x && x.startedAt && x.ok === false && !x.error).length;
+
+  const friendlyLabel = (() => {
+    if (status === "succeeded") return r.savedTemplateId ? "Done · saved as a shortcut" : "Done";
+    if (status === "failed") return "Hit a snag";
+    if (status === "rejected") return "Rejected";
+    if (status === "awaiting-approval") return "Waiting for your approval";
+    if (phase === "planning") return "Working out a plan";
+    if (phase === "executing") {
+      if (inflightCount > 1) return `${inflightCount} sub-agents working together`;
+      if (totalSteps > 0) return `Working on it · ${doneCount}/${totalSteps}`;
+      return "Working on it";
+    }
+    if (phase === "synthesizing") return "Writing your answer";
+    return "Working on it";
+  })();
 
   return (
     <div className="space-y-2">
@@ -198,9 +219,9 @@ function InlineJob({ jobId, requiresApproval, templateId }: { jobId: string; req
           status === "awaiting-approval" ? "bg-flame-500" :
           "bg-violet-500 animate-pulse"
         }`} />
-        {status} · <span className="font-mono">{templateId ?? job.template}</span>
+        {friendlyLabel}
         {requiresApproval && status === "awaiting-approval" && <Link to="/approvals" className="ml-1 underline">approve →</Link>}
-        {!isPending && <Link to={`/tasks?focus=${jobId}`} className="ml-1 underline opacity-70 hover:opacity-100">open in Tasks</Link>}
+        {!isPending && <Link to={`/tasks?focus=${jobId}`} className="ml-1 underline opacity-70 hover:opacity-100">view full report</Link>}
       </div>
       {(job.template === "general-task" || (job.template ?? "").startsWith("custom-")) && job.result?.plan && (
         <ResultPanel job={job} />

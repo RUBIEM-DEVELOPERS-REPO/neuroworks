@@ -271,3 +271,30 @@ export function primitivesPromptCatalog(): string {
 
 // Suppress unused warning while config import is preserved for future authentication-aware primitives.
 void config;
+
+// Plain-English label for a step, used in the chat UI so users see
+// "Searching your second brain for 'X'" instead of `vault.search(query="X")`.
+export function humanStepLabel(tool: string, args: Record<string, any> = {}): string {
+  const a = args ?? {};
+  const s = (k: string) => (typeof a[k] === "string" ? a[k] : "");
+  switch (tool) {
+    case "vault.search":       return s("query") ? `Searching your second brain for "${s("query")}"` : "Searching your second brain";
+    case "vault.read":         return s("path") ? `Reading note ${s("path")}` : "Reading a note";
+    case "vault.list":         return s("path") ? `Listing ${s("path")}` : "Listing your vault";
+    case "vault.write":        return s("path") ? `Writing ${s("path")}` : "Writing a note";
+    case "vault.append":       return s("path") ? `Adding to ${s("path")}` : "Adding to a note";
+    case "vault.create_zettel":return s("title") ? `Creating zettel "${s("title")}"` : "Creating a zettel";
+    case "vault.find_by_tag":  return s("tag") ? `Finding notes tagged #${s("tag")}` : "Finding tagged notes";
+    case "github.list_repos":  return "Listing your GitHub repos";
+    case "github.read_repo":   return s("name") ? `Reading the ${s("name")} repo` : "Reading a GitHub repo";
+    case "github.list_branches":return s("name") ? `Listing branches in ${s("name")}` : "Listing branches";
+    case "github.get_file":    return s("path") && s("name") ? `Fetching ${s("path")} from ${s("name")}` : "Fetching a file from GitHub";
+    case "github.create_issue":return s("title") ? `Opening issue "${s("title")}"` : "Opening a GitHub issue";
+    case "ollama.generate":    return "Thinking about it";
+    case "web.fetch":          return s("url") ? `Reading ${s("url")}` : "Reading a webpage";
+    case "fs.list_external":   return s("path") ? `Looking inside ${s("path")}` : "Browsing your files";
+    case "fs.read_external":   return s("path") ? `Reading ${s("path")}` : "Reading a file";
+    case "clock.now":          return "Checking the clock";
+    default:                   return tool;
+  }
+}

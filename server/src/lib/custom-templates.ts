@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Plan } from "./agent.js";
+import { journal } from "./journal.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // Persist outside the vault and outside the source tree — survives reinstalls.
@@ -37,6 +38,23 @@ export function saveCustomTemplate(t: CustomTemplate): void {
   if (existing >= 0) all[existing] = t;
   else all.push(t);
   persist(all);
+  void journal({
+    kind: "template",
+    slug: t.id,
+    title: `${t.title} (${t.id})`,
+    frontmatter: { templateId: t.id, role: t.role, originTask: t.origin.task },
+    body: [
+      `${t.description}`,
+      "",
+      `**Origin task:** ${t.origin.task}`,
+      "",
+      `## Saved plan`,
+      "",
+      "```json",
+      JSON.stringify(t.plan, null, 2),
+      "```",
+    ].join("\n"),
+  });
 }
 
 export function bumpRunCount(id: string): void {

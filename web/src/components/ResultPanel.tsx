@@ -184,57 +184,95 @@ function GeneralTaskResult({ job, live = false }: { job: any; live?: boolean }) 
   const r = job.result ?? {};
   const phase = r.phase as string | undefined;
   const running = job.status === "running" || job.status === "pending";
+  const steps: any[] = r.plan?.steps ?? [];
+  const runs: any[] = r.runs ?? [];
+  const totalSteps = steps.length;
+  const doneCount = runs.filter(x => x?.ok === true).length;
+  const inflightCount = runs.filter(x => x && x.startedAt && x.ok === false && !x.error).length;
   const title = running
-    ? (phase === "planning" ? "Planning…" : phase === "executing" ? "Executing plan…" : phase === "synthesizing" ? "Writing answer…" : "Working…")
-    : (r.savedTemplateId ? "Done · saved as template" : "Done");
+    ? (phase === "planning"
+        ? "Working out a plan…"
+        : phase === "executing"
+          ? (inflightCount > 1 ? `${inflightCount} sub-agents working in parallel` : "Working on the steps…")
+          : phase === "synthesizing"
+            ? "Writing your answer…"
+            : "Working…")
+    : (r.savedTemplateId ? "Done · saved as a shortcut" : "Done");
+
+  // Group steps into "waves" so concurrent sub-agents render as a single row
+  const waves: number[][] = (r.plan?.waves && r.plan.waves.length > 0)
+    ? r.plan.waves
+    : steps.map((_, i) => [i]);
 
   return (
     <Card title={title}>
       {!live && <MetaRow job={job} />}
       {r.plan?.summary && (
         <div className="text-sm text-cream-200 mb-3">
-          <span className="text-[10px] uppercase tracking-wider text-cream-300/50 mr-2">Plan</span>
+          <span className="text-[10px] uppercase tracking-wider text-cream-300/50 mr-2">Game plan</span>
           {r.plan.summary}
         </div>
       )}
-      {r.plan?.steps?.length > 0 && (
-        <ol className="space-y-2 text-sm mb-4">
-          {r.plan.steps.map((s: any, i: number) => {
-            const run = r.runs?.[i];
-            const isPending = !run;
-            const isRunning = run && run.ok === false && !run.error;
-            const isDone = run && run.ok === true;
-            const isFailed = run && run.error;
-            const dot = isDone ? "bg-leaf-500" : isFailed ? "bg-coral-500" : isRunning ? "bg-violet-500 animate-pulse" : "bg-cream-300/30";
-            return (
-              <li key={i} className="flex items-start gap-3">
-                <span className="flex flex-col items-center mt-1">
-                  <span className={`inline-block w-2 h-2 rounded-full ${dot}`} />
-                  {i < r.plan.steps.length - 1 && <span className="w-px h-7 bg-ink-700 mt-1" />}
-                </span>
-                <div className="flex-1 min-w-0 pb-2">
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <span className="text-[10px] uppercase tracking-wider text-cream-300/50">step {i + 1}</span>
-                    <span className="font-mono text-violet-400 text-sm">{s.tool}</span>
-                    {isRunning && <span className="text-[10px] text-violet-400">running…</span>}
-                    {isDone && run.durationMs != null && <span className="text-[10px] text-cream-300/40 font-mono">{run.durationMs}ms</span>}
-                    {isPending && <span className="text-[10px] text-cream-300/40">queued</span>}
-                  </div>
-                  {s.rationale && <div className="text-xs text-cream-300/70 mt-0.5">{s.rationale}</div>}
-                  {Object.keys(s.args ?? {}).length > 0 && (
-                    <div className="text-[11px] text-cream-300/50 font-mono mt-1 truncate">
-                      {Object.entries(s.args).map(([k, v]) => `${k}=${typeof v === "string" ? '"' + String(v).slice(0, 60) + '"' : JSON.stringify(v).slice(0, 60)}`).join("  ")}
+      {totalSteps > 0 && (
+        <>
+          <div className="text-[11px] text-cream-300/60 mb-3">
+            {running
+              ? <>Tasks · <span className="text-cream-100">{doneCount}</span> of <span className="text-cream-100">{totalSteps}</span> done{inflightCount > 1 && <> · <span className="text-violet-400">{inflightCount} running together</span></>}</>
+              : <>{totalSteps} {totalSteps === 1 ? "task" : "tasks"} completed</>}
+          </div>
+          <ol className="space-y-3 text-sm mb-4">
+            {waves.map((ids, w) => {
+              const isParallel = ids.length > 1;
+              return (
+                <li key={w}>
+                  {isParallel && (
+                    <div className="text-[10px] uppercase tracking-wider text-cream-300/50 mb-1.5 flex items-center gap-2">
+                      <span className="inline-block w-1 h-3 bg-violet-500/70 rounded-sm" />
+                      Sub-agents working together · {ids.length}
                     </div>
                   )}
-                  {isFailed && <div className="text-xs text-coral-400 mt-1">✗ {run.error}</div>}
-                </div>
-              </li>
-            );
-          })}
-        </ol>
+                  <div className={isParallel ? "border-l-2 border-violet-500/30 pl-3 space-y-2" : "space-y-2"}>
+                    {ids.map((i) => {
+                      const s = steps[i];
+                      if (!s) return null;
+                      const run = runs[i];
+                      const inflight = run?.startedAt && run.ok === false && !run.error;
+                      const isDone = run?.ok === true;
+                      const isFailed = !!run?.error;
+                      const isPending = !inflight && !isDone && !isFailed;
+                      const dot = isDone ? "bg-leaf-500" : isFailed ? "bg-coral-500" : inflight ? "bg-violet-500 animate-pulse" : "bg-cream-300/30";
+                      const label = s.label || s.rationale || s.tool;
+                      return (
+                        <div key={i} className="flex items-start gap-3">
+                          <span className={`inline-block w-2 h-2 rounded-full mt-2 flex-shrink-0 ${dot}`} />
+                          <div className="flex-1 min-w-0 pb-1">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className="text-cream-100">{label}</span>
+                              {inflight && <span className="text-[10px] text-violet-400">working…</span>}
+                              {isDone && run.durationMs != null && <span className="text-[10px] text-cream-300/40">{(run.durationMs / 1000).toFixed(1)}s</span>}
+                              {isPending && <span className="text-[10px] text-cream-300/40">up next</span>}
+                            </div>
+                            {s.rationale && s.rationale !== label && <div className="text-xs text-cream-300/60 mt-0.5">{s.rationale}</div>}
+                            {isFailed && <div className="text-xs text-coral-400 mt-1">✗ {run.error}</div>}
+                            <details className="mt-1">
+                              <summary className="text-[10px] text-cream-300/40 hover:text-cream-300/70 cursor-pointer select-none">technical detail</summary>
+                              <div className="text-[11px] text-cream-300/60 font-mono mt-1 truncate">
+                                {s.tool}({Object.entries(s.args ?? {}).map(([k, v]) => `${k}=${typeof v === "string" ? '"' + String(v).slice(0, 60) + '"' : JSON.stringify(v).slice(0, 60)}`).join(", ")})
+                              </div>
+                            </details>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </li>
+              );
+            })}
+          </ol>
+        </>
       )}
-      {r.plan && r.plan.steps?.length === 0 && phase === "answering" && (
-        <div className="text-xs text-cream-300/60 italic">Couldn't plan with the available tools — answering directly.</div>
+      {r.plan && totalSteps === 0 && phase === "answering" && (
+        <div className="text-xs text-cream-300/60 italic">No tools needed for this — just answering directly.</div>
       )}
       {r.answer && (
         <div className="mt-2 pt-3 border-t border-ink-800">
@@ -244,7 +282,7 @@ function GeneralTaskResult({ job, live = false }: { job: any; live?: boolean }) 
       )}
       {r.savedTemplateId && (
         <div className="mt-3 text-xs text-leaf-400 bg-leaf-500/10 border border-leaf-500/30 rounded-md px-3 py-2">
-          ✓ Saved this run as a custom template — <span className="font-mono">{r.savedTemplateId}</span> — find it in Templates › Custom for one-click reruns.
+          ✓ Saved as a one-click shortcut — find it in Templates › Custom.
         </div>
       )}
     </Card>

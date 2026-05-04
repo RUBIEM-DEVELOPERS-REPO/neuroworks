@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { addPersona, deletePersona, extractPersonaMetadata, getActivePersona, loadPersonas, setActivePersona, slugifyId, type Persona } from "../lib/personas.js";
+import { journal } from "../lib/journal.js";
 
 export const personasRouter = Router();
 
@@ -29,6 +30,19 @@ personasRouter.post("/", async (req, res) => {
     createdAt: new Date().toISOString(),
   };
   addPersona(persona);
+  void journal({
+    kind: "persona",
+    slug: persona.id,
+    title: `${persona.name} — ${persona.role}`,
+    frontmatter: { personaId: persona.id, role: persona.role, tone: persona.tone },
+    body: [
+      `**Role:** ${persona.role}`,
+      persona.description ? `\n${persona.description}\n` : "",
+      `**Tone:** ${persona.tone}`,
+      persona.responsibilities.length ? `\n## Responsibilities\n${persona.responsibilities.map(r => `- ${r}`).join("\n")}\n` : "",
+      `## Job description (raw)\n\n${persona.jobDescription}`,
+    ].join("\n"),
+  });
   res.json({ persona });
 });
 

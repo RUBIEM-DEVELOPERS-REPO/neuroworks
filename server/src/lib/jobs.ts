@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { journal } from "./journal.js";
 
 export type Job = {
   id: string;
@@ -55,5 +56,79 @@ export async function runJob<T>(j: Job, fn: (push: (msg: string) => void, progre
     push(`error: ${j.error}`);
   } finally {
     j.finishedAt = new Date().toISOString();
+    // Mirror the job into the vault so every task NeuroWorks runs is in the
+    // second brain. Don't await — never block the response on vault I/O.
+    void journalJob(j);
   }
+}
+
+async function journalJob(j: Job) {
+  try {
+    const r: any = j.result ?? {};
+    const lines: string[] = [];
+    lines.push(`- **Status:** ${j.status}`);
+    lines.push(`- **Template:** ${j.template ?? j.kind}`);
+    lines.push(`- **Started:** ${j.startedAt}`);
+    if (j.finishedAt) lines.push(`- **Finished:** ${j.finishedAt}`);
+    if (j.title) lines.push(`- **Title:** ${j.title}`);
+    if (j.inputs && Object.keys(j.inputs).length > 0) {
+      lines.push("");
+      lines.push("## Inputs");
+      lines.push("```json");
+      lines.push(JSON.stringify(j.inputs, null, 2));
+      lines.push("```");
+    }
+    if (r.plan?.summary) {
+      lines.push("");
+      lines.push("## Plan");
+      lines.push(r.plan.summary);
+    }
+    if (Array.isArray(r.plan?.steps) && r.plan.steps.length > 0) {
+      lines.push("");
+      lines.push("### Steps");
+      for (let i = 0; i < r.plan.steps.length; i++) {
+        const s = r.plan.steps[i];
+        const run = r.runs?.[i];
+        const mark = run?.ok ? "✓" : run?.error ? "✗" : "·";
+        lines.push(`${i + 1}. ${mark} ${s.label ?? s.tool} — \`${s.tool}\`${run?.durationMs != null ? ` (${(run.durationMs / 1000).toFixed(1)}s)` : ""}`);
+        if (s.rationale) lines.push(`    > ${s.rationale}`);
+        if (run?.error) lines.push(`    error: ${run.error}`);
+      }
+    }
+    if (typeof r.answer === "string" && r.answer.trim()) {
+      lines.push("");
+      lines.push("## Answer");
+      lines.push(r.answer);
+    }
+    if (j.error) {
+      lines.push("");
+      lines.push("## Error");
+      lines.push("```");
+      lines.push(j.error);
+      lines.push("```");
+    }
+    if (j.log.length > 0) {
+      lines.push("");
+      lines.push("<details><summary>Log</summary>");
+      lines.push("");
+      lines.push("```");
+      lines.push(j.log.slice(-50).join("\n"));
+      lines.push("```");
+      lines.push("</details>");
+    }
+    const slug = (j.title ?? j.template ?? j.kind).toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 60) + "-" + j.id.slice(0, 8);
+    await journal({
+      kind: "job",
+      slug,
+      title: j.title ?? `${j.template ?? j.kind} (${j.status})`,
+      frontmatter: {
+        jobId: j.id,
+        status: j.status,
+        template: j.template ?? j.kind,
+        startedAt: j.startedAt,
+        finishedAt: j.finishedAt ?? "",
+      },
+      body: lines.join("\n"),
+    });
+  } catch { /* journal must never crash a job */ }
 }

@@ -1,9 +1,9 @@
-import { findPrimitive, primitivesPromptCatalog, primitives } from "./primitives.js";
+import { findPrimitive, humanStepLabel, primitivesPromptCatalog, primitives } from "./primitives.js";
 import { ollamaGenerate } from "./ollama.js";
 
-export type PlanStep = { tool: string; args: Record<string, any>; rationale?: string };
-export type Plan = { steps: PlanStep[]; summary?: string };
-export type StepRun = { step: PlanStep; ok: boolean; result?: any; error?: string; durationMs: number };
+export type PlanStep = { tool: string; args: Record<string, any>; rationale?: string; label?: string };
+export type Plan = { steps: PlanStep[]; summary?: string; waves?: number[][] };
+export type StepRun = { step: PlanStep; ok: boolean; result?: any; error?: string; durationMs: number; startedAt?: number };
 
 export type AgentResult = {
   task: string;
@@ -21,7 +21,8 @@ Output schema:
 Rules:
 - Use ONLY tools from the catalog. Invented tools are an error.
 - Reference an earlier step's output via the literal placeholder "$step_<i>" (0-indexed) optionally with a path. Example: {"path":"$step_0.matches.0.path"}.
-- Keep plans minimal — 1 to 4 steps suits most tasks.
+- Independent steps (no $step_ ref between them) run as parallel sub-agents — when the task naturally splits, prefer separate independent steps over one big serial chain. Example: searching the vault AND fetching a GitHub file are independent and should be two parallel steps.
+- Keep plans minimal — 1 to 6 steps suits most tasks.
 - Don't write files unless the task explicitly asks for it.
 - If the task can't be fulfilled with the catalog, output {"steps":[]}.
 
@@ -46,6 +47,14 @@ Plan:
   {"tool":"ollama.generate","args":{"prompt":"Summarize: $step_0.text","system":"Summarize the input concisely."},"rationale":"summarize"}
 ],"summary":"Fetch URL, summarize."}
 
+Task: "compare what my vault says about Cognify with what the Cognify GitHub README says"
+Plan:
+{"steps":[
+  {"tool":"vault.search","args":{"query":"Cognify"},"rationale":"find what the vault says (independent)"},
+  {"tool":"github.get_file","args":{"owner":"topoteretes","name":"cognee","path":"README.md"},"rationale":"fetch the README (independent — runs in parallel)"},
+  {"tool":"ollama.generate","args":{"prompt":"Vault hits:\n$step_0.matches\n\nREADME:\n$step_1.content\n\nWrite a short comparison.","system":"Compare two sources concisely."},"rationale":"synthesize once both are in"}
+],"summary":"Pull both sources in parallel, then compare."}
+
 Tool catalog:
 `;
 
@@ -60,34 +69,84 @@ export async function plan(task: string, personaSystemSuffix?: string): Promise<
   for (const s of json.steps) {
     if (!s || typeof s.tool !== "string") continue;
     if (!findPrimitive(s.tool)) continue;
-    steps.push({ tool: s.tool, args: s.args ?? {}, rationale: s.rationale });
+    const args = s.args ?? {};
+    steps.push({ tool: s.tool, args, rationale: s.rationale, label: humanStepLabel(s.tool, args) });
   }
-  return { steps, summary: typeof json.summary === "string" ? json.summary : undefined };
+  const waves = computeWaves(steps);
+  return { steps, summary: typeof json.summary === "string" ? json.summary : undefined, waves };
+}
+
+// Build dependency graph from $step_<i> references and group steps into "waves"
+// — each wave's steps depend only on earlier waves, so they all run in parallel
+// as sub-agents.
+function computeWaves(steps: PlanStep[]): number[][] {
+  const deps: Set<number>[] = steps.map(s => collectDeps(s.args));
+  const wave: number[] = new Array(steps.length).fill(-1);
+  const result: number[][] = [];
+  let placed = 0;
+  while (placed < steps.length) {
+    const w: number[] = [];
+    for (let i = 0; i < steps.length; i++) {
+      if (wave[i] !== -1) continue;
+      const ready = [...deps[i]].every(d => wave[d] !== -1 && wave[d] < result.length);
+      if (ready) w.push(i);
+    }
+    if (w.length === 0) {
+      // Cycle or invalid dep — give up and serialize remaining steps
+      for (let i = 0; i < steps.length; i++) if (wave[i] === -1) { wave[i] = result.length; result.push([i]); placed++; }
+      break;
+    }
+    for (const i of w) wave[i] = result.length;
+    result.push(w);
+    placed += w.length;
+  }
+  return result;
+}
+
+function collectDeps(args: any, acc: Set<number> = new Set()): Set<number> {
+  if (typeof args === "string") {
+    for (const m of args.matchAll(/\$step_(\d+)/g)) acc.add(Number(m[1]));
+  } else if (Array.isArray(args)) {
+    for (const v of args) collectDeps(v, acc);
+  } else if (args && typeof args === "object") {
+    for (const v of Object.values(args)) collectDeps(v, acc);
+  }
+  return acc;
 }
 
 export async function executePlan(p: Plan, push: (msg: string) => void, onProgress?: (runs: StepRun[]) => void): Promise<{ runs: StepRun[]; hadWrites: boolean }> {
-  const runs: StepRun[] = [];
+  const runs: StepRun[] = p.steps.map(step => ({ step, ok: false, durationMs: 0 }));
   let hadWrites = false;
-  for (let i = 0; i < p.steps.length; i++) {
-    const step = p.steps[i];
+  for (const step of p.steps) {
     const tool = findPrimitive(step.tool)!;
     if (!tool.readonly) hadWrites = true;
-    const args = resolveArgs(step.args, runs);
-    push(`step ${i + 1}/${p.steps.length}: ${step.tool}(${JSON.stringify(args).slice(0, 120)})`);
-    // Optimistic in-flight entry so UI can show step as running
-    runs.push({ step, ok: false, durationMs: 0 });
-    onProgress?.(runs);
-    const t0 = Date.now();
-    try {
-      const result = await tool.handler(args);
-      runs[runs.length - 1] = { step, ok: true, result, durationMs: Date.now() - t0 };
-    } catch (e: any) {
-      runs[runs.length - 1] = { step, ok: false, error: String(e.message ?? e), durationMs: Date.now() - t0 };
-      push(`  ✗ ${e.message ?? e}`);
-      onProgress?.(runs);
-      break;
-    }
-    onProgress?.(runs);
+  }
+  const waves = p.waves && p.waves.length > 0 ? p.waves : p.steps.map((_, i) => [i]);
+  let aborted = false;
+
+  for (let w = 0; w < waves.length; w++) {
+    if (aborted) break;
+    const ids = waves[w];
+    if (ids.length > 1) push(`spinning up ${ids.length} sub-agents in parallel`);
+    await Promise.all(ids.map(async (i) => {
+      if (aborted) return;
+      const step = p.steps[i];
+      const tool = findPrimitive(step.tool)!;
+      const args = resolveArgs(step.args, runs);
+      push(`step ${i + 1}/${p.steps.length}: ${step.label ?? step.tool}`);
+      runs[i] = { step, ok: false, durationMs: 0, startedAt: Date.now() };
+      onProgress?.([...runs]);
+      const t0 = Date.now();
+      try {
+        const result = await tool.handler(args);
+        runs[i] = { step, ok: true, result, durationMs: Date.now() - t0, startedAt: t0 };
+      } catch (e: any) {
+        runs[i] = { step, ok: false, error: String(e.message ?? e), durationMs: Date.now() - t0, startedAt: t0 };
+        push(`  ✗ ${step.label ?? step.tool}: ${e.message ?? e}`);
+        aborted = true;
+      }
+      onProgress?.([...runs]);
+    }));
   }
   return { runs, hadWrites };
 }
