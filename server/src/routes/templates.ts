@@ -11,6 +11,7 @@ import { ollamaGenerate } from "../lib/ollama.js";
 import { syncDownloads } from "../lib/sync-downloads.js";
 import { planAndExecute, executePlan } from "../lib/agent.js";
 import { loadCustomTemplates, saveCustomTemplate, findCustomTemplate, bumpRunCount, slugify, type CustomTemplate } from "../lib/custom-templates.js";
+import { getActivePersona, personaSystemSuffix } from "../lib/personas.js";
 
 export const templatesRouter = Router();
 
@@ -69,13 +70,14 @@ templatesRouter.post("/run/:id", async (req, res) => {
   }
 
   res.json({ jobId: job.id, requiresApproval: false, status: "queued" });
-  void runJob(job, async (push) => {
+  void runJob(job, async (push, progress) => {
     if (custom) {
       bumpRunCount(custom.id);
-      const { runs } = await executePlan(custom.plan, push);
-      return { fromCustom: custom.id, runs };
+      progress({ plan: custom.plan, runs: [], phase: "executing" });
+      const { runs } = await executePlan(custom.plan, push, (rs) => progress({ runs: [...rs] }));
+      return { fromCustom: custom.id, plan: custom.plan, runs, phase: "done" };
     }
-    return runner(tpl.id, inputs, push);
+    return runner(tpl.id, inputs, push, progress);
   });
 });
 
@@ -135,11 +137,11 @@ function keywordMatch(text: string): Template | null {
 }
 
 // Exported for chat router (avoids circular re-fetch)
-export async function runFromChat(templateId: string, inputs: Record<string, unknown>, push: (m: string) => void) {
-  return runner(templateId, inputs, push);
+export async function runFromChat(templateId: string, inputs: Record<string, unknown>, push: (m: string) => void, progress?: (p: Record<string, unknown>) => void) {
+  return runner(templateId, inputs, push, progress);
 }
 
-async function runner(templateId: string, inputs: Record<string, unknown>, push: (m: string) => void): Promise<unknown> {
+async function runner(templateId: string, inputs: Record<string, unknown>, push: (m: string) => void, progress?: (p: Record<string, unknown>) => void): Promise<unknown> {
   switch (templateId) {
     case "summarize-repo": return summarizeRepoRunner(inputs, push);
     case "run-digest":     return runDigestRunner(inputs, push);
@@ -148,7 +150,7 @@ async function runner(templateId: string, inputs: Record<string, unknown>, push:
     case "add-note":       return addNoteRunner(inputs, push);
     case "browse-vault":   return { redirect: "/knowledge" };
     case "sync-downloads": return syncDownloadsRunner(inputs, push);
-    case "general-task":   return generalTaskRunner(inputs, push);
+    case "general-task":   return generalTaskRunner(inputs, push, progress);
     default: throw new Error(`no runner for ${templateId}`);
   }
 }
@@ -262,11 +264,14 @@ async function addNoteRunner(inputs: Record<string, unknown>, push: (m: string) 
   return { path: rel, ...r };
 }
 
-async function generalTaskRunner(inputs: Record<string, unknown>, push: (m: string) => void) {
+async function generalTaskRunner(inputs: Record<string, unknown>, push: (m: string) => void, progress?: (p: Record<string, unknown>) => void) {
   const task = String(inputs.task ?? "").trim();
   if (!task) throw new Error("missing 'task' input");
   const saveAs = inputs.save_as_template !== false;
-  const r = await planAndExecute(task, push);
+  const persona = getActivePersona();
+  const personaSuffix = personaSystemSuffix(persona);
+  if (persona) push(`active persona: ${persona.name} (${persona.role})`);
+  const r = await planAndExecute(task, push, (patch) => progress?.(patch as Record<string, unknown>), { personaSystemSuffix: personaSuffix });
 
   // If the agent wrote anything to the vault, also commit + push
   if (r.hadWrites) {

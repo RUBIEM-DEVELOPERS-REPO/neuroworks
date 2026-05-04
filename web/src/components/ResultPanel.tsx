@@ -180,37 +180,72 @@ function PublishFolderResult({ job }: { job: any }) {
   );
 }
 
-function GeneralTaskResult({ job }: { job: any }) {
+function GeneralTaskResult({ job, live = false }: { job: any; live?: boolean }) {
   const r = job.result ?? {};
+  const phase = r.phase as string | undefined;
+  const running = job.status === "running" || job.status === "pending";
+  const title = running
+    ? (phase === "planning" ? "Planning…" : phase === "executing" ? "Executing plan…" : phase === "synthesizing" ? "Writing answer…" : "Working…")
+    : (r.savedTemplateId ? "Done · saved as template" : "Done");
+
   return (
-    <Card title={r.savedTemplateId ? `Done · saved as template` : "Done"}>
-      <MetaRow job={job} />
-      {r.answer && <div className="prose-vault" dangerouslySetInnerHTML={{ __html: marked.parse(r.answer) as string }} />}
+    <Card title={title}>
+      {!live && <MetaRow job={job} />}
+      {r.plan?.summary && (
+        <div className="text-sm text-cream-200 mb-3">
+          <span className="text-[10px] uppercase tracking-wider text-cream-300/50 mr-2">Plan</span>
+          {r.plan.summary}
+        </div>
+      )}
+      {r.plan?.steps?.length > 0 && (
+        <ol className="space-y-2 text-sm mb-4">
+          {r.plan.steps.map((s: any, i: number) => {
+            const run = r.runs?.[i];
+            const isPending = !run;
+            const isRunning = run && run.ok === false && !run.error;
+            const isDone = run && run.ok === true;
+            const isFailed = run && run.error;
+            const dot = isDone ? "bg-leaf-500" : isFailed ? "bg-coral-500" : isRunning ? "bg-violet-500 animate-pulse" : "bg-cream-300/30";
+            return (
+              <li key={i} className="flex items-start gap-3">
+                <span className="flex flex-col items-center mt-1">
+                  <span className={`inline-block w-2 h-2 rounded-full ${dot}`} />
+                  {i < r.plan.steps.length - 1 && <span className="w-px h-7 bg-ink-700 mt-1" />}
+                </span>
+                <div className="flex-1 min-w-0 pb-2">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-[10px] uppercase tracking-wider text-cream-300/50">step {i + 1}</span>
+                    <span className="font-mono text-violet-400 text-sm">{s.tool}</span>
+                    {isRunning && <span className="text-[10px] text-violet-400">running…</span>}
+                    {isDone && run.durationMs != null && <span className="text-[10px] text-cream-300/40 font-mono">{run.durationMs}ms</span>}
+                    {isPending && <span className="text-[10px] text-cream-300/40">queued</span>}
+                  </div>
+                  {s.rationale && <div className="text-xs text-cream-300/70 mt-0.5">{s.rationale}</div>}
+                  {Object.keys(s.args ?? {}).length > 0 && (
+                    <div className="text-[11px] text-cream-300/50 font-mono mt-1 truncate">
+                      {Object.entries(s.args).map(([k, v]) => `${k}=${typeof v === "string" ? '"' + String(v).slice(0, 60) + '"' : JSON.stringify(v).slice(0, 60)}`).join("  ")}
+                    </div>
+                  )}
+                  {isFailed && <div className="text-xs text-coral-400 mt-1">✗ {run.error}</div>}
+                </div>
+              </li>
+            );
+          })}
+        </ol>
+      )}
+      {r.plan && r.plan.steps?.length === 0 && phase === "answering" && (
+        <div className="text-xs text-cream-300/60 italic">Couldn't plan with the available tools — answering directly.</div>
+      )}
+      {r.answer && (
+        <div className="mt-2 pt-3 border-t border-ink-800">
+          <div className="text-[10px] uppercase tracking-wider text-cream-300/50 mb-1">Answer</div>
+          <div className="prose-vault" dangerouslySetInnerHTML={{ __html: marked.parse(r.answer) as string }} />
+        </div>
+      )}
       {r.savedTemplateId && (
         <div className="mt-3 text-xs text-leaf-400 bg-leaf-500/10 border border-leaf-500/30 rounded-md px-3 py-2">
           ✓ Saved this run as a custom template — <span className="font-mono">{r.savedTemplateId}</span> — find it in Templates › Custom for one-click reruns.
         </div>
-      )}
-      {r.plan?.steps?.length > 0 && (
-        <details className="mt-4">
-          <summary className="text-xs text-cream-300 cursor-pointer hover:text-cream-100">Plan executed ({r.plan.steps.length} step{r.plan.steps.length === 1 ? "" : "s"})</summary>
-          <ol className="mt-2 space-y-1.5 text-xs">
-            {r.plan.steps.map((s: any, i: number) => {
-              const run = r.runs?.[i];
-              return (
-                <li key={i} className="flex items-start gap-2">
-                  <span className={`mt-1 inline-block w-1.5 h-1.5 rounded-full shrink-0 ${run?.ok ? "bg-leaf-500" : run?.error ? "bg-coral-500" : "bg-cream-300/30"}`} />
-                  <div className="flex-1 min-w-0">
-                    <span className="font-mono text-violet-400">{s.tool}</span>
-                    {s.rationale && <span className="text-cream-300/60"> — {s.rationale}</span>}
-                    {run?.error && <div className="text-coral-400 mt-0.5">{run.error}</div>}
-                    {run?.durationMs != null && <span className="text-[10px] text-cream-300/40 ml-2 font-mono">{run.durationMs}ms</span>}
-                  </div>
-                </li>
-              );
-            })}
-          </ol>
-        </details>
       )}
     </Card>
   );

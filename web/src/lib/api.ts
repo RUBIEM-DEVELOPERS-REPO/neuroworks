@@ -37,5 +37,11 @@ export const api = {
   brainSearch: (q: string) => req<{ q: string; results: { path: string; line: number; preview: string }[] }>(`/api/brain/search?q=${encodeURIComponent(q)}`),
   brainLatestDigest: () => req<{ content: string }>("/api/brain/digest/latest"),
   triggerDigest: (lookbackDays = 7) => req<{ jobId: string }>("/api/tasks/digest", { method: "POST", body: JSON.stringify({ lookbackDays: String(lookbackDays) }) }),
-  chat: (messages: { role: "user" | "assistant" | "system"; content: string }[]) => req<{ kind: "message" | "task"; text: string; jobId?: string; templateId?: string; requiresApproval?: boolean; brainHits?: { path: string; line: number; preview: string }[] }>("/api/chat", { method: "POST", body: JSON.stringify({ messages }) }),
+  chat: (messages: { role: "user" | "assistant" | "system"; content: string }[]) => req<{ kind: "message" | "task"; text: string; jobId?: string; templateId?: string; requiresApproval?: boolean; brainHits?: { path: string; line: number; preview: string }[]; activePersona?: { id: string; name: string; role: string } | null }>("/api/chat", { method: "POST", body: JSON.stringify({ messages }) }),
+  listPersonas: () => req<{ personas: any[]; activeId: string | null; active: any }>("/api/personas"),
+  createPersona: (body: { name: string; jobDescription: string; tone?: string; role?: string; description?: string; responsibilities?: string[]; systemPromptOverride?: string }) => req<{ persona: any }>("/api/personas", { method: "POST", body: JSON.stringify(body) }),
+  activatePersona: (id: string | "default") => req<{ active: any }>(`/api/personas/${id}/activate`, { method: "POST" }),
+  deactivatePersona: () => req<{ active: null }>("/api/personas/deactivate", { method: "POST" }),
+  deletePersona: (id: string) => req<{ deleted: true }>(`/api/personas/${id}`, { method: "DELETE" }),
+  previewPersona: (jobDescription: string) => req<{ role: string; description: string; tone: string; responsibilities: string[] }>("/api/personas/preview", { method: "POST", body: JSON.stringify({ jobDescription }) }),
 };

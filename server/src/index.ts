@@ -6,6 +6,7 @@ import { brainRouter } from "./routes/brain.js";
 import { tasksRouter } from "./routes/tasks.js";
 import { templatesRouter } from "./routes/templates.js";
 import { chatRouter } from "./routes/chat.js";
+import { personasRouter } from "./routes/personas.js";
 
 const app = express();
 app.use(express.json({ limit: "1mb" }));
@@ -30,6 +31,7 @@ app.use("/api/brain", brainRouter);
 app.use("/api/tasks", tasksRouter);
 app.use("/api/templates", templatesRouter);
 app.use("/api/chat", chatRouter);
+app.use("/api/personas", personasRouter);
 
 app.use((err: any, _req: any, res: any, _next: any) => {
   console.error(err);

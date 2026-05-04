@@ -14,12 +14,14 @@ const primaryNav = [
 const secondaryNav = [
   { to: "/templates", label: "Templates", icon: "◫" },
   { to: "/knowledge", label: "Knowledge", icon: "◈" },
+  { to: "/personas", label: "Personas", icon: "◐" },
   { to: "/settings", label: "Settings", icon: "⚒" },
 ];
 
 export function Layout({ children }: { children: ReactNode }) {
   const [health, setHealth] = useState<{ ready: boolean; missing?: string[] } | null>(null);
   const [counts, setCounts] = useState<{ approvals: number; activity: number }>({ approvals: 0, activity: 0 });
+  const [persona, setPersona] = useState<{ id: string; name: string; role: string } | null>(null);
 
   async function tick() {
     try {
@@ -29,6 +31,8 @@ export function Layout({ children }: { children: ReactNode }) {
       const running = j.jobs.filter((x: any) => x.status === "running").length;
       const pendingApproval = j.jobs.filter((x: any) => x.requiresApproval && x.status === "pending").length;
       setCounts({ approvals: pendingApproval, activity: running });
+      const p = await api.listPersonas().catch(() => ({ active: null } as any));
+      setPersona(p.active);
     } catch {}
   }
   useEffect(() => { tick(); const i = setInterval(tick, 5000); return () => clearInterval(i); }, []);
@@ -89,9 +93,16 @@ export function Layout({ children }: { children: ReactNode }) {
             <div className="w-7 h-7 rounded-full bg-gradient-to-br from-violet-500 to-coral-500 grid place-items-center text-[11px] font-semibold text-white">A</div>
             <div className="text-sm text-cream-200">Arthur Magaya <span className="text-cream-300/50">· admin@rubiem.com</span></div>
           </div>
-          <div className={`flex items-center gap-2 text-xs px-3 py-1.5 rounded-full border ${statusOk ? "bg-leaf-500/10 border-leaf-500/30 text-leaf-400" : "bg-flame-500/10 border-flame-500/30 text-flame-400"}`}>
-            <span className={`inline-block w-1.5 h-1.5 rounded-full ${statusOk ? "bg-leaf-500" : "bg-flame-500 animate-pulse"}`} />
-            {statusLabel}
+          <div className="flex items-center gap-2">
+            {persona && (
+              <Link to="/personas" className="text-xs px-3 py-1.5 rounded-full border bg-violet-500/10 border-violet-500/30 text-violet-300" title="Active persona">
+                ◐ {persona.name} <span className="opacity-60">· {persona.role}</span>
+              </Link>
+            )}
+            <div className={`flex items-center gap-2 text-xs px-3 py-1.5 rounded-full border ${statusOk ? "bg-leaf-500/10 border-leaf-500/30 text-leaf-400" : "bg-flame-500/10 border-flame-500/30 text-flame-400"}`}>
+              <span className={`inline-block w-1.5 h-1.5 rounded-full ${statusOk ? "bg-leaf-500" : "bg-flame-500 animate-pulse"}`} />
+              {statusLabel}
+            </div>
           </div>
           <Link to="/knowledge" className="text-xs text-cream-300/70 hover:text-cream-100 px-3 py-1.5 border border-ink-700 rounded-md">Search ⌕</Link>
         </header>

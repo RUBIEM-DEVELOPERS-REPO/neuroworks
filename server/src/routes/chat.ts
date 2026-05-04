@@ -4,6 +4,7 @@ import { templates } from "../lib/templates.js";
 import { newJob, runJob } from "../lib/jobs.js";
 import { config } from "../config.js";
 import { searchVault } from "../lib/vault.js";
+import { getActivePersona, personaSystemSuffix } from "../lib/personas.js";
 
 export const chatRouter = Router();
 
@@ -83,20 +84,27 @@ chatRouter.post("/", async (req, res) => {
   // 3. No template matched — route to general-task agent. The agent plans + executes
   //    using primitives, optionally saves the plan as a custom template for next time.
   const tpl = templates.find(t => t.id === "general-task")!;
+  const persona = getActivePersona();
   const job = newJob(`insights:general-task`);
   job.template = tpl.id;
   job.title = `Ad-hoc: ${text.slice(0, 60)}`;
   job.inputs = { task: text, save_as_template: true };
-  job.requiresApproval = false; // chat-driven NL flow trusts the agent's plan; explicit dialog form requires approval
+  job.requiresApproval = false;
   res.json({
     kind: "task",
     jobId: job.id,
     templateId: tpl.id,
     requiresApproval: false,
-    text: `On it — I'll plan steps and run them. I'll show the result here when it's done.`,
+    text: persona
+      ? `On it — operating as **${persona.name}** (${persona.role}). I'll plan the steps and you'll see them here as I go.`
+      : `On it — I'll plan the steps and you'll see them here as I go.`,
+    activePersona: persona ? { id: persona.id, name: persona.name, role: persona.role } : null,
   });
-  void runJob(job, async (push) => runFromChat("general-task", { task: text, save_as_template: true }, push));
+  void runJob(job, async (push, progress) => runFromChat("general-task", { task: text, save_as_template: true }, push, progress));
 });
+
+// helper for plain Ollama path (kept for potential future use)
+void personaSystemSuffix;
 
 import { runFromChat } from "./templates.js";
 

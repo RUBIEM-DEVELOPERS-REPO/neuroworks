@@ -49,8 +49,8 @@ Plan:
 Tool catalog:
 `;
 
-export async function plan(task: string): Promise<Plan> {
-  const sys = PLAN_SYSTEM + primitivesPromptCatalog();
+export async function plan(task: string, personaSystemSuffix?: string): Promise<Plan> {
+  const sys = PLAN_SYSTEM + primitivesPromptCatalog() + (personaSystemSuffix ? `\n\nPersona context (follow this when planning):\n${personaSystemSuffix}` : "");
   const out = await ollamaGenerate(`Task: ${task}`, sys);
   const json = extractJson(out);
   if (!json) return { steps: [] };
@@ -65,7 +65,7 @@ export async function plan(task: string): Promise<Plan> {
   return { steps, summary: typeof json.summary === "string" ? json.summary : undefined };
 }
 
-export async function executePlan(p: Plan, push: (msg: string) => void): Promise<{ runs: StepRun[]; hadWrites: boolean }> {
+export async function executePlan(p: Plan, push: (msg: string) => void, onProgress?: (runs: StepRun[]) => void): Promise<{ runs: StepRun[]; hadWrites: boolean }> {
   const runs: StepRun[] = [];
   let hadWrites = false;
   for (let i = 0; i < p.steps.length; i++) {
@@ -74,45 +74,59 @@ export async function executePlan(p: Plan, push: (msg: string) => void): Promise
     if (!tool.readonly) hadWrites = true;
     const args = resolveArgs(step.args, runs);
     push(`step ${i + 1}/${p.steps.length}: ${step.tool}(${JSON.stringify(args).slice(0, 120)})`);
+    // Optimistic in-flight entry so UI can show step as running
+    runs.push({ step, ok: false, durationMs: 0 });
+    onProgress?.(runs);
     const t0 = Date.now();
     try {
       const result = await tool.handler(args);
-      runs.push({ step, ok: true, result, durationMs: Date.now() - t0 });
+      runs[runs.length - 1] = { step, ok: true, result, durationMs: Date.now() - t0 };
     } catch (e: any) {
-      runs.push({ step, ok: false, error: String(e.message ?? e), durationMs: Date.now() - t0 });
+      runs[runs.length - 1] = { step, ok: false, error: String(e.message ?? e), durationMs: Date.now() - t0 };
       push(`  ✗ ${e.message ?? e}`);
+      onProgress?.(runs);
       break;
     }
+    onProgress?.(runs);
   }
   return { runs, hadWrites };
 }
 
-export async function planAndExecute(task: string, push: (msg: string) => void, opts: { skipApprovalForReadOnly?: boolean } = {}): Promise<AgentResult> {
+export async function planAndExecute(
+  task: string,
+  push: (msg: string) => void,
+  onProgress?: (patch: Partial<AgentResult> & { phase?: string }) => void,
+  opts: { personaSystemSuffix?: string } = {},
+): Promise<AgentResult> {
   push(`planning task with local LLM`);
-  const p = await plan(task);
+  onProgress?.({ phase: "planning" });
+  const p = await plan(task, opts.personaSystemSuffix);
   if (p.steps.length === 0) {
     push(`could not plan with available tools — falling back to direct LLM answer`);
-    const reply = await ollamaGenerate(`Task: ${task}\n\nAnswer in 2-3 sentences. If you can't answer, say what context you'd need from the user's vault or GitHub.`);
+    onProgress?.({ phase: "answering", plan: p });
+    const sysFallback = `${opts.personaSystemSuffix ?? ""}\nAnswer in 2-3 sentences. If you can't answer, say what context you'd need from the user's vault or GitHub.`.trim();
+    const reply = await ollamaGenerate(`Task: ${task}`, sysFallback);
     return { task, plan: { steps: [] }, runs: [], answer: reply.trim(), hadWrites: false };
   }
   push(`plan: ${p.steps.length} step(s)${p.summary ? ` — ${p.summary}` : ""}`);
+  onProgress?.({ phase: "executing", plan: p, runs: [] });
 
-  const { runs, hadWrites } = await executePlan(p, push);
+  const { runs, hadWrites } = await executePlan(p, push, (runs) => onProgress?.({ runs: [...runs] }));
 
   // Synthesize a chat-friendly answer from the step results
-  const synth = await synthesize(task, p, runs);
+  onProgress?.({ phase: "synthesizing", runs });
+  const synth = await synthesize(task, p, runs, opts.personaSystemSuffix);
   return { task, plan: p, runs, answer: synth, hadWrites };
-  void opts;
 }
 
-async function synthesize(task: string, p: Plan, runs: StepRun[]): Promise<string> {
+async function synthesize(task: string, p: Plan, runs: StepRun[], personaSystemSuffix?: string): Promise<string> {
   const succeeded = runs.filter(r => r.ok);
   const failed = runs.filter(r => !r.ok);
   if (succeeded.length === 0) {
     return failed.length > 0 ? `I tried, but step ${runs.indexOf(failed[0]) + 1} (${failed[0].step.tool}) failed: ${failed[0].error}` : "I couldn't execute any step.";
   }
   const compact = succeeded.map((r, i) => ({ step: i + 1, tool: r.step.tool, result: compactResult(r.result) }));
-  const sys = "You are clawbot. Given a user task and the structured results of the steps you executed to fulfill it, write a concise plain-English answer (under 120 words, markdown allowed) that directly addresses the user's task. Cite specific paths or names from the results. Don't mention the planning machinery — speak as the assistant who did the work.";
+  const sys = "You are clawbot. Given a user task and the structured results of the steps you executed to fulfill it, write a concise plain-English answer (under 120 words, markdown allowed) that directly addresses the user's task. Cite specific paths or names from the results. Don't mention the planning machinery — speak as the assistant who did the work." + (personaSystemSuffix ? `\n\nPersona: ${personaSystemSuffix}` : "");
   const prompt = `Task: ${task}\n\nStep results:\n${JSON.stringify(compact, null, 2)}\n\nAnswer:`;
   try { return (await ollamaGenerate(prompt, sys)).trim(); }
   catch { return fallbackSynthesis(p, runs); }

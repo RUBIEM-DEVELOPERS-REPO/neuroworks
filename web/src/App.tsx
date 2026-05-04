@@ -9,6 +9,7 @@ import { Knowledge } from "./pages/Knowledge";
 import { Admin } from "./pages/Admin";
 import { Settings } from "./pages/Settings";
 import { Chat } from "./pages/Chat";
+import { Personas } from "./pages/Personas";
 
 export default function App() {
   return (
@@ -23,6 +24,7 @@ export default function App() {
         <Route path="/activity" element={<Activity />} />
         <Route path="/knowledge/*" element={<Knowledge />} />
         <Route path="/admin" element={<Admin />} />
+        <Route path="/personas" element={<Personas />} />
         <Route path="/settings" element={<Settings />} />
         <Route path="*" element={<Navigate to="/dashboard" />} />
       </Routes>

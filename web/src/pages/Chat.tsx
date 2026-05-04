@@ -202,11 +202,14 @@ function InlineJob({ jobId, requiresApproval, templateId }: { jobId: string; req
         {requiresApproval && status === "awaiting-approval" && <Link to="/approvals" className="ml-1 underline">approve →</Link>}
         {!isPending && <Link to={`/tasks?focus=${jobId}`} className="ml-1 underline opacity-70 hover:opacity-100">open in Tasks</Link>}
       </div>
-      {!isPending && job.status === "succeeded" && <ResultPanel job={job} />}
+      {(job.template === "general-task" || (job.template ?? "").startsWith("custom-")) && job.result?.plan && (
+        <ResultPanel job={job} />
+      )}
+      {!isPending && job.status === "succeeded" && job.template !== "general-task" && !(job.template ?? "").startsWith("custom-") && <ResultPanel job={job} />}
       {(job.status === "failed" || job.status === "rejected") && job.error && (
         <pre className="text-[11px] font-mono text-coral-400 whitespace-pre-wrap bg-ink-950 border border-coral-500/20 rounded-md p-3 overflow-auto scrollbar-thin max-h-40">{job.error}</pre>
       )}
-      {isPending && job.log?.length > 0 && (
+      {isPending && job.log?.length > 0 && !job.result?.plan && (
         <pre className="text-[10px] font-mono text-cream-300/70 whitespace-pre-wrap bg-ink-950 border border-ink-800 rounded-md p-2 max-h-32 overflow-auto scrollbar-thin">{job.log.slice(-6).join("\n")}</pre>
       )}
     </div>
