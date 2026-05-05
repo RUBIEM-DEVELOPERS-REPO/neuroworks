@@ -12,6 +12,13 @@ export type OllamaCallOptions = {
 };
 
 export async function ollamaGenerate(prompt: string, system?: string, opts: OllamaCallOptions = {}): Promise<string> {
+  return (await ollamaGenerateWithMeta(prompt, system, opts)).text;
+}
+
+// Same call but returns the model name that was actually used. Used by primitives
+// that want to record per-step model provenance back into StepRun for the UI
+// and the vault journal.
+export async function ollamaGenerateWithMeta(prompt: string, system?: string, opts: OllamaCallOptions = {}): Promise<{ text: string; model: string }> {
   // Pick the model: explicit override > profile-based router > config default.
   const model = opts.model
     ?? (opts.profile ? await pickModelFor(opts.profile, config.ollamaModel) : config.ollamaModel);
@@ -70,7 +77,7 @@ export async function ollamaGenerate(prompt: string, system?: string, opts: Olla
       }
     }
     // Strip any stray <think>...</think> wrapper if the directive was ignored.
-    return response.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
+    return { text: response.replace(/<think>[\s\S]*?<\/think>/gi, "").trim(), model };
   } finally {
     clearTimeout(timer);
   }

@@ -308,7 +308,19 @@ async function generalTaskRunner(inputs: Record<string, unknown>, push: (m: stri
   return {
     answer: r.answer,
     plan: r.plan,
-    runs: r.runs.map(x => ({ tool: x.step.tool, ok: x.ok, durationMs: x.durationMs, error: x.error })),
+    // Preserve the full StepRun shape on the final result — the frontend uses
+    // step.label, run.startedAt, and run.modelUsed during render, and the vault
+    // journal reads run.modelUsed. Drop run.result to keep the payload small;
+    // primitives can return large blobs and we already have the synthesised
+    // answer above.
+    runs: r.runs.map(x => ({
+      step: x.step,
+      ok: x.ok,
+      durationMs: x.durationMs,
+      error: x.error,
+      startedAt: x.startedAt,
+      modelUsed: x.modelUsed,
+    })),
     savedTemplateId,
   };
 }

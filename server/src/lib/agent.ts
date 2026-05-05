@@ -3,7 +3,7 @@ import { ollamaGenerate } from "./ollama.js";
 
 export type PlanStep = { tool: string; args: Record<string, any>; rationale?: string; label?: string };
 export type Plan = { steps: PlanStep[]; summary?: string; waves?: number[][] };
-export type StepRun = { step: PlanStep; ok: boolean; result?: any; error?: string; durationMs: number; startedAt?: number };
+export type StepRun = { step: PlanStep; ok: boolean; result?: any; error?: string; durationMs: number; startedAt?: number; modelUsed?: string };
 
 export type AgentResult = {
   task: string;
@@ -148,7 +148,10 @@ export async function executePlan(p: Plan, push: (msg: string) => void, onProgre
     while (true) {
       try {
         const result = await tool.handler(args);
-        runs[i] = { step, ok: true, result, durationMs: Date.now() - t0, startedAt: t0 };
+        // ollama.generate returns { text, model } so we capture the model used.
+        // Other tools just leave modelUsed undefined.
+        const modelUsed = result && typeof result === "object" && "model" in result ? String((result as any).model) : undefined;
+        runs[i] = { step, ok: true, result, durationMs: Date.now() - t0, startedAt: t0, modelUsed };
         onProgress?.([...runs]);
         return;
       } catch (e: any) {

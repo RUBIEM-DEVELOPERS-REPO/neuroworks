@@ -154,7 +154,8 @@ function JobWaves({ job }: { job: RunningJob }) {
                         <div key={i} className="flex items-center gap-2.5">
                           <span className={`inline-block w-1.5 h-1.5 rounded-full ${dot}`} />
                           <span className="text-xs text-cream-200 truncate flex-1">{s?.label ?? s?.tool ?? "step"}</span>
-                          {done && run.durationMs != null && <span className="text-[10px] text-cream-300/40 font-mono">{(run.durationMs / 1000).toFixed(1)}s</span>}
+                          {done && run?.modelUsed && <span className="text-[10px] text-violet-400/70 font-mono" title="Model used">{run.modelUsed}</span>}
+                          {done && run?.durationMs != null && <span className="text-[10px] text-cream-300/40 font-mono">{(run.durationMs / 1000).toFixed(1)}s</span>}
                           {inf && <span className="text-[10px] text-violet-400">working…</span>}
                           {failed && <span className="text-[10px] text-coral-400">failed</span>}
                         </div>

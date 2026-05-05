@@ -90,7 +90,8 @@ async function journalJob(j: Job) {
         const s = r.plan.steps[i];
         const run = r.runs?.[i];
         const mark = run?.ok ? "✓" : run?.error ? "✗" : "·";
-        lines.push(`${i + 1}. ${mark} ${s.label ?? s.tool} — \`${s.tool}\`${run?.durationMs != null ? ` (${(run.durationMs / 1000).toFixed(1)}s)` : ""}`);
+        const modelTag = run?.modelUsed ? ` · model \`${run.modelUsed}\`` : "";
+        lines.push(`${i + 1}. ${mark} ${s.label ?? s.tool} — \`${s.tool}\`${run?.durationMs != null ? ` (${(run.durationMs / 1000).toFixed(1)}s)` : ""}${modelTag}`);
         if (s.rationale) lines.push(`    > ${s.rationale}`);
         if (run?.error) lines.push(`    error: ${run.error}`);
       }

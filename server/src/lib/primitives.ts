@@ -1,7 +1,7 @@
 import { existsSync, readdirSync, readFileSync, statSync, appendFileSync } from "node:fs";
 import { resolve, basename, extname, sep, join } from "node:path";
 import { config } from "../config.js";
-import { ollamaGenerate } from "./ollama.js";
+import { ollamaGenerateWithMeta } from "./ollama.js";
 import { listVault, readVaultFile, searchVault, writeVaultFile } from "./vault.js";
 import { listOwnedRepos, recentCommits, openPRs, openIssues, readme, octokit } from "./github.js";
 
@@ -57,13 +57,16 @@ export const primitives: Primitive[] = [
       { name: "system", type: "string", required: false, description: "Optional system instruction" },
       { name: "profile", type: "string", required: false, description: "synthesis|triage|extraction|planning|balanced — model router uses this to pick the best available model" },
     ],
-    handler: async (args) => ({
-      text: await ollamaGenerate(
+    handler: async (args) => {
+      const meta = await ollamaGenerateWithMeta(
         String(args.prompt),
         args.system ? String(args.system) : undefined,
         { profile: (args.profile as any) ?? "synthesis" },
-      ),
-    }),
+      );
+      // The `model` field surfaces the actual model picked by the router so
+      // executePlan can stash it on the StepRun for journal + UI provenance.
+      return { text: meta.text, model: meta.model };
+    },
   },
   {
     name: "github.list_repos",

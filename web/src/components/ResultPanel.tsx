@@ -252,6 +252,7 @@ function GeneralTaskResult({ job, live = false }: { job: any; live?: boolean }) 
                               <span className="text-cream-100">{label}</span>
                               {inflight && <span className="text-[10px] text-violet-400">working…</span>}
                               {isDone && run.durationMs != null && <span className="text-[10px] text-cream-300/40">{(run.durationMs / 1000).toFixed(1)}s</span>}
+                              {isDone && run.modelUsed && <span className="text-[10px] text-violet-400/70 font-mono" title="Model used by the router">{run.modelUsed}</span>}
                               {isPending && <span className="text-[10px] text-cream-300/40">up next</span>}
                             </div>
                             {s.rationale && s.rationale !== label && <div className="text-xs text-cream-300/60 mt-0.5">{s.rationale}</div>}
