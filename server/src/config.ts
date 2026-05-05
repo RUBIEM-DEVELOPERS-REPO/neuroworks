@@ -26,6 +26,15 @@ const vaultPath = resolve(vaultPathRaw);
 const ollamaHost = pick("OLLAMA_HOST", "http://127.0.0.1:11434");
 const ollamaModel = pick("OLLAMA_MODEL", "qwen3.5:0.8b");
 const port = Number(pick("NEUROWORKS_PORT", "7471"));
+// Comma-separated list of peer clawbot base URLs. Each peer is another running
+// instance of this same server (different port, optionally different model).
+// Empty by default — single-clawbot mode. Example:
+//   CLAWBOT_PEERS=http://127.0.0.1:7472,http://127.0.0.1:7473
+const peers = pick("CLAWBOT_PEERS", "")
+  .split(",").map(s => s.trim()).filter(Boolean);
+// Optional human-readable name for this clawbot — shows up in /api/health and
+// peer roll-call responses so dual-clawbot work can be told apart in logs.
+const name = pick("CLAWBOT_NAME", "primary");
 
 export const config = {
   githubToken,
@@ -35,6 +44,8 @@ export const config = {
   ollamaHost,
   ollamaModel,
   port,
+  peers,
+  name,
   ready: missing.length === 0,
   missing: [...missing],
 };

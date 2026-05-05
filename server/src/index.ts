@@ -7,6 +7,8 @@ import { tasksRouter } from "./routes/tasks.js";
 import { templatesRouter } from "./routes/templates.js";
 import { chatRouter } from "./routes/chat.js";
 import { personasRouter } from "./routes/personas.js";
+import { peersRouter } from "./routes/peers.js";
+import { localInflightCount } from "./lib/peers.js";
 
 const app = express();
 app.use(express.json({ limit: "1mb" }));
@@ -20,10 +22,14 @@ app.options("*", (_req, res) => res.sendStatus(204));
 
 app.get("/api/health", (_req, res) => res.json({
   ok: true,
-  name: "neuroworks",
+  name: config.name,
   version: "0.1.0",
+  model: config.ollamaModel,
+  port: config.port,
   ready: config.ready,
   missing: config.missing,
+  inflightJobs: localInflightCount(),
+  peers: config.peers,
 }));
 app.use("/api/status", statusRouter);
 app.use("/api/repos", reposRouter);
@@ -32,6 +38,7 @@ app.use("/api/tasks", tasksRouter);
 app.use("/api/templates", templatesRouter);
 app.use("/api/chat", chatRouter);
 app.use("/api/personas", personasRouter);
+app.use("/api/peers", peersRouter);
 
 app.use((err: any, _req: any, res: any, _next: any) => {
   console.error(err);
