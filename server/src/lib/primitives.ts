@@ -50,13 +50,20 @@ export const primitives: Primitive[] = [
   },
   {
     name: "ollama.generate",
-    description: "Run the local LLM. Use to summarize, draft, rephrase, or reason over text fetched by other steps.",
+    description: "Run the local LLM. Use to summarize, draft, rephrase, or reason over text fetched by other steps. Optional `profile` picks the right model: 'synthesis' (default — long-form prose), 'triage' (fast classify), 'extraction' (strict JSON), 'planning'.",
     readonly: true,
     args: [
       { name: "prompt", type: "string", required: true, description: "User-side prompt" },
       { name: "system", type: "string", required: false, description: "Optional system instruction" },
+      { name: "profile", type: "string", required: false, description: "synthesis|triage|extraction|planning|balanced — model router uses this to pick the best available model" },
     ],
-    handler: async (args) => ({ text: await ollamaGenerate(String(args.prompt), args.system ? String(args.system) : undefined) }),
+    handler: async (args) => ({
+      text: await ollamaGenerate(
+        String(args.prompt),
+        args.system ? String(args.system) : undefined,
+        { profile: (args.profile as any) ?? "synthesis" },
+      ),
+    }),
   },
   {
     name: "github.list_repos",

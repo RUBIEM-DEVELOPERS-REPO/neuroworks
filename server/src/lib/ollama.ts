@@ -1,11 +1,25 @@
 import { config } from "../config.js";
+import { pickModelFor, type TaskNeeds } from "./models.js";
 
-export async function ollamaGenerate(prompt: string, system?: string): Promise<string> {
+export type OllamaCallOptions = {
+  // Explicit model name to use for this call. Wins over `profile`.
+  model?: string;
+  // Stock task profile name (planning/synthesis/triage/extraction/balanced).
+  // The model router picks the best available model for this profile.
+  profile?: "planning" | "synthesis" | "triage" | "extraction" | "balanced";
+  // Custom needs vector — only used when neither `model` nor `profile` set.
+  needs?: TaskNeeds;
+};
+
+export async function ollamaGenerate(prompt: string, system?: string, opts: OllamaCallOptions = {}): Promise<string> {
+  // Pick the model: explicit override > profile-based router > config default.
+  const model = opts.model
+    ?? (opts.profile ? await pickModelFor(opts.profile, config.ollamaModel) : config.ollamaModel);
   // qwen3 ships with reasoning mode on by default. The /no_think directive in the
   // SYSTEM prompt (not user) suppresses the <think>…</think> block so we get the
   // answer directly. Without it, ~80% of the token budget is spent on hidden CoT
   // and short num_predict caps cut off before the JSON.
-  const isQwen3 = /qwen3/i.test(config.ollamaModel) && !/qwen3\.5/i.test(config.ollamaModel);
+  const isQwen3 = /qwen3/i.test(model) && !/qwen3\.5/i.test(model);
   const sys = isQwen3
     ? `${system ?? ""}\n/no_think`.trim()
     : system;
@@ -18,7 +32,7 @@ export async function ollamaGenerate(prompt: string, system?: string): Promise<s
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        model: config.ollamaModel,
+        model,
         prompt,
         system: sys,
         stream: true,

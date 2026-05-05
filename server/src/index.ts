@@ -9,6 +9,7 @@ import { chatRouter } from "./routes/chat.js";
 import { personasRouter } from "./routes/personas.js";
 import { peersRouter } from "./routes/peers.js";
 import { localInflightCount } from "./lib/peers.js";
+import { modelsRouter } from "./routes/models.js";
 
 const app = express();
 app.use(express.json({ limit: "1mb" }));
@@ -39,6 +40,7 @@ app.use("/api/templates", templatesRouter);
 app.use("/api/chat", chatRouter);
 app.use("/api/personas", personasRouter);
 app.use("/api/peers", peersRouter);
+app.use("/api/models", modelsRouter);
 
 app.use((err: any, _req: any, res: any, _next: any) => {
   console.error(err);

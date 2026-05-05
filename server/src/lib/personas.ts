@@ -104,7 +104,8 @@ export async function extractPersonaMetadata(jd: string): Promise<{ role: string
 {"role":"<short title, max 5 words>","description":"<one-sentence summary of what this role does>","tone":"<2-3 adjectives, e.g. 'concise · analytical · warm'>","responsibilities":["<bullet>","<bullet>","<bullet>"]}
 Pick at most 6 responsibilities, each under 12 words.`;
   try {
-    const out = await ollamaGenerate(jd.slice(0, 6000), sys);
+    // JD extraction = strict JSON output, modest reasoning.
+    const out = await ollamaGenerate(jd.slice(0, 6000), sys, { profile: "extraction" });
     const m = out.match(/\{[\s\S]*\}/);
     if (m) {
       const parsed = JSON.parse(m[0]);

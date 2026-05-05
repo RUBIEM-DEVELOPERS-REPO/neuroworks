@@ -60,7 +60,9 @@ Tool catalog:
 
 export async function plan(task: string, personaSystemSuffix?: string): Promise<Plan> {
   const sys = PLAN_SYSTEM + primitivesPromptCatalog() + (personaSystemSuffix ? `\n\nPersona context (follow this when planning):\n${personaSystemSuffix}` : "");
-  const out = await ollamaGenerate(`Task: ${task}`, sys);
+  // Planning needs strict JSON output, modest reasoning, and speed — the model
+  // router picks the best available local model for that profile.
+  const out = await ollamaGenerate(`Task: ${task}`, sys, { profile: "planning" });
   const json = extractJson(out);
   if (!json) return { steps: [] };
   if (!Array.isArray(json.steps)) return { steps: [] };
@@ -193,7 +195,8 @@ export async function planAndExecute(
     push(`could not plan with available tools — falling back to direct LLM answer`);
     onProgress?.({ phase: "answering", plan: p });
     const sysFallback = `${opts.personaSystemSuffix ?? ""}\nAnswer in 2-3 sentences. If you can't answer, say what context you'd need from the user's vault or GitHub.`.trim();
-    const reply = await ollamaGenerate(`Task: ${task}`, sysFallback);
+    // Direct fallback answer — long-form prose preferred.
+    const reply = await ollamaGenerate(`Task: ${task}`, sysFallback, { profile: "synthesis" });
     return { task, plan: { steps: [] }, runs: [], answer: reply.trim(), hadWrites: false };
   }
   push(`plan: ${p.steps.length} step(s)${p.summary ? ` — ${p.summary}` : ""}`);
@@ -216,7 +219,8 @@ async function synthesize(task: string, p: Plan, runs: StepRun[], personaSystemS
   const compact = succeeded.map((r, i) => ({ step: i + 1, tool: r.step.tool, result: compactResult(r.result) }));
   const sys = "You are clawbot. Given a user task and the structured results of the steps you executed to fulfill it, write a concise plain-English answer (under 120 words, markdown allowed) that directly addresses the user's task. Cite specific paths or names from the results. Don't mention the planning machinery — speak as the assistant who did the work." + (personaSystemSuffix ? `\n\nPersona: ${personaSystemSuffix}` : "");
   const prompt = `Task: ${task}\n\nStep results:\n${JSON.stringify(compact, null, 2)}\n\nAnswer:`;
-  try { return (await ollamaGenerate(prompt, sys)).trim(); }
+  // Synthesis is long-form prose with reasoning over structured inputs.
+  try { return (await ollamaGenerate(prompt, sys, { profile: "synthesis" })).trim(); }
   catch { return fallbackSynthesis(p, runs); }
 }
 
