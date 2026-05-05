@@ -114,6 +114,15 @@ function collectDeps(args: any, acc: Set<number> = new Set()): Set<number> {
   return acc;
 }
 
+// Cap on simultaneously-active sub-agents within a single wave. Larger waves
+// still run, but in chunks of this size so we don't pile six concurrent
+// ollama.generate calls onto a single local model and watch all of them stall.
+const MAX_CONCURRENT_SUBAGENTS = 3;
+
+// Errors that look transient and worth one retry. Network blips, Ollama load
+// timeouts, GitHub 5xx — the kind of thing that's usually fine on a second try.
+const TRANSIENT_ERROR_RE = /\b(?:ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|fetch failed|socket hang up|abort|timeout|503|502|504|429)\b/i;
+
 export async function executePlan(p: Plan, push: (msg: string) => void, onProgress?: (runs: StepRun[]) => void): Promise<{ runs: StepRun[]; hadWrites: boolean }> {
   const runs: StepRun[] = p.steps.map(step => ({ step, ok: false, durationMs: 0 }));
   let hadWrites = false;
@@ -124,29 +133,49 @@ export async function executePlan(p: Plan, push: (msg: string) => void, onProgre
   const waves = p.waves && p.waves.length > 0 ? p.waves : p.steps.map((_, i) => [i]);
   let aborted = false;
 
-  for (let w = 0; w < waves.length; w++) {
-    if (aborted) break;
-    const ids = waves[w];
-    if (ids.length > 1) push(`spinning up ${ids.length} sub-agents in parallel`);
-    await Promise.all(ids.map(async (i) => {
-      if (aborted) return;
-      const step = p.steps[i];
-      const tool = findPrimitive(step.tool)!;
-      const args = resolveArgs(step.args, runs);
-      push(`step ${i + 1}/${p.steps.length}: ${step.label ?? step.tool}`);
-      runs[i] = { step, ok: false, durationMs: 0, startedAt: Date.now() };
-      onProgress?.([...runs]);
-      const t0 = Date.now();
+  async function runStep(i: number) {
+    if (aborted) return;
+    const step = p.steps[i];
+    const tool = findPrimitive(step.tool)!;
+    const args = resolveArgs(step.args, runs);
+    push(`step ${i + 1}/${p.steps.length}: ${step.label ?? step.tool}`);
+    runs[i] = { step, ok: false, durationMs: 0, startedAt: Date.now() };
+    onProgress?.([...runs]);
+    const t0 = Date.now();
+    let attempt = 0;
+    while (true) {
       try {
         const result = await tool.handler(args);
         runs[i] = { step, ok: true, result, durationMs: Date.now() - t0, startedAt: t0 };
+        onProgress?.([...runs]);
+        return;
       } catch (e: any) {
-        runs[i] = { step, ok: false, error: String(e.message ?? e), durationMs: Date.now() - t0, startedAt: t0 };
-        push(`  ✗ ${step.label ?? step.tool}: ${e.message ?? e}`);
+        const msg = String(e.message ?? e);
+        if (attempt === 0 && TRANSIENT_ERROR_RE.test(msg)) {
+          attempt++;
+          push(`  ⟳ ${step.label ?? step.tool}: transient error, retrying once — ${msg.slice(0, 120)}`);
+          await new Promise(r => setTimeout(r, 1500));
+          continue;
+        }
+        runs[i] = { step, ok: false, error: msg, durationMs: Date.now() - t0, startedAt: t0 };
+        push(`  ✗ ${step.label ?? step.tool}: ${msg}`);
         aborted = true;
+        onProgress?.([...runs]);
+        return;
       }
-      onProgress?.([...runs]);
-    }));
+    }
+  }
+
+  for (let w = 0; w < waves.length; w++) {
+    if (aborted) break;
+    const ids = waves[w];
+    if (ids.length > 1) push(`spinning up ${ids.length} sub-agents${ids.length > MAX_CONCURRENT_SUBAGENTS ? ` (capped at ${MAX_CONCURRENT_SUBAGENTS} at a time)` : ""}`);
+    // Chunk wide waves so we never have more than MAX_CONCURRENT_SUBAGENTS active.
+    for (let off = 0; off < ids.length; off += MAX_CONCURRENT_SUBAGENTS) {
+      if (aborted) break;
+      const chunk = ids.slice(off, off + MAX_CONCURRENT_SUBAGENTS);
+      await Promise.all(chunk.map(runStep));
+    }
   }
   return { runs, hadWrites };
 }
