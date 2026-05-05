@@ -202,6 +202,7 @@ function InlineJob({ jobId, requiresApproval, templateId }: { jobId: string; req
       return "Working on it";
     }
     if (phase === "synthesizing") return "Writing your answer";
+    if (phase === "answering") return "Answering directly";
     return "Working on it";
   })();
 

@@ -22,6 +22,15 @@ export function Layout({ children }: { children: ReactNode }) {
   const [health, setHealth] = useState<{ ready: boolean; missing?: string[] } | null>(null);
   const [counts, setCounts] = useState<{ approvals: number; activity: number }>({ approvals: 0, activity: 0 });
   const [persona, setPersona] = useState<{ id: string; name: string; role: string } | null>(null);
+  const [theme, setTheme] = useState<"dark" | "light">(() => {
+    if (typeof window === "undefined") return "dark";
+    const saved = localStorage.getItem("neuroworks.theme");
+    return saved === "light" ? "light" : "dark";
+  });
+  useEffect(() => {
+    document.documentElement.setAttribute("data-theme", theme);
+    localStorage.setItem("neuroworks.theme", theme);
+  }, [theme]);
 
   async function tick() {
     try {
@@ -103,6 +112,14 @@ export function Layout({ children }: { children: ReactNode }) {
               <span className={`inline-block w-1.5 h-1.5 rounded-full ${statusOk ? "bg-leaf-500" : "bg-flame-500 animate-pulse"}`} />
               {statusLabel}
             </div>
+            <button
+              type="button"
+              onClick={() => setTheme(t => t === "dark" ? "light" : "dark")}
+              title={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
+              className="text-xs px-2.5 py-1.5 border border-ink-700 hover:border-violet-500/40 rounded-md text-cream-300 hover:text-cream-100 transition-colors"
+            >
+              {theme === "dark" ? "☼" : "☾"}
+            </button>
           </div>
           <Link to="/knowledge" className="text-xs text-cream-300/70 hover:text-cream-100 px-3 py-1.5 border border-ink-700 rounded-md">Search ⌕</Link>
         </header>

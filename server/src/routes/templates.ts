@@ -73,6 +73,12 @@ templatesRouter.post("/run/:id", async (req, res) => {
   void runJob(job, async (push, progress) => {
     if (custom) {
       bumpRunCount(custom.id);
+      // Persona-derived starter templates ship with an empty plan — they re-plan
+      // each run against the active persona system suffix so output stays in role.
+      // Saved-from-chat templates, by contrast, replay their concrete plan.
+      if (custom.plan.steps.length === 0 && custom.origin?.task) {
+        return generalTaskRunner({ task: custom.origin.task, save_as_template: false }, push, progress);
+      }
       progress({ plan: custom.plan, runs: [], phase: "executing" });
       const { runs } = await executePlan(custom.plan, push, (rs) => progress({ runs: [...rs] }));
       return { fromCustom: custom.id, plan: custom.plan, runs, phase: "done" };

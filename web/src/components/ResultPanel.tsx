@@ -196,7 +196,9 @@ function GeneralTaskResult({ job, live = false }: { job: any; live?: boolean }) 
           ? (inflightCount > 1 ? `${inflightCount} sub-agents working in parallel` : "Working on the steps…")
           : phase === "synthesizing"
             ? "Writing your answer…"
-            : "Working…")
+            : phase === "answering"
+              ? "Answering directly…"
+              : "Working…")
     : (r.savedTemplateId ? "Done · saved as a shortcut" : "Done");
 
   // Group steps into "waves" so concurrent sub-agents render as a single row

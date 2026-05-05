@@ -2,13 +2,48 @@
 @tailwind components;
 @tailwind utilities;
 
-:root { color-scheme: dark; font-family: Inter, system-ui, sans-serif; }
+/* Theme tokens. Tailwind colours `ink-*` and `cream-*` resolve to these CSS
+   vars (see tailwind.config.js), so toggling [data-theme] swaps the entire
+   palette without touching component classes. Light mode keeps the same
+   semantic role for each token (ink = surface, cream = ink) but inverts. */
+:root, [data-theme="dark"] {
+  color-scheme: dark;
+  --c-ink-950: #15140f;
+  --c-ink-900: #1d1c16;
+  --c-ink-850: #23211b;
+  --c-ink-800: #2b2922;
+  --c-ink-700: #3a3830;
+  --c-ink-600: #524f44;
+  --c-cream-50:  #f7f3e8;
+  --c-cream-100: #ece6d4;
+  --c-cream-200: #d8d1bb;
+  --c-cream-300: #b8b09a;
+  --bg-grad-1: rgba(126, 78, 239, 0.04);
+  --bg-grad-2: rgba(246, 166, 35, 0.03);
+}
+[data-theme="light"] {
+  color-scheme: light;
+  --c-ink-950: #faf8f1;
+  --c-ink-900: #f3eee0;
+  --c-ink-850: #ebe5d3;
+  --c-ink-800: #ddd5bf;
+  --c-ink-700: #c4baa1;
+  --c-ink-600: #8e8770;
+  --c-cream-50:  #1a1812;
+  --c-cream-100: #2b2820;
+  --c-cream-200: #4a4538;
+  --c-cream-300: #6e6754;
+  --bg-grad-1: rgba(126, 78, 239, 0.06);
+  --bg-grad-2: rgba(246, 166, 35, 0.05);
+}
+
+:root { font-family: Inter, system-ui, sans-serif; }
 html, body, #root { height: 100%; }
 
 body {
-  background: radial-gradient(ellipse at top, rgba(126, 78, 239, 0.04), transparent 60%),
-              radial-gradient(ellipse at bottom right, rgba(246, 166, 35, 0.03), transparent 50%),
-              #15140f;
+  background: radial-gradient(ellipse at top, var(--bg-grad-1), transparent 60%),
+              radial-gradient(ellipse at bottom right, var(--bg-grad-2), transparent 50%),
+              var(--c-ink-950);
 }
 
 .font-display { font-family: 'Crimson Text', Georgia, serif; }

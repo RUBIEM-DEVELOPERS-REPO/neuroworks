@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import { api, Template } from "../lib/api";
 import { Card, RoleIcon } from "../components/Card";
 import { TaskRunner } from "../components/TaskRunner";
+import { AgentVisualizer } from "../components/AgentVisualizer";
 
 export function Dashboard() {
   const [templates, setTemplates] = useState<Template[] | null>(null);
@@ -12,17 +13,35 @@ export function Dashboard() {
   const [nl, setNl] = useState("");
   const [intentBusy, setIntentBusy] = useState(false);
   const [err, setErr] = useState("");
+  const [persona, setPersona] = useState<any>(null);
 
   async function load() {
     try {
-      const [t, j] = await Promise.all([api.listTemplates(), api.listJobs().catch(() => ({ jobs: [] as any[] }))]);
+      const [t, j, p] = await Promise.all([
+        api.listTemplates(),
+        api.listJobs().catch(() => ({ jobs: [] as any[] })),
+        api.listPersonas().catch(() => ({ active: null } as any)),
+      ]);
       setTemplates(t.templates);
       setRecent(j.jobs.slice(0, 4));
+      setPersona(p.active);
     } catch (e: any) { setErr(e.message); }
   }
   useEffect(() => { load(); const i = setInterval(load, 6000); return () => clearInterval(i); }, []);
 
-  const quickStart = useMemo(() => (templates ?? []).slice(0, 4), [templates]);
+  // When a persona is active, prioritise its starter templates (id prefix
+  // `custom-<personaId>-`) at the top of Quick Start so the dashboard reflects
+  // the role's day-to-day work the moment a JD is uploaded.
+  const quickStart = useMemo(() => {
+    const all = templates ?? [];
+    if (persona?.id) {
+      const personaPrefix = `custom-${persona.id}-`;
+      const personaT = all.filter(t => t.id.startsWith(personaPrefix));
+      const others = all.filter(t => !t.id.startsWith(personaPrefix));
+      return [...personaT, ...others].slice(0, 4);
+    }
+    return all.slice(0, 4);
+  }, [templates, persona?.id]);
 
   async function submitNL(e: React.FormEvent) {
     e.preventDefault();
@@ -49,7 +68,9 @@ export function Dashboard() {
 
       <section>
         <div className="flex items-baseline justify-between mb-3 px-1">
-          <div className="text-xs uppercase tracking-[0.25em] text-cream-300/60">Quick start — suggested tasks</div>
+          <div className="text-xs uppercase tracking-[0.25em] text-cream-300/60">
+            Quick start — {persona ? <>tasks tuned for <span className="text-violet-400">{persona.name}</span></> : "suggested tasks"}
+          </div>
           <Link to="/templates" className="text-xs text-cream-300 hover:text-cream-50">View all templates →</Link>
         </div>
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
@@ -78,6 +99,10 @@ export function Dashboard() {
           <button type="submit" disabled={intentBusy} className="bg-violet-500 hover:bg-violet-600 disabled:opacity-50 text-white text-sm font-medium px-5 py-2.5 rounded-md mr-1.5">{intentBusy ? "Routing…" : "Delegate →"}</button>
         </form>
         <div className="mt-2 text-xs text-cream-300/50 text-center">Your task gets routed to the closest template via Ollama; you can edit the parameters before final delegation.</div>
+      </section>
+
+      <section>
+        <AgentVisualizer />
       </section>
 
       <section className="grid grid-cols-3 gap-4">

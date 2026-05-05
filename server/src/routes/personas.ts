@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { addPersona, deletePersona, extractPersonaMetadata, getActivePersona, loadPersonas, setActivePersona, slugifyId, type Persona } from "../lib/personas.js";
 import { journal } from "../lib/journal.js";
+import { saveCustomTemplate, slugify, type CustomTemplate } from "../lib/custom-templates.js";
 
 export const personasRouter = Router();
 
@@ -30,21 +31,47 @@ personasRouter.post("/", async (req, res) => {
     createdAt: new Date().toISOString(),
   };
   addPersona(persona);
+  // Generate starter templates from the persona's responsibilities so the dashboard
+  // immediately reflects the role's day-to-day work. Each responsibility becomes a
+  // one-step `general-task` template the user can re-run with a click.
+  const generated = generateStarterTemplates(persona);
+  for (const t of generated) saveCustomTemplate(t);
   void journal({
     kind: "persona",
     slug: persona.id,
     title: `${persona.name} — ${persona.role}`,
-    frontmatter: { personaId: persona.id, role: persona.role, tone: persona.tone },
+    frontmatter: { personaId: persona.id, role: persona.role, tone: persona.tone, generatedTemplates: generated.length },
     body: [
       `**Role:** ${persona.role}`,
       persona.description ? `\n${persona.description}\n` : "",
       `**Tone:** ${persona.tone}`,
       persona.responsibilities.length ? `\n## Responsibilities\n${persona.responsibilities.map(r => `- ${r}`).join("\n")}\n` : "",
+      generated.length ? `\n## Starter templates generated\n${generated.map(g => `- \`${g.id}\` — ${g.title}`).join("\n")}\n` : "",
       `## Job description (raw)\n\n${persona.jobDescription}`,
     ].join("\n"),
   });
-  res.json({ persona });
+  res.json({ persona, generatedTemplateIds: generated.map(g => g.id) });
 });
+
+function generateStarterTemplates(persona: Persona): CustomTemplate[] {
+  const out: CustomTemplate[] = [];
+  for (const resp of persona.responsibilities.slice(0, 5)) {
+    const task = `As a ${persona.role}, ${resp.toLowerCase().replace(/\.$/, "")}.`;
+    const id = `custom-${persona.id}-${slugify(resp).slice(0, 40)}`;
+    out.push({
+      id,
+      role: "Custom",
+      title: resp.length > 80 ? resp.slice(0, 77) + "…" : resp,
+      description: `Persona-derived starter task for "${persona.name}".`,
+      origin: { task, createdAt: new Date().toISOString() },
+      // Empty plan — running this template re-plans against the persona system suffix
+      // each time, so the LLM stays in the persona role for execution.
+      plan: { steps: [], summary: undefined, waves: [] },
+      runCount: 0,
+    });
+  }
+  return out;
+}
 
 personasRouter.post("/:id/activate", (req, res) => {
   try {

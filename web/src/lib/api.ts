@@ -44,4 +44,5 @@ export const api = {
   deactivatePersona: () => req<{ active: null }>("/api/personas/deactivate", { method: "POST" }),
   deletePersona: (id: string) => req<{ deleted: true }>(`/api/personas/${id}`, { method: "DELETE" }),
   previewPersona: (jobDescription: string) => req<{ role: string; description: string; tone: string; responsibilities: string[] }>("/api/personas/preview", { method: "POST", body: JSON.stringify({ jobDescription }) }),
+  peers: () => req<{ self: any; peers: any[] }>("/api/peers"),
 };
