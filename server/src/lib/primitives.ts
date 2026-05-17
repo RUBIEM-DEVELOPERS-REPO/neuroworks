@@ -1,4 +1,5 @@
 import { existsSync, readdirSync, readFileSync, statSync, appendFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { resolve, basename, extname, sep, join } from "node:path";
 import { config } from "../config.js";
 import { ollamaGenerate, ollamaGenerateWithMeta } from "./ollama.js";
@@ -500,6 +501,95 @@ export const primitives: Primitive[] = [
       }
       if (st.size > 200_000) throw new Error(`file too large (${st.size} bytes, cap 200_000). Use a different tool or extract a section.`);
       return { content: readFileSync(full, "utf8"), size: st.size, ext, name: basename(full), resolvedFrom: raw, resolvedTo: full };
+    },
+  },
+  {
+    name: "fs.find_in",
+    description: "Find files in a known user folder (downloads / desktop / documents / vault) whose name matches a substring. Use this FIRST when the customer says 'check my downloads for X', 'look in my documents for Y', etc. — it produces the path you then hand to fs.read_external (or vault.read for vault hits). Cross-platform: resolves to ~/Downloads etc. on macOS/Linux and %USERPROFILE%\\Downloads on Windows. Returns the matches sorted newest-first so 'the X I just saved' is first.",
+    readonly: true,
+    args: [
+      { name: "folder", type: "string", required: true, description: "Folder shortcut: 'downloads' | 'desktop' | 'documents' | 'vault' | 'home' — or an absolute path" },
+      { name: "name", type: "string", required: true, description: "Filename substring to match (case-insensitive). E.g. 'AIIA Reference Letter' matches 'AIIA-Reference-Letter.pdf'." },
+      { name: "limit", type: "number", required: false, description: "Max matches to return (default 10, cap 50)" },
+      { name: "depth", type: "number", required: false, description: "Subfolder recursion depth (default 2, cap 4)" },
+    ],
+    handler: async (args) => {
+      const folderArg = String(args.folder ?? "").trim();
+      const nameArg = String(args.name ?? "").trim();
+      if (!folderArg) throw new Error("fs.find_in: 'folder' is required");
+      if (!nameArg) throw new Error("fs.find_in: 'name' is required");
+      const limit = Math.max(1, Math.min(50, Number(args.limit ?? 10)));
+      const depth = Math.max(1, Math.min(4, Number(args.depth ?? 2)));
+      // Resolve folder shortcut → absolute path, cross-platform.
+      // homedir() returns /Users/<user> on macOS, C:\Users\<user> on Windows,
+      // /home/<user> on Linux. Default Downloads/Desktop/Documents folders
+      // sit directly under that on all three. The "vault" shortcut maps to
+      // the configured Obsidian vault path. "home" is allowed but its
+      // search still goes through the same security gate, so .ssh/.aws
+      // etc. inside ~ get refused.
+      const home = homedir();
+      const shortcuts: Record<string, string> = {
+        downloads: join(home, "Downloads"),
+        download: join(home, "Downloads"),
+        desktop: join(home, "Desktop"),
+        documents: join(home, "Documents"),
+        docs: join(home, "Documents"),
+        home: home,
+        vault: config.vaultPath,
+        inbox: join(config.vaultPath, "0-Inbox"),
+      };
+      const root = shortcuts[folderArg.toLowerCase()] ?? resolve(folderArg);
+      // Security gate — refuses .ssh / .aws / cred-store dirs even if the
+      // customer somehow asks for them by absolute path.
+      const { assertSafeExternalPath } = await import("./security-gates.js");
+      assertSafeExternalPath(root);
+      if (!existsSync(root)) {
+        throw new Error(`fs.find_in: folder not found at "${root}" (resolved from "${folderArg}").`);
+      }
+      const needle = nameArg.toLowerCase();
+      // Allow simple wildcard support: spaces or hyphens are interchangeable
+      // ("AIIA Reference Letter" matches "AIIA-Reference-Letter.pdf"), and
+      // multiple needle tokens all need to be present somewhere in the name.
+      const needleTokens = needle.replace(/[-_\s]+/g, " ").split(" ").filter(Boolean);
+      type Hit = { path: string; name: string; ext: string; size: number; modified: string; folder: string };
+      const hits: Hit[] = [];
+      function walk(dir: string, d: number) {
+        if (hits.length >= limit || d > depth) return;
+        let entries: any[] = [];
+        try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return; }
+        for (const e of entries) {
+          if (hits.length >= limit) return;
+          if (e.name.startsWith(".")) continue; // skip hidden / dotfiles
+          const full = join(dir, e.name);
+          if (e.isDirectory()) { walk(full, d + 1); continue; }
+          // Match: every needle token must appear in the basename when the
+          // basename's separators are normalised to spaces. So "AIIA Ref"
+          // matches "aiia-reference-letter.pdf", "AIIA_Reference.docx", etc.
+          const normalised = e.name.toLowerCase().replace(/[-_]+/g, " ");
+          if (!needleTokens.every(t => normalised.includes(t))) continue;
+          let st: any;
+          try { st = statSync(full); } catch { continue; }
+          if (!st.isFile()) continue;
+          hits.push({
+            path: full,
+            name: e.name,
+            ext: extname(e.name).toLowerCase(),
+            size: st.size,
+            modified: st.mtime.toISOString(),
+            folder: dir,
+          });
+        }
+      }
+      walk(root, 1);
+      // Newest first — "the X I just downloaded" is the most likely match.
+      hits.sort((a, b) => (a.modified < b.modified ? 1 : -1));
+      return {
+        folder: folderArg,
+        resolvedRoot: root,
+        query: nameArg,
+        count: hits.length,
+        matches: hits,
+      };
     },
   },
   {
@@ -1112,6 +1202,7 @@ export function humanStepLabel(tool: string, args: Record<string, any> = {}): st
     case "skill.draft":        return s("intent") ? `Drafting a "${s("intent")}" skill` : "Drafting a new skill";
     case "fs.list_external":   return s("path") ? `Looking inside ${s("path")}` : "Browsing your files";
     case "fs.read_external":   return s("path") ? `Reading ${s("path")}` : "Reading a file";
+    case "fs.find_in":         return s("folder") && s("name") ? `Looking in your ${s("folder")} for "${s("name")}"` : "Searching your local folders";
     case "clock.now":          return "Checking the clock";
     case "web.search":         return s("query") ? `Searching the web for "${s("query")}"` : "Searching the web";
     case "research.deep":      return s("query") ? `Researching "${s("query")}" — vault + web` : "Researching";

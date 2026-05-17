@@ -869,6 +869,54 @@ function heuristicPlan(task: string): Plan | null {
   const t = task.trim();
   if (!t) return null;
 
+  // Local-file lookup: "check/look/find/search in my downloads for X" /
+  // "look in my desktop for X" / "open the AIIA letter in my documents" — etc.
+  // Routes to fs.find_in + fs.read_external so PDFs/DOCXs run through the
+  // doc-extractor cleanly. Chained via $step_0 reference so a single match
+  // gets read automatically; the synth handles the "tell me what's inside"
+  // suffix without needing a separate step.
+  //
+  // CRITICAL: matches BEFORE the URL/research patterns so the LLM planner
+  // never sees this shape (the previous behaviour was a 3-minute web research
+  // run for "check my downloads for AIIA Reference Letter").
+  const localFileMatch = t.match(
+    /^\s*(?:(?:please\s+|could\s+you\s+|can\s+you\s+)?(?:check|look|find|search|browse|see|grab|open|read)\s+(?:in\s+)?)?my\s+(downloads?|desktop|documents?|docs|inbox|vault|home(?:\s+folder)?)\s+(?:folder\s+)?(?:for\s+|to\s+find\s+|to\s+see\s+|to\s+look\s+up\s+)?(.+?)(?:\s+(?:and|then|to)\s+(?:tell|show|read|summari[sz]e|explain).*)?\s*[.?!]?\s*$/i,
+  );
+  if (localFileMatch) {
+    const folderRaw = localFileMatch[1].toLowerCase().replace(/\s+folder/, "");
+    const name = localFileMatch[2].trim().replace(/[.?!]+$/, "");
+    // Map "docs" → "documents", "home folder" → "home", strip trailing 's'
+    // for downloads/documents so both forms match.
+    const folder = folderRaw === "docs" ? "documents"
+                 : folderRaw === "downloads" ? "downloads"
+                 : folderRaw === "document" ? "documents"
+                 : folderRaw === "download" ? "downloads"
+                 : folderRaw;
+    if (name && name.length >= 2 && name.length <= 200) {
+      return {
+        steps: [
+          {
+            tool: "fs.find_in",
+            args: { folder, name, limit: 5 },
+            rationale: "local-file lookup shape recognised — find matching file in user's folder",
+            label: humanStepLabel("fs.find_in", { folder, name }),
+          },
+          {
+            // Read the top match. fs.read_external routes PDF/DOCX/XLSX
+            // through the doc-extractor so binary contents become readable
+            // text for the synth to summarise.
+            tool: "fs.read_external",
+            args: { path: "$step_0.matches.0.path" },
+            rationale: "read the top match (newest first) to surface its contents",
+            label: "Reading the top match",
+          },
+        ],
+        summary: `Look in your ${folder} for "${name}" and surface its contents`,
+        waves: [[0], [1]],
+      };
+    }
+  }
+
   // Bare URL or scrape/browse/open <url>
   const urlMatch = t.match(/^\s*(?:(?:scrape|browse|open|fetch|read)\s+)?(https?:\/\/\S+)\s*$/i);
   if (urlMatch) {
