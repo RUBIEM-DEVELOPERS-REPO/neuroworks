@@ -1004,7 +1004,7 @@ async function synthesize(
   const succeeded = runs.filter(r => r.ok);
   const failed = runs.filter(r => !r.ok);
   if (succeeded.length === 0) {
-    return failed.length > 0 ? `I tried, but step ${runs.indexOf(failed[0]) + 1} (${failed[0].step.tool}) failed: ${failed[0].error}` : "I couldn't execute any step.";
+    return humanizeAllFail(task, failed);
   }
 
   // Passthrough: when a single primitive (e.g. research.deep, peer.delegate)
@@ -1158,6 +1158,132 @@ function compactResult(r: any): any {
     return out;
   }
   return r;
+}
+
+// Produce a polished, customer-facing message when EVERY plan step failed.
+// Replaces the old "I tried, but step 1 (web.scrape) failed: <stack>" dump
+// that exposed internal step indices, tool names, and env-var hints.
+//
+// Strategy:
+//   1. Categorise each failure — security gate, network, auth, missing
+//      file, planning gap, other.
+//   2. Pick the dominant failure (the first one usually exposes the root
+//      cause; the rest are often cascades).
+//   3. Render a short, employee-style explanation with the relevant
+//      next-action — never the raw stack trace, never tool names.
+//
+// Categories produce different copy. The output reads as one paragraph of
+// prose to the customer; technical detail (the original error text) is
+// folded into a small italic line at the bottom for debugging without
+// being the headline.
+function humanizeAllFail(task: string, failed: StepRun[]): string {
+  if (failed.length === 0) {
+    return "I couldn't get anywhere on this — nothing executed. Could you rephrase what you'd like me to do?";
+  }
+  // Pick the first failure as the headline. Subsequent failures are usually
+  // cascades from the same root cause.
+  const head = failed[0];
+  const err = String(head.error ?? "").trim();
+  const tool = head.step.tool;
+  const args = head.step.args ?? {};
+  const targetUrl = typeof (args as any).url === "string" ? (args as any).url : "";
+  const targetPath = typeof (args as any).path === "string" ? (args as any).path : "";
+
+  // 1. SECURITY REFUSAL — SSRF gate on a web tool. The error message starts
+  //    with "Refused to fetch …". Reframe in plain language with the
+  //    specific target named, and offer the override path WITHOUT exposing
+  //    the env var name (the curious customer can find it in .env.example).
+  if (/^Refused to fetch/i.test(err) && targetUrl) {
+    const host = (() => { try { return new URL(targetUrl).hostname; } catch { return targetUrl; } })();
+    const why =
+      /169\.254\.169\.254/.test(host) ? "the cloud-metadata service, which agents are blocked from to prevent credential leaks"
+      : /^(?:127\.|::1$|localhost)/i.test(host) ? "a loopback address (your own machine)"
+      : /^(?:10\.|172\.(?:1[6-9]|2[0-9]|3[01])\.|192\.168\.)/.test(host) ? "a private internal network"
+      : "a non-public address";
+    return `I can't reach **${host}** — it's ${why}, and my web tools are scoped to the public internet so secrets stored on internal services aren't exposed accidentally.\n\nIf this is a deliberate request (you're testing reachability or fetching from your own dev server), enable private-host access in \`.env\` (see \`.env.example\` — look for \`CLAWBOT_WEB_ALLOW_PRIVATE\`) and try again. Otherwise, share a public URL or tell me what you're trying to find out and I'll dig differently.`;
+  }
+
+  // 2. PATH SECURITY REFUSAL — fs gate on .env / .ssh / cred stores.
+  if (/^Refused to read/i.test(err) && targetPath) {
+    return `That path looks like a sensitive file (credentials, keys, or browser cookie store), so I won't read it by default — it's the kind of thing that would leak if I quoted it back in a reply or wrote it to your vault.\n\nIf you genuinely need me to read it (you're debugging a config), there's an override in \`.env\` (\`CLAWBOT_FS_UNRESTRICTED\` in \`.env.example\`). Otherwise tell me what you're after and I'll find a safer path.`;
+  }
+
+  // 3. NETWORK — couldn't reach the public web. Common: timeouts, DNS,
+  //    transient TLS issues. Suggest retry; don't blame the customer.
+  if (/\b(?:ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|fetch failed|socket hang up|abort|timeout)\b/i.test(err)) {
+    const targetBit = targetUrl ? ` reaching **${(() => { try { return new URL(targetUrl).hostname; } catch { return targetUrl; } })()}**` : "";
+    return `I hit a network snag${targetBit} — the connection dropped, timed out, or couldn't resolve the host. Often this clears up in a few seconds. Want me to try again, or do you have a different source in mind?`;
+  }
+
+  // 4. AUTH / FORBIDDEN — 401/403, missing token, expired creds.
+  if (/\b(?:401|403|unauthori[sz]ed|forbidden|invalid_request_error|API key|missing.*token)\b/i.test(err)) {
+    return `I'm not authorised to access that resource — looks like the token / key is missing, expired, or doesn't have permission. Check the relevant entry in your \`.env\` (GitHub PAT, API keys, etc.) and try again.`;
+  }
+
+  // 5. NOT FOUND — file or repo doesn't exist where I looked.
+  if (/\b(?:file not found|no such file|ENOENT|404|not found)\b/i.test(err)) {
+    if (targetPath) return `I couldn't find anything at \`${targetPath}\`. Could the path be slightly different (typo, wrong folder), or should I look somewhere else?`;
+    if (targetUrl) return `That URL returned a 404 — the page doesn't exist (or moved). Want me to try a search for the same topic instead?`;
+    return `I couldn't find what you were pointing me at. Want to share a path, URL, or topic and I'll try again?`;
+  }
+
+  // 6. RATE LIMIT — 429.
+  if (/\b(?:429|rate.?limit|too many requests)\b/i.test(err)) {
+    return `We're being rate-limited by the upstream service. Give it a minute and ask again; if it keeps happening, this provider may need an API key upgrade.`;
+  }
+
+  // 7. PLANNING / TOOL CATALOG MISMATCH — the planner picked a tool that
+  //    doesn't exist, or args didn't validate.
+  if (/(?:invalid tool|no such tool|unknown tool|missing.*arg|args.*invalid)/i.test(err)) {
+    return `I planned this in a way that didn't quite fit my actual tools — that's on me. Want to rephrase the request or share a bit more about what you need? Sometimes naming the deliverable (email, brief, code, etc.) helps me pick the right approach.`;
+  }
+
+  // 8. FALLBACK — unknown class. Give the customer something useful: name
+  //    the kind of work that failed (vault read, web fetch, research, etc.)
+  //    without exposing tool name, and tuck the technical detail in italic
+  //    at the end so a developer-customer can still see what happened.
+  const friendlyAction = humanWorkKind(tool);
+  const errSnippet = err.length > 240 ? err.slice(0, 240) + "…" : err;
+  return `I tried to ${friendlyAction} and hit an error I don't have a clean recovery for. Could you tell me a bit more about what you're trying to achieve, or try a different angle?\n\n_Technical detail: ${errSnippet}_`;
+}
+
+// Friendly verb-phrase for a tool name. Used in the fallback message so we
+// don't expose names like "web.scrape" to the customer.
+function humanWorkKind(tool: string): string {
+  switch (tool) {
+    case "vault.search":            return "search your notes";
+    case "vault.read":              return "read a note from your vault";
+    case "vault.list":              return "list your vault";
+    case "vault.write":             return "save a note to your vault";
+    case "vault.edit":              return "edit a note in your vault";
+    case "vault.scan_docs":         return "scan documents in your vault";
+    case "research.deep":           return "research the topic";
+    case "research.multiperspective": return "investigate the topic from multiple angles";
+    case "web.fetch":               return "read the webpage";
+    case "web.scrape":              return "open the page in a browser";
+    case "web.firecrawl":           return "fetch the page via Firecrawl";
+    case "web.search":              return "search the web";
+    case "brave.list_tabs":
+    case "brave.read_tab":
+    case "brave.search_tabs":       return "read your open Brave tabs";
+    case "github.list_repos":
+    case "github.read_repo":
+    case "github.get_file":         return "pull from GitHub";
+    case "github.create_issue":     return "open a GitHub issue";
+    case "fs.read_external":        return "read the file";
+    case "fs.list_external":        return "list the folder";
+    case "ollama.generate":         return "draft a response";
+    case "peer.delegate":           return "hand the work off to a peer";
+    case "peer.review":             return "ask a peer to review the draft";
+    case "quality.check":           return "quality-check the draft";
+    case "security.scan":           return "security-scan the draft";
+    case "skill.draft":
+    case "skill.fetch_remote":
+    case "skill.load":
+    case "skill.list":
+    case "skill.suggest":           return "look up a skill playbook";
+    default:                        return "complete this part of the task";
+  }
 }
 
 // Rescue synth — runs when the LLM synth call threw OR returned blank. Builds
