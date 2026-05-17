@@ -134,6 +134,104 @@ export function skillsCatalog(): string {
   return all.map(s => `- ${s.name}: ${s.description}`).join("\n");
 }
 
+// Draft a brand-new skill .md when no built-in or user skill targets the
+// task's intent — the "self-improvement loop": clawbot notices it's
+// struggling, asks the LLM to write the playbook it wishes it had, saves
+// it to skills/_user/, and the next run on a similar task loads the new
+// skill automatically (since suggestSkillsForIntent reads from disk).
+//
+// We deliberately use the LARGE-tier LLM (forced complexity:"high") for the
+// draft when OpenRouter is available — playbook quality is what determines
+// whether the loop actually helps. A small-model skill that hallucinates
+// rules makes the agent worse, not better.
+//
+// Inputs:
+//   • intent — the detected intent label (e.g. "draft-email", "summarize")
+//   • taskSample — the actual user request that exposed the skill gap
+//   • failureReason — what went wrong (low quality score, missing structure,
+//     etc.) so the LLM knows what to address in the playbook
+//
+// Returns the saved skill or null if the draft was unusable (too short,
+// malformed frontmatter). Caller should fall back to the default synth on
+// null — the agent shouldn't crash because the meta-skill draft missed.
+export async function draftSkillForIntent(args: {
+  intent: string;
+  taskSample: string;
+  failureReason?: string;
+}): Promise<Skill | null> {
+  // Lazy-import the LLM dispatcher to keep skills.ts free of the heavy
+  // ollama/openrouter dependency tree at module load.
+  const { llmGenerate } = await import("./llm.js");
+  const intentSlug = args.intent.trim().toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "");
+  if (!intentSlug) return null;
+
+  const sys = `You write skill playbooks — short markdown documents that teach an AI agent how to deliver employee-quality output for a specific task type. Each skill follows the same template; emit ONLY the markdown, no commentary, no fences around the whole doc.
+
+Template (replicate exactly, fill the placeholders):
+
+---
+name: <kebab-case-name-matching-the-intent>
+description: <one-line, what this skill is for>
+applies_to: [<intent-label>]
+---
+
+# Skill: <Human-readable name>
+
+## Goal
+
+<One sentence on what good looks like for this task.>
+
+## <Process | Structure | Format>
+
+<3-7 bullets OR a numbered process OR a template block. Match the section name to the deliverable.>
+
+## Rules
+
+- <Concrete rule, not vague advice. "Lead with the recommendation in the first 2 sentences" beats "be clear">
+- <…>
+- <…>
+
+## Pitfalls
+
+- <Common failure mode with a one-line fix>
+- <…>
+
+Rules for YOUR draft:
+- Be concrete. Generic advice ("be clear", "stay focused") doesn't help an agent — give it specifics it can apply mechanically.
+- 50-100 lines total. Skills that don't fit on one screen don't get loaded.
+- If the task has a deliverable shape (email, memo, report, code, etc.), include an explicit template block.
+- Reference real failure modes — what would an inexperienced operator get wrong?
+- No "this skill helps you…" preamble. Skills are read by the agent, not the user.`;
+
+  const userPrompt = `Intent: ${args.intent}
+Sample task that exposed the skill gap: "${args.taskSample.slice(0, 600)}"
+${args.failureReason ? `What went wrong on the previous attempt: ${args.failureReason.slice(0, 400)}` : ""}
+
+Draft the skill playbook for this intent. Output only the markdown — no preamble, no fences around the whole thing.`;
+
+  let raw: string;
+  try {
+    raw = await llmGenerate(userPrompt, sys, { profile: "synthesis", complexity: "high", maxTokens: 1024 });
+  } catch {
+    return null;
+  }
+  raw = raw.trim().replace(/^```(?:markdown|md)?\n?([\s\S]+?)\n?```$/i, "$1").trim();
+  // Sanity: the draft must start with `---` (frontmatter) AND contain at
+  // least one `##` heading. Otherwise it's not a usable skill.
+  if (!raw.startsWith("---") || !raw.includes("##")) return null;
+
+  const { meta } = parseFrontmatter(raw);
+  const baseName = String(meta.name ?? `auto-${intentSlug}`).replace(/[^a-zA-Z0-9-_]+/g, "-").toLowerCase().slice(0, 60) || `auto-${intentSlug}`;
+  // Always namespace auto-drafted skills with `auto-` so the user can tell
+  // them apart from curated ones at a glance.
+  const filename = baseName.startsWith("auto-") ? `${baseName}.md` : `auto-${baseName}.md`;
+  mkdirSync(SKILLS_USER, { recursive: true });
+  const dest = join(SKILLS_USER, filename);
+  writeFileSync(dest, raw, "utf8");
+  cache.delete(dest);
+  return loadSkillFromDisk(dest, "user");
+}
+
 // Fetch a remote skill .md (e.g. from GitHub raw, gist, or a curated repo)
 // and save it under skills/_user/ so it's available on the next list call.
 // Gated by CLAWBOT_REMOTE_SKILLS=1 — by default we refuse remote fetches so
@@ -145,6 +243,11 @@ export async function fetchRemoteSkill(url: string): Promise<{ saved: string; sk
   if (!/^https?:\/\//i.test(url)) {
     throw new Error(`Remote skill URL must be http(s): ${url}`);
   }
+  // SECURITY: SSRF block — opt-in CLAWBOT_REMOTE_SKILLS=1 doesn't imply
+  // "and also reach internal services". Anyone wanting to pull a skill from
+  // a private host must additionally set CLAWBOT_WEB_ALLOW_PRIVATE=1.
+  const { assertSafePublicUrl } = await import("./security-gates.js");
+  assertSafePublicUrl(url);
   const r = await fetch(url, { redirect: "follow" });
   if (!r.ok) throw new Error(`Failed to fetch ${url}: HTTP ${r.status}`);
   const raw = await r.text();

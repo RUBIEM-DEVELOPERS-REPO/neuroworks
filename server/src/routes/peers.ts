@@ -6,7 +6,7 @@ import { ensureWorker, workerStatus, shutdownManagedWorker } from "../lib/worker
 import { newJob, runJob } from "../lib/jobs.js";
 import { planAndExecute } from "../lib/agent.js";
 import { ollamaGenerate } from "../lib/ollama.js";
-import { setActivePersona, getActivePersona, personaSystemSuffix, addPersona, deletePersona, loadPersonas, type Persona } from "../lib/personas.js";
+import { personaSystemSuffix, addPersona, deletePersona, loadPersonas, type Persona } from "../lib/personas.js";
 
 export const peersRouter = Router();
 
@@ -232,26 +232,52 @@ peersRouter.post("/delegate", async (req, res) => {
     res.json({ jobId: job.id, accepted: true, peer: config.name });
 
     void runJob(job, async (push, progress) => {
-    const original = getActivePersona();
-    // Track whether we registered an ephemeral persona so we can drop it
-    // after the run (otherwise the worker's personas.json fills with
-    // every customer's hires).
+    // PERSONA SCOPING — fixed in this iteration to be race-safe under
+    // concurrent delegations.
+    //
+    // Old behaviour: this handler called setActivePersona(snapshot.id) to
+    // mutate the worker's GLOBAL active persona, then restored "original"
+    // in a finally. With multiple in-flight delegations on the same worker
+    // (which the new pool allows), the finallys would step on each other —
+    // delegation A's restore could overwrite delegation B's set.
+    //
+    // New behaviour: we DO NOT mutate global persona state. The persona for
+    // THIS run is held in a local variable + passed to planAndExecute via
+    // opts.personaSystemSuffix (which the synth uses). The ephemeral hire
+    // is still registered via addPersona so the persona is discoverable in
+    // /api/personas during execution, but global active stays untouched —
+    // each concurrent run carries its own persona scope.
+    //
+    // Tracked across the run so the response payload can verify which
+    // persona actually shaped the synth (lets the primary detect mismatches).
     let ephemeralPersonaId: string | null = null;
+    let resolvedPersona: Persona | null = null;
     try {
       if (personaSnapshot && personaSnapshot.id) {
         // Hydrate the snapshot. If a persona with this id already exists on
         // the worker we leave it alone (user's local edit wins); otherwise
         // we add it and mark it for cleanup.
         const existing = loadPersonas().personas.find(p => p.id === personaSnapshot.id);
-        if (!existing) { addPersona(personaSnapshot); ephemeralPersonaId = personaSnapshot.id; }
-        try { setActivePersona(personaSnapshot.id); push(`hired employee "${personaSnapshot.name}" (${personaSnapshot.role}) for this task`); }
-        catch (e: any) { push(`could not adopt hired persona (${e.message ?? e}) — continuing with current`); }
+        if (!existing) {
+          try { addPersona(personaSnapshot); ephemeralPersonaId = personaSnapshot.id; }
+          catch (e: any) { push(`could not register ephemeral persona (${e.message ?? e}) — continuing with default`); }
+        }
+        resolvedPersona = personaSnapshot;
+        push(`hired employee "${personaSnapshot.name}" (${personaSnapshot.role}) for this task — scoped to this run only`);
       } else if (requestedPersona) {
-        try { setActivePersona(requestedPersona); push(`switched persona to ${requestedPersona} for delegated run`); }
-        catch (e: any) { push(`could not switch persona (${e.message ?? e}) — continuing with current`); }
+        // Caller named a persona without sending a snapshot. Look it up
+        // in the worker's local store.
+        const found = loadPersonas().personas.find(p => p.id === requestedPersona);
+        if (found) {
+          resolvedPersona = found;
+          push(`scoping this run to persona "${found.name}" (${found.role})`);
+        } else {
+          push(`requested persona "${requestedPersona}" not found on this worker — falling back to default`);
+        }
       }
-      const persona = getActivePersona();
-      const suffix = personaSystemSuffix(persona);
+      // Suffix is captured from THIS run's persona, not from global state.
+      // Concurrent delegations with different personas no longer collide.
+      const suffix = personaSystemSuffix(resolvedPersona);
       const r = await planAndExecute(task, push, (patch) => progress(patch as Record<string, unknown>), { personaSystemSuffix: suffix });
       return {
         answer: r.answer,
@@ -270,14 +296,17 @@ peersRouter.post("/delegate", async (req, res) => {
           result: compactRunResult(x.result, x.step?.tool),
         })),
         delegatedFromPeer: true,
+        // Verification trail — the primary's chat handler checks this matches
+        // what it sent. Mismatch = persona-shifter bug; log and surface.
+        personaIdUsed: resolvedPersona?.id ?? null,
+        personaNameUsed: resolvedPersona?.name ?? null,
         budgets: r.budgets,
         subagentTimings: r.subagentTimings,
       };
     } finally {
-      // Restore the worker's original active persona — never leave it
-      // changed by a delegation. Drop the ephemeral hire if we registered
-      // one so the worker's persona store doesn't accumulate over time.
-      if (requestedPersona || personaSnapshot) setActivePersona(original?.id ?? null);
+      // Drop the ephemeral hire if we registered one so the worker's persona
+      // store doesn't accumulate over time. NO setActivePersona restoration
+      // — we never mutated it in the first place.
       if (ephemeralPersonaId) {
         try { deletePersona(ephemeralPersonaId); } catch { /* swallow — non-fatal */ }
       }

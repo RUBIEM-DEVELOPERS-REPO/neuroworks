@@ -64,6 +64,11 @@ export type ScrapeResult = {
 // Scrape a JS-rendered page. The page gets a fresh incognito context so cookies
 // don't leak between calls. Times out at the user-specified or default budget.
 export async function scrape(opts: ScrapeOptions): Promise<ScrapeResult> {
+  // SECURITY: same SSRF block as web.fetch. A headless browser fetching
+  // 169.254.169.254 would happily return cloud metadata; the gate stops
+  // that. Override via CLAWBOT_WEB_ALLOW_PRIVATE=1.
+  const { assertSafePublicUrl } = await import("./security-gates.js");
+  assertSafePublicUrl(opts.url);
   const timeoutMs = Math.min(60_000, Math.max(2_000, opts.timeoutMs ?? 20_000));
   const browser = await getBrowser();
   const context = await browser.newContext({

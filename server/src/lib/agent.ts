@@ -14,6 +14,23 @@ function parseIntentFromTask(task: string): string | undefined {
   return m ? m[1].toLowerCase() : undefined;
 }
 
+// Extract just the user's actual request from the enriched task — strip
+// thread context, interpretation lines, and deliverable hints so the LLM
+// drafting a skill sees only the original ask. Used by skill auto-draft.
+function parseUserRequestFromTask(task: string): string {
+  // Enriched tasks contain a "Current request (...): <text>" block when
+  // thread context was attached. Otherwise the task IS the bare text.
+  const m = task.match(/Current request \(.*?\):\s*([\s\S]*?)(?:\n\nInterpretation:|\n\nDeliverable shape:|$)/);
+  if (m && m[1].trim().length > 0) return m[1].trim().slice(0, 400);
+  // Strip the interpretation + deliverable blocks that chat.ts appends.
+  return task
+    .replace(/\n*Interpretation:[\s\S]*$/i, "")
+    .replace(/\n*Deliverable shape:[\s\S]*$/i, "")
+    .replace(/^\(You are operating as[^)]+\)\n+/, "")
+    .trim()
+    .slice(0, 400);
+}
+
 export type PlanStep = { tool: string; args: Record<string, any>; rationale?: string; label?: string };
 export type Plan = { steps: PlanStep[]; summary?: string; waves?: number[][] };
 export type StepRun = { step: PlanStep; ok: boolean; result?: any; error?: string; durationMs: number; startedAt?: number; modelUsed?: string };
@@ -673,13 +690,73 @@ Rules:
   let quality: any = qualityRun?.result;
   const security = securityRun?.result;
 
-  // QUALITY RESCUE: if quality.check failed (pass=false) AND OpenRouter is
-  // configured, re-synth with the LARGE-tier model. The first attempt used
+  // SKILL-ACQUISITION RESCUE (first-tier, cheap): if quality.check failed AND
+  // no matching skill exists for the detected intent, the agent draft-writes
+  // one and re-synthesises with it loaded. This is the "Claude makes a skill
+  // when one is missing" loop — each unique struggle teaches the system a
+  // new playbook that subsequent runs benefit from.
+  //
+  // Order matters: try this BEFORE the OR-rescue because (a) it doesn't
+  // require OpenRouter, (b) a well-targeted skill is often a bigger lift
+  // than swapping models, and (c) the drafted skill persists, helping the
+  // next run too.
+  let rescuedSynth: string | undefined;
+  if (quality && quality.pass === false && synth.length >= MIN_REVIEW_CHARS) {
+    const intent = parseIntentFromTask(task);
+    if (intent) {
+      const existingSkills = suggestSkillsForIntent(intent, 1);
+      if (existingSkills.length === 0) {
+        push(`no skill targets intent "${intent}" — drafting one (the system learns from this struggle)`);
+        try {
+          const { draftSkillForIntent } = await import("./skills.js");
+          const firstIssue = Array.isArray(quality.issues) && quality.issues.length > 0 ? String(quality.issues[0]) : `quality score ${quality.score ?? "?"} below pass threshold`;
+          const newSkill = await draftSkillForIntent({
+            intent,
+            taskSample: parseUserRequestFromTask(task),
+            failureReason: firstIssue,
+          });
+          if (newSkill) {
+            push(`drafted skill "${newSkill.name}" — re-running synth with the new playbook loaded`);
+            try {
+              const rescue = await synthesize(task, p, runs, opts.personaSystemSuffix);
+              if (rescue && rescue.length >= MIN_REVIEW_CHARS) {
+                rescuedSynth = rescue;
+                try {
+                  const checkTool = findPrimitive("quality.check");
+                  if (checkTool) {
+                    const rq: any = await checkTool.handler({ task, answer: rescue, sources: buildEvidenceCatalog(runs) });
+                    const rs = rq?.score ?? 0;
+                    const os = quality?.score ?? 0;
+                    if (rs > os) {
+                      push(`skill rescue improved score: ${os} → ${rs}; keeping the skill-rescued draft`);
+                      quality = { ...rq, rescuedBy: "skill-acquisition", originalScore: os };
+                    } else {
+                      push(`skill rescue produced ${rs} (not better than ${os}); falling through to OR rescue if available`);
+                      rescuedSynth = undefined;
+                    }
+                  }
+                } catch { /* tolerate re-score failure */ }
+              }
+            } catch (e: any) {
+              push(`skill-rescue synth failed: ${String(e?.message ?? e).slice(0, 80)}`);
+            }
+          } else {
+            push(`skill draft was unusable — falling through to OR rescue if available`);
+          }
+        } catch (e: any) {
+          push(`skill draft failed: ${String(e?.message ?? e).slice(0, 80)}`);
+        }
+      }
+    }
+  }
+
+  // QUALITY RESCUE (second-tier): if quality.check failed (pass=false) AND
+  // OpenRouter is configured AND we didn't already rescue via skill
+  // acquisition, re-synth with the LARGE-tier model. The first attempt used
   // whatever the dispatcher picked (often local Ollama); the rescue forces
   // complexity:"high" so the dispatcher hands off to the bigger model. We
   // re-score the rescued draft and keep whichever has the better score.
-  let rescuedSynth: string | undefined;
-  if (config.openrouterEnabled && quality && quality.pass === false && synth.length >= MIN_REVIEW_CHARS) {
+  if (!rescuedSynth && config.openrouterEnabled && quality && quality.pass === false && synth.length >= MIN_REVIEW_CHARS) {
     push(`quality.check failed (score=${quality.score ?? "?"}, issues: ${(quality.issues ?? []).slice(0, 2).join("; ")}) — re-synthesising with the large model`);
     try {
       const rescue = await synthesize(task, p, runs, opts.personaSystemSuffix, undefined, { forceComplex: true });

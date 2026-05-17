@@ -385,6 +385,20 @@ async function handleChat(req: any, res: any) {
       });
       push(`peer returned in ${(r.elapsedMs / 1000).toFixed(1)}s · status=${r.status}`);
 
+      // PERSONA VERIFICATION — the worker now echoes back which persona it
+      // actually scoped the run to (personaIdUsed). If it differs from what
+      // we sent (or is null when we expected one), surface that immediately
+      // so the customer knows the worker didn't adopt the hired employee.
+      const expectedPersonaId = persona?.id ?? null;
+      const actualPersonaId = (r as any)?.personaIdUsed ?? null;
+      if (expectedPersonaId && actualPersonaId !== expectedPersonaId) {
+        const warnMsg = `⚠ persona mismatch: expected "${expectedPersonaId}" but worker used "${actualPersonaId ?? "<none>"}". Worker may not have adopted the hired employee for this run.`;
+        push(warnMsg);
+        console.warn(`[chat] ${warnMsg} (peer=${pinnedPeer.url}, jobId=${r.jobId})`);
+      } else if (expectedPersonaId && actualPersonaId === expectedPersonaId) {
+        push(`persona verified: worker scoped this run to "${(r as any).personaNameUsed ?? expectedPersonaId}"`);
+      }
+
       // Primary acts as the editor: score quality, scan for secrets, decide
       // whether the answer is rooted enough to keep. If it passes the gates,
       // a distilled note is written to 0-Inbox/ as the second-brain capture.

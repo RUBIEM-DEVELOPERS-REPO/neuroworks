@@ -399,6 +399,11 @@ export const primitives: Primitive[] = [
     ],
     handler: async (args) => {
       const root = resolve(String(args.path));
+      // SECURITY: refuse to enumerate known-sensitive directories (.ssh,
+      // .aws, browser profile dirs). Same gate as fs.read_external because
+      // a directory listing is the discovery step before exfiltration.
+      const { assertSafeExternalPath } = await import("./security-gates.js");
+      assertSafeExternalPath(root);
       if (!existsSync(root)) throw new Error(`path not found: ${root}`);
       const maxDepth = Math.min(3, Number(args.depth ?? 1));
       const entries: { path: string; name: string; type: "dir" | "file"; size?: number; modified?: string }[] = [];
@@ -430,6 +435,12 @@ export const primitives: Primitive[] = [
     handler: async (args) => {
       const raw = String(args.path ?? "").trim();
       if (!raw) throw new Error("path is empty");
+      // SECURITY GATE: refuse known-sensitive paths (.env, SSH keys, cloud
+      // creds, browser stores, etc.) before we even touch the filesystem.
+      // A prompt-injected LLM could otherwise be coaxed into exfiltrating
+      // these via the chat reply. Override via CLAWBOT_FS_UNRESTRICTED=1.
+      const { assertSafeExternalPath } = await import("./security-gates.js");
+      assertSafeExternalPath(raw);
       // Try the path as given first (absolute or relative-to-CWD).
       const candidates: string[] = [];
       const direct = resolve(raw);
@@ -440,6 +451,9 @@ export const primitives: Primitive[] = [
       if (!raw.match(/^[a-zA-Z]:[\\/]/) && !raw.startsWith("/") && !raw.startsWith("\\")) {
         candidates.push(resolve(config.vaultPath, raw));
       }
+      // Re-check the vault-resolved candidate too — vault-relative paths
+      // could still resolve to a sensitive location.
+      for (const c of candidates) assertSafeExternalPath(c);
       // Pick whichever candidate exists.
       const full = candidates.find(p => existsSync(p));
       if (!full) {
@@ -892,6 +906,52 @@ Pass is true when factuality_risk < 0.4 AND citation_coverage > 0.4 AND persona_
     },
   },
   {
+    name: "brave.list_tabs",
+    description: "List the URLs and titles of every open tab in the user's Brave browser (read-only). Requires the user to launch Brave with --remote-debugging-port=9222 AND set CLAWBOT_BRAVE_READ=1 in .env. Returns { url, title, contextIndex, pageIndex } per tab — use the indices with brave.read_tab to fetch a specific tab's content. Refuses with a clear setup message when Brave isn't reachable.",
+    readonly: true,
+    args: [],
+    handler: async () => {
+      const { listBraveTabs } = await import("./brave.js");
+      const tabs = await listBraveTabs();
+      return { count: tabs.length, tabs };
+    },
+  },
+  {
+    name: "brave.read_tab",
+    description: "Read the visible text of a specific tab in the user's Brave browser (read-only — no clicks, no navigation). Use the (contextIndex, pageIndex) returned by brave.list_tabs. Optionally pass a CSS `selector` to extract just one section, or `maxChars` to cap content size (default 20000).",
+    readonly: true,
+    args: [
+      { name: "contextIndex", type: "number", required: true, description: "Window index from brave.list_tabs" },
+      { name: "pageIndex", type: "number", required: true, description: "Tab index within the window from brave.list_tabs" },
+      { name: "selector", type: "string", required: false, description: "CSS selector to extract instead of full page text" },
+      { name: "maxChars", type: "number", required: false, description: "Cap response text length (default 20000, max 80000)" },
+    ],
+    handler: async (args) => {
+      const { readBraveTab } = await import("./brave.js");
+      return await readBraveTab({
+        contextIndex: Number(args.contextIndex),
+        pageIndex: Number(args.pageIndex),
+        selector: args.selector ? String(args.selector) : undefined,
+        maxChars: args.maxChars ? Number(args.maxChars) : undefined,
+      });
+    },
+  },
+  {
+    name: "brave.search_tabs",
+    description: "Find open Brave tabs whose URL or title matches a query (case-insensitive substring). Cheaper than reading every tab when the user references one in particular ('the GitHub issue I had open'). Returns up to `limit` matching tabs in the same shape as brave.list_tabs.",
+    readonly: true,
+    args: [
+      { name: "query", type: "string", required: true, description: "Substring to match against URL or title" },
+      { name: "limit", type: "number", required: false, description: "Max matches (default 10, cap 50)" },
+    ],
+    handler: async (args) => {
+      const { searchBraveTabs } = await import("./brave.js");
+      const limit = Math.min(50, Math.max(1, Number(args.limit ?? 10)));
+      const tabs = await searchBraveTabs(String(args.query), limit);
+      return { query: String(args.query), count: tabs.length, tabs };
+    },
+  },
+  {
     name: "skill.list",
     description: "List all available skill playbooks the agent can load for guidance (research-deep, email-writing, code-review, summarization, brief-writing, meeting-notes, vault-organization, planning-doc). Each entry returns name, description, and which intents it applies_to. Use this to discover what guidance is on offer for a given task shape.",
     readonly: true,
@@ -934,6 +994,34 @@ Pass is true when factuality_risk < 0.4 AND citation_coverage > 0.4 AND persona_
       return {
         intent: String(args.intent),
         suggestions: suggestions.map(s => ({ name: s.name, description: s.description, applies_to: s.applies_to })),
+      };
+    },
+  },
+  {
+    name: "skill.draft",
+    description: "Ask the LLM to write a brand-new skill playbook for an intent that has no curated skill yet. The draft gets saved to skills/_user/ and immediately becomes available to skill.list / skill.suggest. Use this when the agent has tried a task and lacked the guidance needed — close the loop by writing the missing playbook.",
+    readonly: false,
+    args: [
+      { name: "intent", type: "string", required: true, description: "Intent label to target (e.g. 'draft-email', 'design-review')" },
+      { name: "taskSample", type: "string", required: true, description: "The actual user request that exposed the skill gap — gives the drafter context" },
+      { name: "failureReason", type: "string", required: false, description: "Optional: what went wrong last time, so the drafted skill addresses it" },
+    ],
+    handler: async (args) => {
+      const { draftSkillForIntent } = await import("./skills.js");
+      const skill = await draftSkillForIntent({
+        intent: String(args.intent),
+        taskSample: String(args.taskSample),
+        failureReason: args.failureReason ? String(args.failureReason) : undefined,
+      });
+      if (!skill) {
+        throw new Error(`skill.draft: the LLM produced an unusable draft (missing frontmatter / too short). Try again with a more specific failureReason.`);
+      }
+      return {
+        drafted: skill.name,
+        path: skill.path,
+        applies_to: skill.applies_to,
+        description: skill.description,
+        bodyChars: skill.body.length,
       };
     },
   },
@@ -1014,10 +1102,14 @@ export function humanStepLabel(tool: string, args: Record<string, any> = {}): st
     case "web.fetch":          return s("url") ? `Reading ${s("url")}` : "Reading a webpage";
     case "web.scrape":         return s("url") ? `Browsing ${s("url")} (Playwright)` : "Browsing a webpage";
     case "web.firecrawl":      return s("url") ? `Scraping ${s("url")} (Firecrawl)` : "Scraping via Firecrawl";
+    case "brave.list_tabs":    return "Listing your open Brave tabs";
+    case "brave.read_tab":     return "Reading a Brave tab";
+    case "brave.search_tabs":  return s("query") ? `Finding Brave tabs matching "${s("query")}"` : "Searching your Brave tabs";
     case "skill.list":         return "Listing available skills";
     case "skill.load":         return s("name") ? `Loading the "${s("name")}" skill` : "Loading a skill";
     case "skill.suggest":      return "Picking the right skill for this task";
     case "skill.fetch_remote": return s("url") ? `Pulling skill from ${s("url")}` : "Pulling a remote skill";
+    case "skill.draft":        return s("intent") ? `Drafting a "${s("intent")}" skill` : "Drafting a new skill";
     case "fs.list_external":   return s("path") ? `Looking inside ${s("path")}` : "Browsing your files";
     case "fs.read_external":   return s("path") ? `Reading ${s("path")}` : "Reading a file";
     case "clock.now":          return "Checking the clock";
