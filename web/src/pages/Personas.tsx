@@ -12,6 +12,9 @@ export function Personas() {
   const [activeId, setActiveId] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [err, setErr] = useState("");
+  // Per-persona template metadata: count + a transient "just refreshed" toast.
+  const [templateCounts, setTemplateCounts] = useState<Record<string, number>>({});
+  const [refreshState, setRefreshState] = useState<Record<string, { state: "idle" | "running" | "ok" | "fail"; info?: string }>>({});
 
   // Form state
   const [name, setName] = useState("");
@@ -22,10 +25,37 @@ export function Personas() {
   const previewTimer = useRef<any>(null);
 
   async function load() {
-    try { const r = await api.listPersonas(); setPersonas(r.personas); setActiveId(r.activeId); }
+    try {
+      const r = await api.listPersonas();
+      setPersonas(r.personas);
+      setActiveId(r.activeId);
+      // Fetch template counts for every persona in parallel.
+      const counts: Record<string, number> = {};
+      await Promise.all(r.personas.map(async (p: Persona) => {
+        try { const t = await api.listPersonaTemplates(p.id); counts[p.id] = t.templates.length; }
+        catch { counts[p.id] = 0; }
+      }));
+      setTemplateCounts(counts);
+    }
     catch (e: any) { setErr(e.message); }
   }
   useEffect(() => { load(); }, []);
+
+  async function refreshTemplates(personaId: string) {
+    setRefreshState(s => ({ ...s, [personaId]: { state: "running" } }));
+    try {
+      const r = await api.refreshPersonaTemplates(personaId);
+      setRefreshState(s => ({ ...s, [personaId]: { state: "ok", info: `+${r.added} new · ${r.kept} kept · ${r.removed} removed` } }));
+      setTemplateCounts(c => ({ ...c, [personaId]: r.ids.length }));
+      setTimeout(() => setRefreshState(s => {
+        const next = { ...s };
+        if (next[personaId]?.state === "ok") delete next[personaId];
+        return next;
+      }), 3500);
+    } catch (e: any) {
+      setRefreshState(s => ({ ...s, [personaId]: { state: "fail", info: e?.message ?? String(e) } }));
+    }
+  }
 
   // Debounced LLM preview when JD changes
   useEffect(() => {
@@ -139,9 +169,37 @@ export function Personas() {
                   </ul>
                 </details>
               )}
-              <div className="flex items-center justify-between mt-3 pt-3 border-t border-ink-800">
-                <button onClick={() => remove(p.id)} className="text-xs text-cream-300/50 hover:text-coral-400">Delete</button>
-                {p.id !== activeId && <Button variant="subtle" onClick={() => activate(p.id)}>Activate</Button>}
+              <div className="mt-3 pt-3 border-t border-ink-800 space-y-2">
+                <div className="flex items-center justify-between gap-2 flex-wrap">
+                  <span className="text-[11px] text-cream-300/60">
+                    {templateCounts[p.id] != null ? (
+                      <>{templateCounts[p.id]} starter template{templateCounts[p.id] === 1 ? "" : "s"}</>
+                    ) : (
+                      "templates: —"
+                    )}
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => refreshTemplates(p.id)}
+                      disabled={refreshState[p.id]?.state === "running"}
+                      className="text-[11px] text-cream-300 hover:text-violet-300 disabled:opacity-40"
+                      title="Regenerate starter templates from this persona's responsibilities. Keeps run history on unchanged ones."
+                    >
+                      {refreshState[p.id]?.state === "running" ? "Refreshing…" : "Refresh templates"}
+                    </button>
+                  </div>
+                </div>
+                {refreshState[p.id]?.state === "ok" && (
+                  <div className="text-[11px] text-leaf-400">✓ {refreshState[p.id]?.info}</div>
+                )}
+                {refreshState[p.id]?.state === "fail" && (
+                  <div className="text-[11px] text-coral-400">{refreshState[p.id]?.info}</div>
+                )}
+                <div className="flex items-center justify-between">
+                  <button type="button" onClick={() => remove(p.id)} className="text-xs text-cream-300/50 hover:text-coral-400">Delete</button>
+                  {p.id !== activeId && <Button variant="subtle" onClick={() => activate(p.id)}>Activate</Button>}
+                </div>
               </div>
             </Card>
           ))}

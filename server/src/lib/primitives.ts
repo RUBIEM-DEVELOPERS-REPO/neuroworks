@@ -1,9 +1,15 @@
 import { existsSync, readdirSync, readFileSync, statSync, appendFileSync } from "node:fs";
 import { resolve, basename, extname, sep, join } from "node:path";
 import { config } from "../config.js";
-import { ollamaGenerateWithMeta } from "./ollama.js";
+import { ollamaGenerate, ollamaGenerateWithMeta } from "./ollama.js";
 import { listVault, readVaultFile, searchVault, writeVaultFile } from "./vault.js";
+import { extractDocText, extractDocsParallel } from "./doc-extractor.js";
 import { listOwnedRepos, recentCommits, openPRs, openIssues, readme, octokit } from "./github.js";
+import { delegateToBestPeer, reviewWithPeer } from "./peers.js";
+import { scanForSecurityRisks, redactHighSeverity, type SecurityKind } from "./security.js";
+import { scrape } from "./browser.js";
+import { enqueueVaultCommit } from "./commit-queue.js";
+import { searchWeb, smartFetch } from "./web-client.js";
 
 export type ArgSpec = { name: string; type: "string" | "number" | "boolean"; required: boolean; description: string };
 
@@ -26,10 +32,32 @@ export const primitives: Primitive[] = [
   },
   {
     name: "vault.read",
-    description: "Read a markdown or text file from the vault. Path is relative to vault root.",
+    description: "Read a file from the vault. Supports markdown/text, PDF, DOCX, XLSX, and CSV — binary docs get extracted to text/markdown so you can read what's inside. Path is relative to vault root.",
     readonly: true,
-    args: [{ name: "path", type: "string", required: true, description: "Vault-relative path, e.g. 2-Permanent/202604271220-neuroworks.md" }],
-    handler: async (args) => ({ content: readVaultFile(String(args.path)) }),
+    args: [{ name: "path", type: "string", required: true, description: "Vault-relative path, e.g. 2-Permanent/202604271220-neuroworks.md or 0-Inbox/spec.pdf" }],
+    handler: async (args) => {
+      const rel = String(args.path);
+      const ext = extname(rel).toLowerCase();
+      // Plain text/markdown — fast path, no parser load.
+      if (ext === ".md" || ext === ".markdown" || ext === ".txt" || ext === "" || ext === ".rst" || ext === ".org") {
+        return { content: readVaultFile(rel), kind: "text", ext };
+      }
+      // Binary doc — route through the extractor so the agent sees the
+      // actual content, not the filename. Resolve absolute path inside the
+      // vault; the extractor does the same safety checks.
+      const full = resolve(config.vaultPath, rel);
+      const r = await extractDocText(full);
+      return {
+        content: r.text,
+        kind: r.kind,
+        ext: r.ext,
+        name: r.name,
+        bytes: r.bytes,
+        pages: r.pages,
+        sheets: r.sheets,
+        truncated: r.truncated,
+      };
+    },
   },
   {
     name: "vault.list",
@@ -46,7 +74,104 @@ export const primitives: Primitive[] = [
       { name: "path", type: "string", required: true, description: "Vault-relative path" },
       { name: "content", type: "string", required: true, description: "File body, including frontmatter" },
     ],
-    handler: async (args) => { writeVaultFile(String(args.path), String(args.content)); return { written: String(args.path) }; },
+    handler: async (args) => {
+      const path = String(args.path);
+      writeVaultFile(path, String(args.content));
+      // Commit via the shared queue so concurrent vault writes coalesce.
+      void enqueueVaultCommit(`neuroworks: vault.write — ${path}`);
+      return { written: path };
+    },
+  },
+  {
+    name: "vault.scan_docs",
+    description: "Read MANY vault docs in parallel and return their extracted text. Use when the customer asks 'what's in my <folder>?' or 'summarize the docs in <folder>'. Supports MD, PDF, DOCX, XLSX, CSV. Caps at 12 docs per call to keep latency bounded — narrow with the `folder` arg if you need a specific area.",
+    readonly: true,
+    args: [
+      { name: "folder", type: "string", required: false, description: "Vault-relative folder to scan, blank for vault root" },
+      { name: "max", type: "number", required: false, description: "Max docs to read (default 12, cap 24)" },
+      { name: "extensions", type: "string", required: false, description: "Comma-separated extensions to include, e.g. '.pdf,.docx'. Default: all known doc types." },
+    ],
+    handler: async (args) => {
+      const folder = String(args.folder ?? "");
+      const max = Math.max(1, Math.min(24, Number(args.max ?? 12)));
+      const allowed = String(args.extensions ?? ".md,.markdown,.txt,.pdf,.docx,.xlsx,.xls,.csv")
+        .split(",").map(s => s.trim().toLowerCase()).filter(Boolean);
+      const entries = listVault(folder);
+      const files = entries
+        .filter(e => e.type === "file" && allowed.includes(extname(e.name).toLowerCase()))
+        .slice(0, max);
+      if (files.length === 0) return { folder, scanned: 0, docs: [], message: `No matching docs in "${folder || "<root>"}". Allowed extensions: ${allowed.join(", ")}` };
+      // Resolve each to absolute then parallel-extract through the shared
+      // extractor cache. Concurrency capped inside the extractor so we don't
+      // OOM on a folder full of PDFs.
+      const abs = files.map(f => resolve(config.vaultPath, f.path));
+      const results = await extractDocsParallel(abs, { concurrency: 6 });
+      // Strip absolute paths from the response — replace with vault-relative
+      // ones so the LLM sees `0-Inbox/spec.pdf` not `D:\Main brain\...`.
+      const docs = results.map((r: any) => {
+        const relMatch = files.find(f => resolve(config.vaultPath, f.path) === r.path);
+        const rel = relMatch ? relMatch.path : r.path;
+        if (r.ok) {
+          return {
+            path: rel,
+            kind: r.result.kind,
+            name: r.result.name,
+            bytes: r.result.bytes,
+            pages: r.result.pages,
+            sheets: r.result.sheets,
+            truncated: r.result.truncated,
+            content: r.result.text,
+            ok: true,
+          };
+        }
+        return { path: rel, ok: false, error: r.error };
+      });
+      return { folder, scanned: docs.length, docs };
+    },
+  },
+  {
+    name: "vault.edit",
+    description: "Edit an existing markdown file in the vault according to an instruction. Reads the file, applies the edit (via LLM), scans the result for secrets, writes it back, and commits. REQUIRES the user to have authorised vault edits via CLAWBOT_VAULT_EDIT=1 in .env — otherwise this tool refuses. Markdown only; refuses to edit binary docs.",
+    readonly: false,
+    args: [
+      { name: "path", type: "string", required: true, description: "Vault-relative path to the .md file to edit" },
+      { name: "instruction", type: "string", required: true, description: "What to change. Be specific — e.g. 'Add a Risks section at the end' or 'Replace the second paragraph with a clearer version'." },
+    ],
+    handler: async (args) => {
+      // Top-level approval gate. The customer authorises vault editing by
+      // setting CLAWBOT_VAULT_EDIT=1 in .env. Until they do, the tool refuses
+      // — this protects against unintended overwrites by an agent that picks
+      // vault.edit speculatively. The refusal message tells the customer
+      // exactly what to do.
+      if (process.env.CLAWBOT_VAULT_EDIT !== "1") {
+        throw new Error("vault.edit refused: vault editing isn't authorised. To allow clawbot to edit docs in your vault, set CLAWBOT_VAULT_EDIT=1 in clawbot/.env and restart the server.");
+      }
+      const path = String(args.path);
+      const instruction = String(args.instruction);
+      const ext = extname(path).toLowerCase();
+      // Refuse non-markdown — re-writing a PDF or DOCX is not safe (we can
+      // extract text but can't preserve formatting on write). For those,
+      // capture an .md sidecar via vault.write instead.
+      if (ext !== ".md" && ext !== ".markdown" && ext !== ".txt") {
+        throw new Error(`vault.edit only supports .md / .markdown / .txt files. For ${ext} docs, extract via vault.read and write a new note with vault.write.`);
+      }
+      const original = readVaultFile(path);
+      const sys = `You are editing a Markdown document. Apply the user's edit instruction and return the COMPLETE updated document — not a diff, not a partial, not commentary. Preserve everything the instruction doesn't change. Preserve frontmatter (--- blocks) unless the instruction explicitly modifies it. No "Here is the updated…" preamble. Output ONLY the new document body.`;
+      const prompt = `Edit instruction:\n${instruction}\n\nOriginal document:\n\n${original}\n\nReturn the complete updated document:`;
+      const edited = await ollamaGenerate(prompt, sys, { profile: "synthesis", complexity: original.length + instruction.length > 6000 ? "high" : "normal" } as any);
+      // Strip a stray ``` fence if the model wrapped its output.
+      const cleaned = edited.trim().replace(/^```(?:markdown)?\n([\s\S]+?)\n```$/i, "$1").trim();
+      if (cleaned.length < 10) throw new Error("LLM returned an empty / near-empty edit; refusing to overwrite the original.");
+      writeVaultFile(path, cleaned);
+      void enqueueVaultCommit(`neuroworks: vault.edit — ${path} (${instruction.slice(0, 60)})`);
+      return {
+        edited: path,
+        instruction,
+        originalChars: original.length,
+        editedChars: cleaned.length,
+        delta: cleaned.length - original.length,
+      };
+    },
   },
   {
     name: "ollama.generate",
@@ -149,6 +274,7 @@ export const primitives: Primitive[] = [
       if (!full.startsWith(resolve(config.vaultPath))) throw new Error("path escapes vault");
       const text = (existsSync(full) ? "\n" : "") + String(args.content);
       appendFileSync(full, text, "utf8");
+      void enqueueVaultCommit(`neuroworks: vault.append — ${String(args.path)}`);
       return { appended: String(args.path) };
     },
   },
@@ -169,6 +295,7 @@ export const primitives: Primitive[] = [
       const today = new Date().toISOString().slice(0, 10);
       const md = `---\nid: ${stamp}\ntitle: ${args.title}\ntags: [${tags.join(", ")}]\ncreated: ${today}\n---\n\n# ${args.title}\n\n${args.body}\n`;
       writeVaultFile(path, md);
+      void enqueueVaultCommit(`neuroworks: zettel — ${slug}`);
       return { path, id: stamp };
     },
   },
@@ -193,21 +320,73 @@ export const primitives: Primitive[] = [
   },
   {
     name: "web.fetch",
-    description: "HTTP GET a URL and return up to 100 KB of text (HTML stripped to plain text). Bounded to 8s.",
+    description: "HTTP GET a URL and return up to 100 KB of readable text. HTML is run through a noise-stripping extractor (drops nav/footer/cookie banners, prefers <article>/<main> body). Rotates User-Agent. Per-URL response cached for 10 minutes. Auto-falls back to a Playwright (headless Chromium) render when the HTTP path returns blocked / empty / JS-only content, so JS-rendered SPAs work without the user having to pick a tool. Bounded to ~20s total when the browser path kicks in.",
     readonly: true,
-    args: [{ name: "url", type: "string", required: true, description: "Full URL including protocol" }],
+    args: [
+      { name: "url", type: "string", required: true, description: "Full URL including protocol" },
+      { name: "force_browser", type: "boolean", required: false, description: "Skip the cheap HTTP attempt and go straight to Playwright" },
+    ],
     handler: async (args) => {
       const url = String(args.url);
-      const ctrl = new AbortController();
-      const t = setTimeout(() => ctrl.abort(), 8000);
-      try {
-        const r = await fetch(url, { signal: ctrl.signal, redirect: "follow" });
-        const ct = r.headers.get("content-type") ?? "";
-        const buf = await r.text();
-        const truncated = buf.slice(0, 100_000);
-        const text = ct.includes("html") ? truncated.replace(/<script[\s\S]*?<\/script>/gi, "").replace(/<style[\s\S]*?<\/style>/gi, "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim() : truncated;
-        return { status: r.status, contentType: ct, text };
-      } finally { clearTimeout(t); }
+      if (args.force_browser === true) {
+        const r = await smartFetch(url, { allowBrowser: true, cache: false });
+        return r;
+      }
+      const r = await smartFetch(url);
+      return r;
+    },
+  },
+  {
+    name: "web.scrape",
+    description: "Render a URL in a real headless browser (Playwright + Chromium) and return the page text. Use this instead of web.fetch when the page needs JS to render, sits behind anti-bot, or requires waiting for content. Optional: a CSS `selector` to extract just one section, `waitFor` selector to delay extraction, `scrollToBottom` for lazy-load lists, `screenshot` to also save a PNG into _neuroworks/screenshots/ in the vault.",
+    readonly: true,
+    args: [
+      { name: "url", type: "string", required: true, description: "Full URL including protocol" },
+      { name: "selector", type: "string", required: false, description: "CSS selector to extract (defaults to whole-page text)" },
+      { name: "waitFor", type: "string", required: false, description: "CSS selector to wait for before extracting" },
+      { name: "screenshot", type: "boolean", required: false, description: "If true, saves a PNG to the vault and returns its path" },
+      { name: "scrollToBottom", type: "boolean", required: false, description: "Trigger lazy-loaded content with three short scrolls" },
+      { name: "timeoutMs", type: "number", required: false, description: "Navigation+wait budget (default 20000, max 60000)" },
+    ],
+    handler: async (args) => {
+      return await scrape({
+        url: String(args.url),
+        selector: args.selector ? String(args.selector) : undefined,
+        waitFor: args.waitFor ? String(args.waitFor) : undefined,
+        screenshot: args.screenshot === true,
+        scrollToBottom: args.scrollToBottom === true,
+        timeoutMs: args.timeoutMs ? Number(args.timeoutMs) : undefined,
+      });
+    },
+  },
+  {
+    name: "web.firecrawl",
+    description: "Scrape a URL via the Firecrawl hosted service (returns clean markdown of the main content). Use this when a site is gated behind Cloudflare / anti-bot challenges that defeat local Playwright, or when you need consistent main-content extraction without HTML parsing. Requires FIRECRAWL_API_KEY in .env — refuses with a clear message when missing.",
+    readonly: true,
+    args: [
+      { name: "url", type: "string", required: true, description: "Full URL including protocol" },
+      { name: "onlyMainContent", type: "boolean", required: false, description: "Strip nav/footer/ads — defaults to true (almost always what you want)" },
+      { name: "maxChars", type: "number", required: false, description: "Cap markdown response length (default 80000)" },
+      { name: "timeoutMs", type: "number", required: false, description: "Request timeout (default 20000, max 60000)" },
+    ],
+    handler: async (args) => {
+      const { firecrawlEnabled, firecrawlScrape } = await import("./firecrawl.js");
+      if (!firecrawlEnabled()) {
+        throw new Error("web.firecrawl refused: FIRECRAWL_API_KEY isn't set in clawbot/.env — get a key from firecrawl.dev and add it, then this primitive will be available.");
+      }
+      const r = await firecrawlScrape({
+        url: String(args.url),
+        onlyMainContent: args.onlyMainContent !== false,
+        maxChars: args.maxChars ? Number(args.maxChars) : undefined,
+        timeoutMs: args.timeoutMs ? Number(args.timeoutMs) : undefined,
+      });
+      return {
+        url: r.url,
+        title: r.title,
+        markdown: r.markdown,
+        status: r.status,
+        engine: "firecrawl",
+      };
     },
   },
   {
@@ -242,16 +421,536 @@ export const primitives: Primitive[] = [
   },
   {
     name: "fs.read_external",
-    description: "Read a text file from anywhere on disk. Capped at 200 KB.",
+    // Description tightened so the LLM hands us a real path, not a vault-relative
+    // one. We additionally fall back to vault resolution at runtime, so a small
+    // hallucination ("notes/foo.md") still produces a result.
+    description: "Read a text file from disk. Path MUST be either: (a) an absolute path like 'C:\\foo\\bar.md' or '/home/user/x.txt', OR (b) a path inside the user's Obsidian vault (we will resolve it for you). For vault-only reads prefer the dedicated `vault.read` tool — it returns matches even when the path is partial. Capped at 200 KB.",
     readonly: true,
-    args: [{ name: "path", type: "string", required: true, description: "Absolute file path" }],
+    args: [{ name: "path", type: "string", required: true, description: "Absolute path OR vault-relative path. Backslashes ok on Windows." }],
     handler: async (args) => {
-      const full = resolve(String(args.path));
-      if (!existsSync(full)) throw new Error(`file not found: ${full}`);
+      const raw = String(args.path ?? "").trim();
+      if (!raw) throw new Error("path is empty");
+      // Try the path as given first (absolute or relative-to-CWD).
+      const candidates: string[] = [];
+      const direct = resolve(raw);
+      candidates.push(direct);
+      // Also try inside the vault — most LLM "file not found" mistakes are
+      // vault-relative paths like "0-Inbox/foo.md" being treated as on-disk
+      // paths. Resolving against the vault recovers cleanly.
+      if (!raw.match(/^[a-zA-Z]:[\\/]/) && !raw.startsWith("/") && !raw.startsWith("\\")) {
+        candidates.push(resolve(config.vaultPath, raw));
+      }
+      // Pick whichever candidate exists.
+      const full = candidates.find(p => existsSync(p));
+      if (!full) {
+        // Produce a USEFUL error instead of a dead end. We list the parent
+        // directory (if it exists) so the LLM has actual filenames to try
+        // on the next attempt. The customer-facing chat will surface this
+        // verbatim via the fallback-synthesis path.
+        const probe = candidates[0];
+        const probeParent = probe.replace(/[\\/][^\\/]+$/, "");
+        let hint = "";
+        if (existsSync(probeParent)) {
+          try {
+            const siblings = readdirSync(probeParent).slice(0, 10);
+            hint = `\nParent directory ${probeParent} contains: ${siblings.map(s => `"${s}"`).join(", ")}${siblings.length === 10 ? ", …" : ""}`;
+          } catch { /* ignore */ }
+        }
+        throw new Error(
+          `file not found at any of: ${candidates.map(c => `"${c}"`).join(", ")}. ` +
+          `If you meant a file in the vault, try the \`vault.read\` tool with a partial filename.${hint}`,
+        );
+      }
       const st = statSync(full);
-      if (!st.isFile()) throw new Error("not a file");
-      if (st.size > 200_000) throw new Error(`file too large (${st.size} bytes, cap 200000)`);
-      return { content: readFileSync(full, "utf8"), size: st.size, ext: extname(full), name: basename(full) };
+      if (!st.isFile()) throw new Error(`path is a directory, not a file: ${full}. Use fs.list_external or vault.search to enumerate.`);
+      // Binary docs (PDF/DOCX/XLSX) get extracted via the doc-extractor so
+      // the agent can read what's actually inside, not just see "Untitled.docx"
+      // as a filename. Plain text follows the original 200 KB cap to avoid
+      // a 50-line config file masquerading as a 50 KB JSON dump.
+      const ext = extname(full).toLowerCase();
+      const isBinaryDoc = [".pdf", ".docx", ".xlsx", ".xls", ".xlsm"].includes(ext);
+      if (isBinaryDoc) {
+        const r = await extractDocText(full);
+        return {
+          content: r.text,
+          kind: r.kind,
+          size: st.size,
+          ext: r.ext,
+          name: r.name,
+          pages: r.pages,
+          sheets: r.sheets,
+          truncated: r.truncated,
+          resolvedFrom: raw,
+          resolvedTo: full,
+        };
+      }
+      if (st.size > 200_000) throw new Error(`file too large (${st.size} bytes, cap 200_000). Use a different tool or extract a section.`);
+      return { content: readFileSync(full, "utf8"), size: st.size, ext, name: basename(full), resolvedFrom: raw, resolvedTo: full };
+    },
+  },
+  {
+    name: "web.search",
+    description: "Search the public web. Tries DuckDuckGo first; falls back to Bing if DDG returns nothing or fails. Returns up to 10 results as { title, url, snippet } plus the engine that produced them. Use to find sources before web.fetch.",
+    readonly: true,
+    args: [
+      { name: "query", type: "string", required: true, description: "Search query" },
+      { name: "limit", type: "number", required: false, description: "Max results (default 8, cap 10)" },
+    ],
+    handler: async (args) => {
+      const query = String(args.query);
+      const limit = Math.min(10, Math.max(1, Number(args.limit ?? 8)));
+      const r = await searchWeb(query, limit);
+      return { query, engine: r.engine, tried: r.tried, results: r.results };
+    },
+  },
+  {
+    name: "research.deep",
+    description: "Open-ended research on a topic: searches the vault, searches the web, fetches the top sources in parallel, synthesises a cited answer with the local LLM, and (by default) captures a research note in 0-Inbox/. Use this when the user asks about something the vault may not yet cover.",
+    readonly: false,
+    args: [
+      { name: "query", type: "string", required: true, description: "The research question or topic" },
+      { name: "depth", type: "number", required: false, description: "Number of web sources to fetch (default 3, cap 5)" },
+      { name: "capture", type: "boolean", required: false, description: "If true (default), saves a note to 0-Inbox/ with sources" },
+    ],
+    handler: async (args) => {
+      const query = String(args.query);
+      const depth = Math.min(5, Math.max(1, Number(args.depth ?? 3)));
+      const capture = args.capture !== false;
+
+      // 1+2. Vault search + web search in PARALLEL — was sequential, costing
+      // us the DDG/Bing round-trip (~500-1500ms) before vault even started.
+      // Vault search is sync regex over files so it's effectively free; web
+      // search is the slow part. Running them via Promise.all overlaps the
+      // network round-trip with the regex pass.
+      const [vaultHits, webResults] = await Promise.all([
+        Promise.resolve().then(() => {
+          try { return searchVault(query, 20); }
+          catch { return [] as ReturnType<typeof searchVault>; }
+        }),
+        searchWeb(query, depth).then(s => s.results).catch(() => [] as { title: string; url: string; snippet: string }[]),
+      ]);
+
+      // 3. Fetch the top N web pages in parallel via the smart client —
+      //    cheap HTTP first, Playwright fallback when blocked/JS-only. Per-URL
+      //    cache means a re-search across perspectives hits memory.
+      const fetched: { url: string; title: string; text: string; ok: boolean; error?: string; usedBrowser?: boolean }[] = await Promise.all(
+        webResults.map(async (w) => {
+          try {
+            const r = await smartFetch(w.url, { maxBytes: 80_000, timeoutMs: 8_000 });
+            return { url: w.url, title: r.title ?? w.title, text: r.text.slice(0, 6_000), ok: true, usedBrowser: r.usedBrowser };
+          } catch (e: any) {
+            return { url: w.url, title: w.title, text: "", ok: false, error: String(e?.message ?? e) };
+          }
+        })
+      );
+
+      // 4. Synthesise. Combined evidence in, cited answer out.
+      const evidence = [
+        vaultHits.length > 0 ? `## Vault notes (${vaultHits.length})\n${vaultHits.slice(0, 8).map(h => `- ${h.path}:${h.line} — ${h.preview}`).join("\n")}` : "## Vault notes\n_(none — this topic is new to the vault)_",
+        fetched.filter(f => f.ok && f.text).length > 0
+          ? `## Web sources\n${fetched.filter(f => f.ok && f.text).map((f, i) => `### [${i + 1}] ${f.title}\n${f.url}\n\n${f.text}`).join("\n\n")}`
+          : "## Web sources\n_(none reachable)_",
+      ].join("\n\n");
+
+      const sysSynth = "You are clawbot's research synthesiser. Write a concise, evidence-grounded answer to the user's question using ONLY the supplied evidence. Cite sources inline as [vault:path] or [N] (where N matches the web source). If the evidence is thin or contradictory, say so plainly. Keep it under 350 words. Markdown allowed.";
+      // Synth in a try/catch so a transient LLM failure doesn't throw away
+      // all the web evidence we just fetched. On failure we build a usable
+      // fallback from the gathered sources rather than returning an error.
+      let synth: string;
+      let synthError: string | undefined;
+      try {
+        // 350-word target ≈ 500 tokens; 512 cap stops the model from rambling
+        // past the brief and shaves 10-20s on local Ollama vs the 1024 default.
+        synth = await ollamaGenerate(`Question: ${query}\n\n${evidence}\n\nWrite the answer.`, sysSynth, { profile: "synthesis", complexity: "high", maxTokens: 512 } as any);
+      } catch (e: any) {
+        synthError = String(e?.message ?? e).slice(0, 200);
+        const okSources = fetched.filter((f: any) => f.ok && f.text);
+        const bullets = okSources.map((f: any, i: number) => {
+          const firstSentence = (f.text ?? "").replace(/\s+/g, " ").trim().split(/(?<=[.!?])\s+/)[0] ?? "";
+          return `[${i + 1}] **${f.title}** (${f.url}) — ${firstSentence.slice(0, 240)}`;
+        }).join("\n\n");
+        synth = `## Partial result\n\nThe synthesiser couldn't run (\`${synthError}\`), so here are the sources I gathered for: **${query}**\n\n### Vault hits\n${vaultHits.length > 0 ? vaultHits.slice(0, 5).map((h: any) => `- ${h.path}:${h.line} — ${h.preview}`).join("\n") : "_(none)_"}\n\n### Web sources\n${bullets || "_(no reachable web sources)_"}\n\n_Review the sources directly and try again later._`;
+      }
+
+      // 5. Capture as a 0-Inbox note. The vault MOC says: fleeting / unprocessed
+      //    thoughts go here. Promote later when matured into atomic insight.
+      let captured: { path: string } | undefined;
+      if (capture) {
+        const stamp = new Date().toISOString().replace(/[-:T]/g, "").slice(0, 12);
+        const slug = query.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60) || "research";
+        const path = `0-Inbox/${stamp}-research-${slug}.md`;
+        const today = new Date().toISOString().slice(0, 10);
+        const sourcesBlock = fetched.filter(f => f.ok).map((f, i) => `${i + 1}. [${f.title}](${f.url})`).join("\n") || "_(no reachable web sources)_";
+        const md = `---\ntitle: "Research: ${query.replace(/"/g, "'").slice(0, 120)}"\ncreated: ${today}\nsource: clawbot-research\n---\n\n# Research: ${query}\n\n${synth.trim()}\n\n## Web sources\n${sourcesBlock}\n\n## Vault hits at time of research\n${vaultHits.slice(0, 8).map(h => `- [[${h.path}]] (line ${h.line})`).join("\n") || "_(none)_"}\n`;
+        try {
+          writeVaultFile(path, md);
+          captured = { path };
+          void enqueueVaultCommit(`neuroworks: research — ${slug}`);
+        } catch { /* don't fail the whole research because the note didn't write */ }
+      }
+
+      return {
+        query,
+        answer: synth.trim(),
+        vaultHits: vaultHits.slice(0, 8),
+        webSources: fetched.map(f => ({ url: f.url, title: f.title, ok: f.ok, error: f.error })),
+        captured,
+      };
+    },
+  },
+  {
+    name: "research.multiperspective",
+    description: "Investigate a topic from MULTIPLE perspectives in parallel. Fans out sub-agents (each one a different framing: mainstream consensus, critical / skeptic, practitioner / applied, recent developments) — searches the web from each angle, fetches top sources, and synthesises a structured cross-perspective report with citations. Use for any task asking to 'analyse', 'research', 'explain X', 'investigate', or 'compare perspectives on X'. Captures the report to 0-Inbox/.",
+    readonly: false,
+    args: [
+      { name: "topic", type: "string", required: true, description: "The topic or question to investigate" },
+      { name: "perspectives", type: "string", required: false, description: "Comma-separated custom perspectives. Default: 'mainstream, critical, practitioner, recent'" },
+      { name: "sourcesPerPerspective", type: "number", required: false, description: "Top web sources to fetch per perspective (default 2, cap 4)" },
+      { name: "capture", type: "boolean", required: false, description: "If true (default), saves the report to 0-Inbox/" },
+    ],
+    handler: async (args) => {
+      const topic = String(args.topic);
+      const perspectivesRaw = String(args.perspectives ?? "").trim();
+      const perspectives = (perspectivesRaw
+        ? perspectivesRaw.split(",").map(s => s.trim()).filter(Boolean)
+        : ["mainstream", "critical", "practitioner", "recent"]
+      ).slice(0, 6);
+      const sourcesPer = Math.min(4, Math.max(1, Number(args.sourcesPerPerspective ?? 2)));
+      const capture = args.capture !== false;
+
+      // Vault-first — read whatever the user already has. Surface as one
+      // additional "perspective" so synth can compare external findings to the
+      // user's own notes.
+      const vaultHits = searchVault(topic, 20);
+
+      // Each perspective gets its own framed query. The framings are
+      // heuristic templates tuned to bias DDG's results toward that angle —
+      // not perfect, but cheap and reproducible.
+      const framingTemplates: Record<string, (t: string) => string> = {
+        mainstream: t => `${t} overview definition`,
+        critical: t => `${t} criticism limitations problems`,
+        practitioner: t => `${t} case study practical example how to`,
+        recent: t => `${t} 2026 latest news update`,
+        historical: t => `${t} history origin background`,
+        contrarian: t => `${t} contrarian view alternative perspective`,
+        academic: t => `${t} research paper study findings`,
+        beginner: t => `${t} beginner introduction simple explanation`,
+      };
+
+      const perspectiveQueries = perspectives.map(name => {
+        const key = name.toLowerCase().replace(/[^a-z]+/g, "");
+        const tmpl = framingTemplates[key];
+        const query = tmpl ? tmpl(topic) : `${topic} ${name}`;
+        return { name, query };
+      });
+
+      // Run all perspective searches in parallel — each is a sub-agent doing
+      // independent work. Uses the hardened searchWeb (DDG → Bing fallback)
+      // and fetchWeb (readability + per-URL cache), so a source shared
+      // across perspectives is fetched exactly once.
+      const perspectiveResults = await Promise.all(perspectiveQueries.map(async ({ name, query }) => {
+        let webResults: { title: string; url: string; snippet: string }[] = [];
+        try {
+          const s = await searchWeb(query, sourcesPer);
+          webResults = s.results;
+        } catch { /* tolerate per-perspective failure */ }
+        const fetched = await Promise.all(webResults.map(async (w) => {
+          try {
+            const r = await smartFetch(w.url, { maxBytes: 60_000, timeoutMs: 8_000 });
+            return { url: w.url, title: r.title ?? w.title, text: r.text.slice(0, 4_000), ok: true, usedBrowser: r.usedBrowser };
+          } catch (e: any) {
+            return { url: w.url, title: w.title, text: "", ok: false, error: String(e?.message ?? e) };
+          }
+        }));
+        return { name, query, sources: fetched };
+      }));
+
+      // Build a global numbered source list. Synth cites as [N].
+      const numbered: { ref: number; perspective: string; url: string; title: string; text: string }[] = [];
+      let n = 1;
+      for (const p of perspectiveResults) {
+        for (const s of p.sources) {
+          if (s.ok && s.text) {
+            numbered.push({ ref: n++, perspective: p.name, url: s.url, title: s.title, text: s.text });
+          }
+        }
+      }
+
+      // Synthesis prompt: enforce the structured shape the Researcher persona
+      // expects. The synth model returns the body of a research note.
+      const evidence = perspectiveResults.map(p => {
+        const refs = p.sources.filter(s => s.ok).map(s => {
+          const idx = numbered.find(x => x.url === s.url)?.ref;
+          return `[${idx}] ${s.title}\n${s.text}`;
+        }).join("\n\n");
+        return `### Perspective: ${p.name}\nSearch query: "${p.query}"\n${refs || "_(no reachable sources)_"}`;
+      }).join("\n\n");
+      const vaultBlock = vaultHits.length > 0
+        ? `\n### Vault notes (${vaultHits.length})\n${vaultHits.slice(0, 8).map(h => `- [[${h.path}]] (line ${h.line}) — ${h.preview}`).join("\n")}`
+        : "";
+
+      const sysSynth = `You are a structured research synthesiser. Write a single multi-perspective research note from the supplied evidence.
+
+Output shape (use these exact section headings):
+## Topic statement
+One paragraph framing the question precisely.
+
+## Perspectives
+A subsection per perspective with the perspective name as ### heading. Inside, write 2-4 sentences summarising what THAT perspective's sources say, citing each substantive claim as [N].
+
+## Cross-cutting themes
+Bullet list of points where perspectives converged, with [N] citations.
+
+## Open questions
+Bullet list of unresolved or contested claims, naming which perspectives disagree.
+
+## Bottom line
+One paragraph — your best honest synthesis, with the strongest caveats called out.
+
+Rules:
+- Never invent claims. If a perspective had no sources, say so explicitly in its section.
+- When perspectives contradict, NAME the contradiction. Don't paper over.
+- Cite every substantive claim as [N]. If you can't cite it, drop the claim.
+- Markdown only. No code fences around the whole thing.`;
+
+      // Synth via the LLM. THIS is the call that historically threw "fetch
+      // failed" when Ollama was briefly down — and because synth ran outside
+      // any try/catch, the per-perspective web evidence (which DID succeed)
+      // got thrown away with it. Now: if synth throws, we build a usable
+      // fallback report directly from the gathered evidence so the customer
+      // still gets value out of the run.
+      let synth: string;
+      let synthError: string | undefined;
+      try {
+        // Multi-perspective notes have 5 fixed sections — typically 400-600
+        // words / ~800 tokens. 768 is plenty without giving the model room
+        // to spiral into a wall-of-text. ~15-30s saved on local Ollama.
+        synth = await ollamaGenerate(
+          `Topic: ${topic}\n\nEvidence:\n${evidence}\n${vaultBlock}\n\nWrite the structured research note.`,
+          sysSynth,
+          { profile: "synthesis", complexity: "high", maxTokens: 768 } as any,
+        );
+      } catch (e: any) {
+        synthError = String(e?.message ?? e).slice(0, 200);
+        // Fallback report: stitch the gathered evidence into the same shape
+        // the synth would have produced, but without the LLM's polish. Better
+        // than throwing 5 minutes of fetched web content into the bin.
+        const fallbackPerspectives = perspectiveResults.map(p => {
+          const usable = p.sources.filter(s => s.ok && s.text);
+          if (usable.length === 0) {
+            return `### Perspective: ${p.name}\n_(no reachable sources for query "${p.query}")_`;
+          }
+          const bullets = usable.map(s => {
+            const idx = numbered.find(x => x.url === s.url)?.ref;
+            const firstSentence = s.text.replace(/\s+/g, " ").trim().split(/(?<=[.!?])\s+/)[0] ?? "";
+            return `- [${idx}] **${s.title}** — ${firstSentence.slice(0, 200)}`;
+          }).join("\n");
+          return `### Perspective: ${p.name}\n${bullets}`;
+        }).join("\n\n");
+        synth = `## Topic statement\n${topic}\n\n## Perspectives\n\n${fallbackPerspectives}\n\n## Cross-cutting themes\n_(synthesis step failed: \`${synthError}\` — manual review of the sources below recommended)_\n\n## Open questions\n_(synthesis unavailable)_\n\n## Bottom line\n_The LLM synthesiser couldn't run. Sources are listed; the customer should review them directly._`;
+      }
+
+      // Capture to vault — uses the same 0-Inbox/ pattern as research.deep so
+      // the user's existing flow (promote to 2-Permanent via Knowledge page)
+      // works on these notes too.
+      let captured: { path: string } | undefined;
+      if (capture) {
+        const stamp = new Date().toISOString().replace(/[-:T]/g, "").slice(0, 12);
+        const slug = topic.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60) || "research";
+        const path = `0-Inbox/${stamp}-multiperspective-${slug}.md`;
+        const today = new Date().toISOString().slice(0, 10);
+        const sourcesBlock = numbered.length > 0
+          ? numbered.map(s => `${s.ref}. [${s.title}](${s.url}) *(${s.perspective})*`).join("\n")
+          : "_(no reachable web sources)_";
+        const md = `---
+title: "Multi-perspective: ${topic.replace(/"/g, "'").slice(0, 120)}"
+created: ${today}
+source: clawbot-multiperspective
+perspectives: [${perspectives.map(p => `"${p}"`).join(", ")}]
+tags: [research, multiperspective]
+---
+
+# Multi-perspective research: ${topic}
+
+${synth.trim()}
+
+## Sources
+${sourcesBlock}
+
+## Vault hits at time of research
+${vaultHits.slice(0, 8).map(h => `- [[${h.path}]] (line ${h.line})`).join("\n") || "_(none)_"}
+`;
+        try {
+          writeVaultFile(path, md);
+          captured = { path };
+          void enqueueVaultCommit(`neuroworks: multiperspective — ${slug}`);
+        } catch { /* tolerate */ }
+      }
+
+      return {
+        topic,
+        perspectives: perspectives,
+        answer: synth.trim(),
+        vaultHits: vaultHits.slice(0, 8),
+        perspectiveResults: perspectiveResults.map(p => ({
+          name: p.name,
+          query: p.query,
+          sources: p.sources.map(s => ({ url: s.url, title: s.title, ok: s.ok, error: s.error })),
+        })),
+        sourceCount: numbered.length,
+        captured,
+      };
+    },
+  },
+  {
+    name: "peer.delegate",
+    description: "Hand a task off to a peer clawbot (the lightest-loaded one). Returns the peer's final answer once the peer's job completes. Use when the local clawbot is overloaded or when you want a second model's perspective.",
+    readonly: true,
+    args: [
+      { name: "task", type: "string", required: true, description: "Plain-English task to delegate" },
+      { name: "persona", type: "string", required: false, description: "Optional persona id to apply on the peer" },
+    ],
+    handler: async (args) => {
+      const task = String(args.task);
+      const persona = args.persona ? String(args.persona) : undefined;
+      return await delegateToBestPeer({ task, persona });
+    },
+  },
+  {
+    name: "peer.review",
+    description: "Send a draft answer to a peer clawbot for quality review. Returns { verdict, issues, revised_answer, confidence }. Use after synthesising a non-trivial answer to catch errors and tighten prose.",
+    readonly: true,
+    args: [
+      { name: "task", type: "string", required: true, description: "The original task / question" },
+      { name: "answer", type: "string", required: true, description: "The draft answer to review" },
+    ],
+    handler: async (args) => {
+      const task = String(args.task);
+      const answer = String(args.answer);
+      return await reviewWithPeer({ task, answer });
+    },
+  },
+  {
+    name: "quality.check",
+    description: "Score a draft answer on three axes — factuality_risk, citation_coverage, persona_fit — and return { pass, score, issues }. Cheaper and more structured than peer.review; use after synthesis to catch hallucinations and missing citations.",
+    readonly: true,
+    args: [
+      { name: "task", type: "string", required: true, description: "The original task / question" },
+      { name: "answer", type: "string", required: true, description: "The draft answer to check" },
+      { name: "sources", type: "string", required: false, description: "Optional sources/evidence text (comma-separated paths or free text)" },
+    ],
+    handler: async (args) => {
+      const task = String(args.task);
+      const answer = String(args.answer);
+      const sources = args.sources ? String(args.sources) : "";
+      const sys = `You are a quality scorer for an agent's draft answer. Score the draft on three axes from 0.0 (worst) to 1.0 (best):
+1. factuality_risk — likelihood the answer contains hallucinated or unsupported claims (1.0 means high risk; lower is better).
+2. citation_coverage — fraction of substantive claims backed by a cited source (paths, URLs, or clearly attributed quotes).
+3. persona_fit — match between the answer's tone/structure and what the task asked for.
+
+Output ONLY a JSON object, no prose, no fences:
+{"factuality_risk":<0..1>,"citation_coverage":<0..1>,"persona_fit":<0..1>,"issues":["<short>",...],"pass":<true|false>}
+
+Pass is true when factuality_risk < 0.4 AND citation_coverage > 0.4 AND persona_fit > 0.5.`;
+      // The output is a small JSON blob (~80-200 tokens). 256 tokens is a
+      // generous cap that stops the model from rambling and shaves 3-8s off
+      // this call on local Ollama versus the default 1024-token budget.
+      const raw = await ollamaGenerate(`Task: ${task}\n\nDraft answer:\n${answer}${sources ? `\n\nSources:\n${sources.slice(0, 4000)}` : ""}`, sys, { profile: "extraction", maxTokens: 256 });
+      const m = raw.match(/\{[\s\S]*\}/);
+      if (!m) return { pass: false, factuality_risk: 1, citation_coverage: 0, persona_fit: 0, issues: ["scorer returned no JSON"], raw };
+      try {
+        const parsed = JSON.parse(m[0]);
+        const score = (1 - clamp01(parsed.factuality_risk)) * 0.4 + clamp01(parsed.citation_coverage) * 0.3 + clamp01(parsed.persona_fit) * 0.3;
+        return {
+          pass: parsed.pass === true,
+          factuality_risk: clamp01(parsed.factuality_risk),
+          citation_coverage: clamp01(parsed.citation_coverage),
+          persona_fit: clamp01(parsed.persona_fit),
+          score: Math.round(score * 100) / 100,
+          issues: Array.isArray(parsed.issues) ? parsed.issues.slice(0, 6).map((s: any) => String(s).slice(0, 200)) : [],
+        };
+      } catch {
+        return { pass: false, factuality_risk: 1, citation_coverage: 0, persona_fit: 0, issues: ["scorer JSON unparseable"], raw };
+      }
+    },
+  },
+  {
+    name: "security.scan",
+    description: "Scan a blob of text for secrets, suspicious URLs, and command-injection markers before it gets written to the vault or pushed to GitHub. Returns { pass, findings, redacted }. Use as a pre-flight before any vault.write of agent-generated content.",
+    readonly: true,
+    args: [
+      { name: "content", type: "string", required: true, description: "Text to scan" },
+      { name: "kind", type: "string", required: false, description: "Optional context: 'note' | 'code' | 'commit-message' (default 'note')" },
+    ],
+    handler: async (args) => {
+      const content = String(args.content);
+      const kind = String(args.kind ?? "note") as SecurityKind;
+      const findings = scanForSecurityRisks(content, kind);
+      const high = findings.filter(f => f.severity === "high").length;
+      const redacted = high > 0 ? redactHighSeverity(content, findings) : content;
+      return { pass: high === 0, findings, redacted, kind };
+    },
+  },
+  {
+    name: "skill.list",
+    description: "List all available skill playbooks the agent can load for guidance (research-deep, email-writing, code-review, summarization, brief-writing, meeting-notes, vault-organization, planning-doc). Each entry returns name, description, and which intents it applies_to. Use this to discover what guidance is on offer for a given task shape.",
+    readonly: true,
+    args: [],
+    handler: async () => {
+      const { listSkills } = await import("./skills.js");
+      const skills = listSkills();
+      return {
+        count: skills.length,
+        skills: skills.map(s => ({ name: s.name, description: s.description, applies_to: s.applies_to, source: s.source })),
+      };
+    },
+  },
+  {
+    name: "skill.load",
+    description: "Load a skill playbook by name (e.g. 'email-writing', 'code-review'). Returns the full markdown body — use it as additional system guidance before producing the deliverable. List available skills with skill.list first if unsure which to pull.",
+    readonly: true,
+    args: [
+      { name: "name", type: "string", required: true, description: "Skill name (from skill.list)" },
+    ],
+    handler: async (args) => {
+      const { loadSkill } = await import("./skills.js");
+      const skill = loadSkill(String(args.name));
+      if (!skill) throw new Error(`Skill not found: "${args.name}". Run skill.list to see what's available.`);
+      return { name: skill.name, description: skill.description, applies_to: skill.applies_to, source: skill.source, body: skill.body };
+    },
+  },
+  {
+    name: "skill.suggest",
+    description: "Suggest the most relevant skill playbook(s) for a given intent. Pass the intent label (draft-email, summarize, review, plan, research, etc.) and get back up to 2 matching skills, sorted by specificity. Useful right after intent detection to know which playbook to load before drafting.",
+    readonly: true,
+    args: [
+      { name: "intent", type: "string", required: true, description: "Intent label (e.g. 'draft-email', 'summarize', 'review')" },
+      { name: "limit", type: "number", required: false, description: "Max suggestions to return (default 2, cap 4)" },
+    ],
+    handler: async (args) => {
+      const { suggestSkillsForIntent } = await import("./skills.js");
+      const limit = Math.min(4, Math.max(1, Number(args.limit ?? 2)));
+      const suggestions = suggestSkillsForIntent(String(args.intent), limit);
+      return {
+        intent: String(args.intent),
+        suggestions: suggestions.map(s => ({ name: s.name, description: s.description, applies_to: s.applies_to })),
+      };
+    },
+  },
+  {
+    name: "skill.fetch_remote",
+    description: "Fetch a skill .md file from a public URL (e.g. a GitHub raw URL or gist) and save it under skills/_user/ so it joins the local catalog. REQUIRES the user to have opted in via CLAWBOT_REMOTE_SKILLS=1 in .env — refuses otherwise. Use to pull in community-curated playbooks.",
+    readonly: false,
+    args: [
+      { name: "url", type: "string", required: true, description: "HTTPS URL to a raw .md file with optional YAML frontmatter (name/description/applies_to)" },
+    ],
+    handler: async (args) => {
+      const { fetchRemoteSkill } = await import("./skills.js");
+      const r = await fetchRemoteSkill(String(args.url));
+      return {
+        saved: r.saved,
+        skill: { name: r.skill.name, description: r.skill.description, applies_to: r.skill.applies_to, source: r.skill.source },
+      };
     },
   },
   {
@@ -272,8 +971,17 @@ export function findPrimitive(name: string): Primitive | undefined {
   return primitives.find(p => p.name === name);
 }
 
-export function primitivesPromptCatalog(): string {
+export function primitivesPromptCatalog(opts: { compact?: boolean } = {}): string {
+  const compact = opts.compact === true;
   return primitives.map(p => {
+    if (compact) {
+      // Compact mode: just args by name (drop types) and the first sentence of
+      // the description. Cuts the planner prompt by ~40% without losing the
+      // signal the model uses to pick tools.
+      const argsList = p.args.length === 0 ? "()" : `(${p.args.map(a => `${a.name}${a.required ? "" : "?"}`).join(",")})`;
+      const firstSentence = p.description.split(/(?<=[.!?])\s+/)[0].slice(0, 140);
+      return `- ${p.name}${argsList}${p.readonly ? "" : " [WRITE]"} — ${firstSentence}`;
+    }
     const argsList = p.args.length === 0 ? "(none)" : p.args.map(a => `${a.name}:${a.type}${a.required ? "" : "?"}`).join(", ");
     return `- ${p.name}(${argsList})${p.readonly ? "" : " [WRITE]"} — ${p.description}`;
   }).join("\n");
@@ -289,7 +997,9 @@ export function humanStepLabel(tool: string, args: Record<string, any> = {}): st
   const s = (k: string) => (typeof a[k] === "string" ? a[k] : "");
   switch (tool) {
     case "vault.search":       return s("query") ? `Searching your second brain for "${s("query")}"` : "Searching your second brain";
-    case "vault.read":         return s("path") ? `Reading note ${s("path")}` : "Reading a note";
+    case "vault.read":         return s("path") ? `Reading ${s("path")}` : "Reading a doc";
+    case "vault.scan_docs":    return s("folder") ? `Scanning docs in ${s("folder")}` : "Scanning docs across the vault";
+    case "vault.edit":         return s("path") ? `Editing ${s("path")}` : "Editing a vault doc";
     case "vault.list":         return s("path") ? `Listing ${s("path")}` : "Listing your vault";
     case "vault.write":        return s("path") ? `Writing ${s("path")}` : "Writing a note";
     case "vault.append":       return s("path") ? `Adding to ${s("path")}` : "Adding to a note";
@@ -302,9 +1012,31 @@ export function humanStepLabel(tool: string, args: Record<string, any> = {}): st
     case "github.create_issue":return s("title") ? `Opening issue "${s("title")}"` : "Opening a GitHub issue";
     case "ollama.generate":    return "Thinking about it";
     case "web.fetch":          return s("url") ? `Reading ${s("url")}` : "Reading a webpage";
+    case "web.scrape":         return s("url") ? `Browsing ${s("url")} (Playwright)` : "Browsing a webpage";
+    case "web.firecrawl":      return s("url") ? `Scraping ${s("url")} (Firecrawl)` : "Scraping via Firecrawl";
+    case "skill.list":         return "Listing available skills";
+    case "skill.load":         return s("name") ? `Loading the "${s("name")}" skill` : "Loading a skill";
+    case "skill.suggest":      return "Picking the right skill for this task";
+    case "skill.fetch_remote": return s("url") ? `Pulling skill from ${s("url")}` : "Pulling a remote skill";
     case "fs.list_external":   return s("path") ? `Looking inside ${s("path")}` : "Browsing your files";
     case "fs.read_external":   return s("path") ? `Reading ${s("path")}` : "Reading a file";
     case "clock.now":          return "Checking the clock";
+    case "web.search":         return s("query") ? `Searching the web for "${s("query")}"` : "Searching the web";
+    case "research.deep":      return s("query") ? `Researching "${s("query")}" — vault + web` : "Researching";
+    case "research.multiperspective": return s("topic") ? `Multi-perspective research: "${s("topic")}"` : "Multi-perspective research";
+    case "peer.delegate":      return s("task") ? `Delegating to a peer clawbot` : "Delegating to a peer";
+    case "peer.review":        return "Asking a peer to review the draft";
+    case "quality.check":      return "Quality-checking the draft";
+    case "security.scan":      return s("kind") ? `Security-scanning the ${s("kind")}` : "Security-scanning the content";
     default:                   return tool;
   }
 }
+
+function clamp01(n: any): number {
+  const x = Number(n);
+  if (!Number.isFinite(x)) return 0;
+  return Math.max(0, Math.min(1, x));
+}
+
+// parseDdgLite/parseBing live in lib/web-client.ts now — the primitives use
+// the hardened client for all web search and fetch operations.

@@ -36,6 +36,47 @@ templatesRouter.get("/jobs/:id", (req, res) => {
   res.json(j);
 });
 
+// Retry a failed job — replays the same task + inputs through the general-task
+// pipeline. The original failed job stays in the journal so the customer has
+// the audit trail. The new job is fully fresh — plan, execution, synth all
+// run again, so transient failures (LLM hiccup, network blip) get a clean
+// second shot. We require the original to be in a terminal state (succeeded,
+// failed, rejected); replaying a running job would create a duplicate.
+templatesRouter.post("/jobs/:id/retry", async (req, res) => {
+  const old = getJob(req.params.id);
+  if (!old) return res.status(404).json({ error: "job not found" });
+  if (old.status !== "failed" && old.status !== "rejected" && old.status !== "succeeded") {
+    return res.status(409).json({ error: `cannot retry job in status "${old.status}" — wait for it to finish first` });
+  }
+  const task = String((old.inputs as any)?.task ?? "").trim();
+  if (!task) return res.status(400).json({ error: "original job has no recorded task — cannot retry" });
+
+  // Spin up a fresh job and run the same general-task agent loop. We mark it
+  // with `retryOf: <old id>` so the UI / journal can trace the lineage.
+  const job = newJob("insights:general-task");
+  job.template = "general-task";
+  job.title = `Retry: ${task.slice(0, 60)}`;
+  job.inputs = { task, save_as_template: false, retryOf: req.params.id };
+  res.json({ jobId: job.id, retryOf: req.params.id });
+
+  void runJob(job, async (push, progress) => {
+    push(`retry of job ${req.params.id} (${old.status})`);
+    const persona = getActivePersona();
+    const suffix = personaSystemSuffix(persona);
+    const r = await planAndExecute(task, push, (patch) => progress(patch as Record<string, unknown>), { personaSystemSuffix: suffix });
+    return {
+      answer: r.answer,
+      plan: r.plan,
+      runs: r.runs,
+      review: r.review,
+      quality: r.quality,
+      security: r.security,
+      budgets: r.budgets,
+      subagentTimings: r.subagentTimings,
+    };
+  });
+});
+
 templatesRouter.post("/run/:id", async (req, res) => {
   let tpl = templates.find(t => t.id === req.params.id);
   let custom: CustomTemplate | undefined;
@@ -321,6 +362,9 @@ async function generalTaskRunner(inputs: Record<string, unknown>, push: (m: stri
       startedAt: x.startedAt,
       modelUsed: x.modelUsed,
     })),
+    review: r.review,
+    quality: r.quality,
+    security: r.security,
     savedTemplateId,
   };
 }

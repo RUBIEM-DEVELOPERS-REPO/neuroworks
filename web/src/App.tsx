@@ -10,6 +10,7 @@ import { Admin } from "./pages/Admin";
 import { Settings } from "./pages/Settings";
 import { Chat } from "./pages/Chat";
 import { Personas } from "./pages/Personas";
+import { Results, ResultsIndex } from "./pages/Results";
 
 export default function App() {
   return (
@@ -19,6 +20,8 @@ export default function App() {
         <Route path="/dashboard" element={<Dashboard />} />
         <Route path="/chat" element={<Chat />} />
         <Route path="/tasks" element={<Tasks />} />
+        <Route path="/results" element={<ResultsIndex />} />
+        <Route path="/results/:jobId" element={<Results />} />
         <Route path="/templates" element={<Templates />} />
         <Route path="/approvals" element={<Approvals />} />
         <Route path="/activity" element={<Activity />} />

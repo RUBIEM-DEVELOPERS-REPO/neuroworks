@@ -11,3 +11,7 @@ web/dist/
 
 # NeuroWorks runtime state (custom templates, future caches) — per-machine
 .neuroworks/
+
+# User-fetched skill .md files (skill.fetch_remote drops them here, gated by
+# CLAWBOT_REMOTE_SKILLS=1). Per-machine, not shared.
+server/src/skills/_user/

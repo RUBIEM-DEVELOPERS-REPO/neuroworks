@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { journal } from "./journal.js";
+import { getActivePersona } from "./personas.js";
 
 export type Job = {
   id: string;
@@ -118,6 +119,9 @@ async function journalJob(j: Job) {
       lines.push("</details>");
     }
     const slug = (j.title ?? j.template ?? j.kind).toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 60) + "-" + j.id.slice(0, 8);
+    // Stamp the active persona on every journal entry so vault searches like
+    // `tags: clawbot` or frontmatter filters can isolate one persona's work.
+    const activePersona = getActivePersona();
     await journal({
       kind: "job",
       slug,
@@ -126,6 +130,8 @@ async function journalJob(j: Job) {
         jobId: j.id,
         status: j.status,
         template: j.template ?? j.kind,
+        persona: activePersona?.id ?? "none",
+        personaName: activePersona?.name ?? "",
         startedAt: j.startedAt,
         finishedAt: j.finishedAt ?? "",
       },

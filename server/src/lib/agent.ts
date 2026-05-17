@@ -1,16 +1,65 @@
 import { findPrimitive, humanStepLabel, primitivesPromptCatalog, primitives } from "./primitives.js";
-import { ollamaGenerate } from "./ollama.js";
+import { ollamaGenerate, ollamaGenerateWithMeta } from "./ollama.js";
+import { pollPeers } from "./peers.js";
+import { searchVault } from "./vault.js";
+import { suggestSkillsForIntent } from "./skills.js";
+import { config } from "../config.js";
+
+// Parse the "Interpretation: intent=foo, target=..." line that chat.ts
+// appends to enriched tasks. Returns the intent label when present, or
+// undefined if the task didn't go through intent extraction. Used by the
+// synth path to load a matching skill playbook.
+function parseIntentFromTask(task: string): string | undefined {
+  const m = task.match(/Interpretation:\s*intent=([\w-]+)/i);
+  return m ? m[1].toLowerCase() : undefined;
+}
 
 export type PlanStep = { tool: string; args: Record<string, any>; rationale?: string; label?: string };
 export type Plan = { steps: PlanStep[]; summary?: string; waves?: number[][] };
 export type StepRun = { step: PlanStep; ok: boolean; result?: any; error?: string; durationMs: number; startedAt?: number; modelUsed?: string };
+
+export type PeerReview = {
+  verdict: "good" | "needs-work" | "bad";
+  issues: string[];
+  revised_answer?: string;
+  confidence: number;
+  reviewer?: { name?: string; model?: string };
+  elapsedMs?: number;
+};
+
+export type QualityScore = {
+  pass: boolean;
+  factuality_risk: number;
+  citation_coverage: number;
+  persona_fit: number;
+  score?: number;
+  issues?: string[];
+};
+
+export type SecurityScan = {
+  pass: boolean;
+  findings: { type: string; match: string; severity: "high" | "medium" | "low"; reason: string }[];
+  redacted?: string;
+  kind?: string;
+};
 
 export type AgentResult = {
   task: string;
   plan: Plan;
   runs: StepRun[];
   answer: string;
+  // Streamed partial answer surfaced during synthesis. Replaced by the final
+  // `answer` once synthesis completes; the UI prefers `answer` when present.
+  partialAnswer?: string;
   hadWrites: boolean;
+  review?: PeerReview;
+  quality?: QualityScore;
+  security?: SecurityScan;
+  // Sub-agent spin-up telemetry — the UI uses this to show users why their
+  // run was fast (or wasn't). `budgets` are the dual-lane caps used for this
+  // run; `subagentTimings` is per-wave elapsed time in ms.
+  budgets?: { llm: number; io: number; idlePeers: number };
+  subagentTimings?: { wave: number; elapsedMs: number; ioCount: number; llmCount: number }[];
 };
 
 const PLAN_SYSTEM = `You are a task planner for clawbot. The user gives a task in plain English; you output ONLY a JSON object describing tool steps. No prose, no markdown fences.
@@ -28,41 +77,74 @@ Rules:
 
 EXAMPLES:
 Task: "find notes about Cognify and tell me what they say"
-Plan:
-{"steps":[
-  {"tool":"vault.search","args":{"query":"Cognify"},"rationale":"find relevant notes"},
-  {"tool":"vault.read","args":{"path":"$step_0.matches.0.path"},"rationale":"read the top match in full"}
-],"summary":"Search for Cognify, read the top match."}
+{"steps":[{"tool":"vault.search","args":{"query":"Cognify"}},{"tool":"vault.read","args":{"path":"$step_0.matches.0.path"}}],"summary":"Search Cognify, read top match."}
 
-Task: "what's in the README of the clawbot repo"
-Plan:
-{"steps":[
-  {"tool":"github.get_file","args":{"owner":"RUBIEM-DEVELOPERS-REPO","name":"clawbot","path":"README.md"},"rationale":"fetch README"}
-],"summary":"Fetch clawbot README."}
+Task: "compare what my vault says about Cognify with the Cognify GitHub README"
+{"steps":[{"tool":"vault.search","args":{"query":"Cognify"}},{"tool":"github.get_file","args":{"owner":"topoteretes","name":"cognee","path":"README.md"}},{"tool":"ollama.generate","args":{"prompt":"Vault:\n$step_0.matches\n\nREADME:\n$step_1.content\n\nCompare.","system":"Compare two sources."}}],"summary":"Pull both in parallel, compare."}
 
-Task: "summarize this URL: https://example.com/post"
-Plan:
-{"steps":[
-  {"tool":"web.fetch","args":{"url":"https://example.com/post"},"rationale":"fetch page"},
-  {"tool":"ollama.generate","args":{"prompt":"Summarize: $step_0.text","system":"Summarize the input concisely."},"rationale":"summarize"}
-],"summary":"Fetch URL, summarize."}
+Task: "research what's new with Mistral models"
+{"steps":[{"tool":"research.deep","args":{"query":"Mistral models latest releases","depth":3,"capture":true}}],"summary":"Deep research with auto-capture."}
 
-Task: "compare what my vault says about Cognify with what the Cognify GitHub README says"
-Plan:
-{"steps":[
-  {"tool":"vault.search","args":{"query":"Cognify"},"rationale":"find what the vault says (independent)"},
-  {"tool":"github.get_file","args":{"owner":"topoteretes","name":"cognee","path":"README.md"},"rationale":"fetch the README (independent — runs in parallel)"},
-  {"tool":"ollama.generate","args":{"prompt":"Vault hits:\n$step_0.matches\n\nREADME:\n$step_1.content\n\nWrite a short comparison.","system":"Compare two sources concisely."},"rationale":"synthesize once both are in"}
-],"summary":"Pull both sources in parallel, then compare."}
+Task: "analyse the case for and against giving every employee an AI agent"
+{"steps":[{"tool":"research.multiperspective","args":{"topic":"giving every employee an AI agent","perspectives":"mainstream, critical, practitioner, recent","capture":true}}],"summary":"Multi-perspective investigation."}
+
+Task: "open https://example.com/dashboard and tell me the headline metric"
+{"steps":[{"tool":"web.scrape","args":{"url":"https://example.com/dashboard","waitFor":".headline-metric","selector":".headline-metric"}}],"summary":"Render the dashboard, extract the metric."}
 
 Tool catalog:
 `;
 
-export async function plan(task: string, personaSystemSuffix?: string): Promise<Plan> {
-  const sys = PLAN_SYSTEM + primitivesPromptCatalog() + (personaSystemSuffix ? `\n\nPersona context (follow this when planning):\n${personaSystemSuffix}` : "");
-  // Planning needs strict JSON output, modest reasoning, and speed — the model
-  // router picks the best available local model for that profile.
-  const out = await ollamaGenerate(`Task: ${task}`, sys, { profile: "planning" });
+// Hard cap on the planner LLM call. Slow local models occasionally take 2+
+// minutes JUST to plan — by which point the customer has given up. After
+// PLAN_TIMEOUT_MS we abandon the LLM plan and fall back to defaultVaultPlan,
+// which routes the task to research.deep. Tunable via env.
+const PLAN_TIMEOUT_MS = Number(process.env.CLAWBOT_PLAN_TIMEOUT_MS ?? "60000");
+
+export async function plan(task: string, _personaSystemSuffix?: string): Promise<Plan> {
+  // Persona deliberately omitted from the TOOL CHOICE prompt: tool selection
+  // is mechanical and must not be gated by role. (Head of AI asking about
+  // NeuroWorks is still allowed to search the vault.) The persona colors the
+  // synthesised answer. We DO however pass vault-hits context — the planner
+  // makes much better decisions when it knows whether the vault has notes on
+  // the topic ("4 hits → prefer vault.search before web").
+  const topic = extractTopic(task);
+  let vaultContext = "";
+  if (topic && topic.length >= 2) {
+    try {
+      const hits = searchVault(topic, 5);
+      if (hits.length > 0) {
+        vaultContext = `\n\nVault context: the user's vault has ${hits.length} note${hits.length === 1 ? "" : "s"} matching this topic. Sample paths: ${hits.slice(0, 3).map(h => h.path).join(", ")}. Strongly prefer vault.search / vault.read over the web for this task; the user wants their own notes prioritised.\n`;
+      } else {
+        vaultContext = `\n\nVault context: the user's vault has NO notes on this topic. Web research (research.deep or research.multiperspective) is appropriate; capture findings back to 0-Inbox/.\n`;
+      }
+    } catch { /* tolerate — vault search failure shouldn't block planning */ }
+  }
+  // Compact catalog: ~40% smaller prompt → faster planning on small models.
+  const sys = PLAN_SYSTEM + primitivesPromptCatalog({ compact: true }) + vaultContext;
+
+  // Race the planner LLM call against PLAN_TIMEOUT_MS. If the LLM stalls,
+  // we fall back to an empty plan; the caller then uses defaultVaultPlan
+  // (research.deep). Better a generic-but-fast plan than a 2-min planner
+  // stall that makes the customer think it's hung.
+  //
+  // Planning is marked complexity:"normal" because the prompt is short
+  // (under the 6k-token complexity threshold). When OPENROUTER_API_KEY is
+  // set AND OPENROUTER_PROFILES is empty or includes "planning", the
+  // dispatcher routes to OR's small/cheap model — typically ~1-2 seconds
+  // vs ~30-90 seconds on local Ollama. Customers wanting strict local-only
+  // can set OPENROUTER_PROFILES to exclude planning.
+  let out: string;
+  try {
+    out = await Promise.race([
+      ollamaGenerate(`Task: ${task}`, sys, { profile: "planning" }),
+      new Promise<string>((_, rej) =>
+        setTimeout(() => rej(new Error(`planner timeout after ${PLAN_TIMEOUT_MS / 1000}s`)), PLAN_TIMEOUT_MS),
+      ),
+    ]);
+  } catch (e: any) {
+    console.warn(`[planner] ${e?.message ?? e} — falling back to empty plan; caller will use defaultVaultPlan`);
+    return { steps: [] };
+  }
   const json = extractJson(out);
   if (!json) return { steps: [] };
   if (!Array.isArray(json.steps)) return { steps: [] };
@@ -116,16 +198,60 @@ function collectDeps(args: any, acc: Set<number> = new Set()): Set<number> {
   return acc;
 }
 
-// Cap on simultaneously-active sub-agents within a single wave. Larger waves
-// still run, but in chunks of this size so we don't pile six concurrent
-// ollama.generate calls onto a single local model and watch all of them stall.
-const MAX_CONCURRENT_SUBAGENTS = 3;
+// Sub-agent concurrency budgets. We have two lanes because the two cost
+// curves are different:
+//   • LLM-bound tools (ollama.generate, research.deep, peer.review,
+//     quality.check, peer.delegate) — bottlenecked by the local Ollama model.
+//     Running many in parallel only helps if OLLAMA_NUM_PARALLEL is high or
+//     idle peers can absorb the work. Default: 3 + 2 per idle peer.
+//   • I/O-bound tools (vault.*, github.*, web.fetch, web.scrape, fs.*,
+//     clock.*) — bound by network/disk and parallelise great. Default: 6.
+//
+// CLAWBOT_SUBAGENT_BUDGET overrides the LLM-lane base. CLAWBOT_IO_BUDGET
+// overrides the I/O lane. Persona-shifter peers can crank both up because
+// they're the dedicated worker — their job IS to run as many sub-agents as
+// the tools can handle.
+const LLM_BASE = Number(process.env.CLAWBOT_SUBAGENT_BUDGET ?? "3");
+const IO_BASE = Number(process.env.CLAWBOT_IO_BUDGET ?? "6");
+const PER_PEER_BONUS = 2;
+const HARD_CAP = 12;
+
+const LLM_HEAVY_TOOLS = new Set([
+  "ollama.generate", "research.deep", "peer.review", "peer.delegate",
+  "quality.check", "synth", "synthesis",
+]);
+
+function isLlmHeavy(tool: string): boolean {
+  return LLM_HEAVY_TOOLS.has(tool);
+}
+
+type Budgets = { llm: number; io: number; idlePeers: number };
+
+// Compute both budgets once at the start of a run, then keep them stable for
+// the whole plan. The peer poll is bounded by pollPeers's own 2s/peer timeout
+// so an unreachable peer can't stall the run start.
+async function computeBudgets(): Promise<Budgets> {
+  try {
+    const peers = await pollPeers();
+    const idleReachable = peers.filter(p => p.ok && p.ready && (p.inflightJobs ?? 0) === 0).length;
+    const llm = Math.min(HARD_CAP, Math.max(LLM_BASE, LLM_BASE + idleReachable * PER_PEER_BONUS));
+    const io = Math.min(HARD_CAP, Math.max(IO_BASE, IO_BASE + idleReachable));
+    return { llm, io, idlePeers: idleReachable };
+  } catch {
+    return { llm: LLM_BASE, io: IO_BASE, idlePeers: 0 };
+  }
+}
 
 // Errors that look transient and worth one retry. Network blips, Ollama load
 // timeouts, GitHub 5xx — the kind of thing that's usually fine on a second try.
-const TRANSIENT_ERROR_RE = /\b(?:ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|fetch failed|socket hang up|abort|timeout|503|502|504|429)\b/i;
+const TRANSIENT_ERROR_RE = /\b(?:ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|fetch failed|socket hang up|abort|timeout|503|502|504|429|empty response body)\b/i;
+// Unrecoverable failures — auth, missing model, hard config issues. We do NOT
+// retry these (the next attempt will fail the same way) but we ALSO don't
+// abort the whole plan: the wave-level check decides whether to continue.
+const FATAL_ERROR_RE = /\b(?:401|403|model not found|model not pulled|API key|invalid_request_error|insufficient_quota)\b/i;
+const STEP_RETRY_BACKOFF_MS = [1500, 4000]; // two retries: 1.5s, then 4s
 
-export async function executePlan(p: Plan, push: (msg: string) => void, onProgress?: (runs: StepRun[]) => void): Promise<{ runs: StepRun[]; hadWrites: boolean }> {
+export async function executePlan(p: Plan, push: (msg: string) => void, onProgress?: (runs: StepRun[]) => void): Promise<{ runs: StepRun[]; hadWrites: boolean; budgets?: { llm: number; io: number; idlePeers: number }; subagentTimings?: { wave: number; elapsedMs: number; ioCount: number; llmCount: number }[] }> {
   const runs: StepRun[] = p.steps.map(step => ({ step, ok: false, durationMs: 0 }));
   let hadWrites = false;
   for (const step of p.steps) {
@@ -134,6 +260,16 @@ export async function executePlan(p: Plan, push: (msg: string) => void, onProgre
   }
   const waves = p.waves && p.waves.length > 0 ? p.waves : p.steps.map((_, i) => [i]);
   let aborted = false;
+  // Resolve both concurrency lanes for this run. The I/O lane stays wider
+  // than the LLM lane so vault/web/github sub-agents fan out aggressively
+  // while LLM calls respect the local Ollama bottleneck.
+  const budgets = await computeBudgets();
+  const spinStartedAt = Date.now();
+  push(`sub-agent budget · LLM-lane ${budgets.llm} · I/O-lane ${budgets.io}${budgets.idlePeers > 0 ? ` · ${budgets.idlePeers} idle peer${budgets.idlePeers === 1 ? "" : "s"} boosting both lanes` : ""}`);
+  onProgress?.([...runs]);
+  // Inform progress callbacks via the runs payload (executePlan only emits
+  // runs — we stamp the budget on the first run as a side-channel so the UI
+  // can surface it without changing the existing wire shape).
 
   async function runStep(i: number) {
     if (aborted) return;
@@ -156,75 +292,731 @@ export async function executePlan(p: Plan, push: (msg: string) => void, onProgre
         return;
       } catch (e: any) {
         const msg = String(e.message ?? e);
-        if (attempt === 0 && TRANSIENT_ERROR_RE.test(msg)) {
+        // Up to TWO retries on transient errors with growing backoff. Real
+        // network blips, brief rate limits, undici socket hang-ups — these
+        // recover within seconds, so a single retry sometimes wasn't enough.
+        if (attempt < STEP_RETRY_BACKOFF_MS.length && TRANSIENT_ERROR_RE.test(msg) && !FATAL_ERROR_RE.test(msg)) {
+          const wait = STEP_RETRY_BACKOFF_MS[attempt];
           attempt++;
-          push(`  ⟳ ${step.label ?? step.tool}: transient error, retrying once — ${msg.slice(0, 120)}`);
-          await new Promise(r => setTimeout(r, 1500));
+          push(`  ⟳ ${step.label ?? step.tool}: transient error (attempt ${attempt}/${STEP_RETRY_BACKOFF_MS.length}), retrying in ${(wait / 1000).toFixed(1)}s — ${msg.slice(0, 120)}`);
+          await new Promise(r => setTimeout(r, wait));
           continue;
         }
         runs[i] = { step, ok: false, error: msg, durationMs: Date.now() - t0, startedAt: t0 };
-        push(`  ✗ ${step.label ?? step.tool}: ${msg}`);
-        aborted = true;
+        // DO NOT abort the whole plan on a single step failure. A fan-out
+        // wave (multiperspective research, parallel scrapers) often has 4+
+        // steps and losing one shouldn't doom the rest. The wave-level
+        // check below decides whether enough succeeded to keep going.
+        push(`  ✗ ${step.label ?? step.tool}: ${msg.slice(0, 200)}`);
         onProgress?.([...runs]);
         return;
       }
     }
   }
 
+  const subagentTimings: { wave: number; elapsedMs: number; ioCount: number; llmCount: number }[] = [];
   for (let w = 0; w < waves.length; w++) {
     if (aborted) break;
     const ids = waves[w];
-    if (ids.length > 1) push(`spinning up ${ids.length} sub-agents${ids.length > MAX_CONCURRENT_SUBAGENTS ? ` (capped at ${MAX_CONCURRENT_SUBAGENTS} at a time)` : ""}`);
-    // Chunk wide waves so we never have more than MAX_CONCURRENT_SUBAGENTS active.
-    for (let off = 0; off < ids.length; off += MAX_CONCURRENT_SUBAGENTS) {
-      if (aborted) break;
-      const chunk = ids.slice(off, off + MAX_CONCURRENT_SUBAGENTS);
-      await Promise.all(chunk.map(runStep));
+    // Track wave-level success/failure. If EVERY step in a wave fails we
+    // abort — there's nothing downstream can build on. But if at least one
+    // succeeds, we continue: the wave produced partial evidence the next
+    // wave (and the synth) can use.
+    const waveStepIds = [...ids];
+    if (ids.length > 1) {
+      const llmIds = ids.filter(i => isLlmHeavy(p.steps[i].tool));
+      const ioIds = ids.filter(i => !isLlmHeavy(p.steps[i].tool));
+      const waveStartedAt = Date.now();
+      push(`spinning up ${ids.length} sub-agent${ids.length === 1 ? "" : "s"} · ${ioIds.length} I/O + ${llmIds.length} LLM`);
+      // Run the lanes in parallel against each other. Within a lane we chunk
+      // to respect the budget. I/O sub-agents start FIRST so they have a head
+      // start (they're typically faster); LLM sub-agents follow on the LLM
+      // lane while I/O is still finishing — most plans gate the LLM step on
+      // the I/O step's output anyway, but when they don't this is a free win.
+      const ioPromise = (async () => {
+        for (let off = 0; off < ioIds.length; off += budgets.io) {
+          if (aborted) break;
+          const chunk = ioIds.slice(off, off + budgets.io);
+          await Promise.all(chunk.map(runStep));
+        }
+      })();
+      const llmPromise = (async () => {
+        for (let off = 0; off < llmIds.length; off += budgets.llm) {
+          if (aborted) break;
+          const chunk = llmIds.slice(off, off + budgets.llm);
+          await Promise.all(chunk.map(runStep));
+        }
+      })();
+      await Promise.all([ioPromise, llmPromise]);
+      const waveMs = Date.now() - waveStartedAt;
+      subagentTimings.push({ wave: w + 1, elapsedMs: waveMs, ioCount: ioIds.length, llmCount: llmIds.length });
+      const okInWave = waveStepIds.filter(idx => runs[idx]?.ok).length;
+      const failedInWave = waveStepIds.length - okInWave;
+      if (failedInWave > 0) {
+        push(`wave ${w + 1} done in ${(waveMs / 1000).toFixed(1)}s · ${okInWave}/${waveStepIds.length} ok (${failedInWave} failed but partial results kept)`);
+      } else {
+        push(`wave ${w + 1} done in ${(waveMs / 1000).toFixed(1)}s`);
+      }
+    } else {
+      // Single-step wave — no lane split needed.
+      const tSingle = Date.now();
+      await runStep(ids[0]);
+      const stepTool = p.steps[ids[0]].tool;
+      subagentTimings.push({ wave: w + 1, elapsedMs: Date.now() - tSingle, ioCount: isLlmHeavy(stepTool) ? 0 : 1, llmCount: isLlmHeavy(stepTool) ? 1 : 0 });
+    }
+    // Wave-level abort gate: only abort if EVERY step in this wave failed
+    // AND the failure was something downstream can't recover from. A
+    // single-step wave that fails on a single-step plan obviously means
+    // there's nothing left to synthesize; multi-step waves get to keep
+    // going as long as at least one perspective succeeded.
+    const okInWave = waveStepIds.filter(idx => runs[idx]?.ok).length;
+    if (okInWave === 0 && waveStepIds.length > 0) {
+      // Special tolerance: if a SUBSEQUENT wave succeeded earlier or there
+      // are still later waves to try, we don't abort — synth can work from
+      // anything we've gathered so far. But if this was the FIRST wave and
+      // it produced nothing, there's no evidence to build on, so we stop.
+      const anySucceededOverall = runs.some(r => r.ok);
+      if (!anySucceededOverall && w === 0) {
+        push(`first wave produced no successes — stopping execution; synth will fall back to a useful summary of what failed`);
+        aborted = true;
+      }
     }
   }
-  return { runs, hadWrites };
+  const totalSpinMs = Date.now() - spinStartedAt;
+  push(`all sub-agents done in ${(totalSpinMs / 1000).toFixed(1)}s`);
+  return { runs, hadWrites, budgets, subagentTimings };
+}
+
+// Auto-review is opt-out via env. Skipped automatically when the answer is
+// trivial (under MIN_REVIEW_CHARS) or no peer is reachable. This makes the
+// behavior degrade cleanly on single-clawbot setups.
+const AUTO_REVIEW = process.env.CLAWBOT_AUTO_REVIEW !== "0";
+const MIN_REVIEW_CHARS = 120;
+
+// Build a compact, numbered evidence string from successful step runs.
+// quality.check accepts a `sources` arg — without it the scorer is grading
+// citation_coverage blind. Format mirrors the catalog the synth saw so the
+// scorer can match the draft's [N] markers back to real sources.
+function buildEvidenceCatalog(runs: StepRun[]): string {
+  const ok = runs.filter(r => r.ok && r.step.tool !== "quality.check" && r.step.tool !== "security.scan" && r.step.tool !== "peer.review");
+  if (ok.length === 0) return "";
+  const lines: string[] = [];
+  for (let i = 0; i < ok.length; i++) {
+    const r = ok[i];
+    const result: any = r.result;
+    let body = "";
+    if (typeof result === "string") body = result;
+    else if (result && typeof result === "object") {
+      if (typeof result.answer === "string") body = result.answer;
+      else if (typeof result.text === "string") body = result.text;
+      else if (typeof result.content === "string") body = result.content;
+      else if (Array.isArray(result.matches)) body = result.matches.slice(0, 6).map((m: any) => `${m.path ?? "?"}: ${(m.preview ?? "").slice(0, 120)}`).join("\n");
+      else if (Array.isArray(result.results)) body = result.results.slice(0, 6).map((m: any) => `${m.title ?? m.path ?? m.url ?? "?"} — ${(m.snippet ?? m.preview ?? "").slice(0, 120)}`).join("\n");
+      else if (Array.isArray(result.webSources)) body = result.webSources.slice(0, 6).map((s: any, i: number) => `[${i + 1}] ${s.title ?? s.url}`).join("\n");
+      else { try { body = JSON.stringify(result); } catch { body = ""; } }
+    }
+    body = String(body).slice(0, 1500);
+    if (!body) continue;
+    const args = r.step.args ?? {};
+    const provenance: string[] = [];
+    for (const k of ["url", "path", "query", "name", "repo", "owner"]) {
+      const v = (args as any)[k];
+      if (typeof v === "string") provenance.push(`${k}="${v.slice(0, 60)}"`);
+    }
+    lines.push(`[${i + 1}] ${r.step.tool}${provenance.length ? ` (${provenance.join(", ")})` : ""}\n${body}`);
+  }
+  return lines.join("\n\n").slice(0, 8000);
+}
+// Triage skips the planner for short conversational/world-knowledge prompts.
+// Set CLAWBOT_TRIAGE=0 to disable. The triage call uses the smallest available
+// model so the shortcut path is much faster than full plan→execute→synth.
+const TRIAGE_ENABLED = process.env.CLAWBOT_TRIAGE !== "0";
+const TRIAGE_MAX_CHARS = 200;
+
+// Heuristic prefilter: certain shapes are obviously direct-answer (greetings,
+// simple math, "what is/are" world-knowledge questions) — skip the LLM triage
+// call entirely. Saves 2-5s per simple task on local Ollama. The LLM triage
+// handles the ambiguous middle.
+//
+// Anything that name-drops vault/notes/brain, a file path, a URL, a repo, or a
+// "search/find/look up" verb is NOT direct — those need tools and must reach
+// the planner. The vault-hits check downstream still vetoes a direct path
+// when the user's notes actually cover the topic.
+const TOOL_CUES = /\b(?:my\s+(?:vault|notes?|brain|second\s+brain|repos?|files?|docs?|inbox)|the\s+(?:vault|repo|repository|inbox)|in\s+(?:my|the)\s+(?:vault|notes?|brain|repo|inbox|files?|docs?)|find|search|look\s+(?:up|for|inside)|browse|fetch|scrape|read\s+\S+\.(?:md|pdf|docx|xlsx|txt|json|yaml|yml|csv)|github\.com|https?:\/\/|[a-zA-Z]:\\|\/[\w-]+\/[\w-]+|\.md\b|\.pdf\b|\.docx\b)/i;
+function looksLikeDirectAnswer(task: string): boolean {
+  const t = task.trim();
+  if (t.length === 0 || t.length > TRIAGE_MAX_CHARS) return false;
+  const lower = t.toLowerCase();
+  // Tool-cue blocklist applies to every direct-answer pattern below.
+  if (TOOL_CUES.test(t)) return false;
+  if (/^(?:hi|hello|hey|yo|sup|good\s+(?:morning|afternoon|evening)|thanks?|thank\s+you|bye|goodbye)\b[\s!,.?]*$/i.test(lower)) return true;
+  if (/^[\d\s+\-*/().,]+\??$/.test(lower) && /\d/.test(lower)) return true; // pure arithmetic
+  // World-knowledge question shapes — short prompts with no tool cues.
+  // "what is X" / "what are X" / "what's X" / "what does X mean"
+  if (/^\s*what(?:'s|\s+is|\s+are|\s+does|\s+do)\s+\S/i.test(t) && t.length <= 120) return true;
+  // "define X" / "explain X" / "describe X" / "tell me about X" with no tool cues
+  if (/^\s*(?:define|explain|describe|clarify|elaborate(?:\s+on)?)\s+\S/i.test(t) && t.length <= 120) return true;
+  // "how do/does/can/should/would X" / "how long/much/many/big X"
+  if (/^\s*how\s+(?:do|does|can|should|would|long|much|many|big|small|fast|slow|often|come|to)\b/i.test(t) && t.length <= 140) return true;
+  // "why is/are/does X" / "when is/was/did X" / "where is/are X"
+  if (/^\s*(?:why|when|where|who|which)\s+(?:is|are|was|were|did|does|do|will|would|should|can)\b/i.test(t) && t.length <= 140) return true;
+  // "can you X" / "could you X" where X is a reasoning task (not a tool task)
+  if (/^\s*(?:can|could)\s+you\s+(?:help|explain|describe|tell|clarify|elaborate|summari[sz]e|recommend|suggest)\b/i.test(t) && t.length <= 140) return true;
+  // Pure "compare X and Y" / "X vs Y" reasoning prompts
+  if (/^\s*(?:compare|contrast)\s+\S+\s+(?:and|vs\.?|versus|with|to)\s+\S/i.test(t) && t.length <= 160) return true;
+  return false;
+}
+
+// Ask the smallest available model "does this need tools, or can you answer
+// directly from world knowledge?". Returns true → direct, false → plan.
+async function llmTriage(task: string): Promise<boolean> {
+  const sys = `Classify whether the user's task can be answered DIRECTLY from world knowledge alone, or whether it needs tools (vault search, GitHub, web, file system).
+
+Reply with exactly one word: DIRECT or TOOLS.
+
+DIRECT examples: small talk, definitions, general knowledge, simple math, programming concepts, advice, reasoning puzzles.
+TOOLS examples: anything mentioning "my vault/notes/brain", repo names, file paths, URLs, "what's in X", "summarize X", "find X", "scrape X".`;
+  try {
+    // The classifier returns a single word — 16 tokens is generous. Tight
+    // num_predict means the small triage model stops generating as soon as
+    // it's emitted DIRECT or TOOLS, shaving 1-3s off this call on local
+    // Ollama compared to the default 1024-token budget.
+    const out = await ollamaGenerate(`Task: ${task}\n\nClassification:`, sys, { profile: "triage", maxTokens: 16 });
+    return /\bDIRECT\b/i.test(out.trim().slice(0, 30));
+  } catch { return false; }
 }
 
 export async function planAndExecute(
   task: string,
   push: (msg: string) => void,
   onProgress?: (patch: Partial<AgentResult> & { phase?: string }) => void,
-  opts: { personaSystemSuffix?: string } = {},
+  opts: { personaSystemSuffix?: string; autoReview?: boolean } = {},
 ): Promise<AgentResult> {
-  push(`planning task with local LLM`);
+  // Triage first — the cheapest possible path is skipping the planner entirely
+  // for prompts that don't need tools. Total round-trip drops from ~3min to
+  // ~10-20s for trivial tasks.
+  //
+  // SPEED OPTIMISATION: triage LLM call + vault pre-check run in parallel.
+  // The LLM triage costs ~1-3s; vault search costs ~10-50ms. Running them
+  // sequentially wasted the vault budget. Now they overlap and the result
+  // is combined: if EITHER (a) triage said DIRECT AND (b) vault has no
+  // hits, we take the direct-answer path. Otherwise plan.
+  if (TRIAGE_ENABLED && task.trim().length > 0 && task.trim().length <= TRIAGE_MAX_CHARS) {
+    const heuristicDirect = looksLikeDirectAnswer(task);
+    const topic = extractTopic(task);
+    const [llmDirect, vaultHits] = await Promise.all([
+      heuristicDirect ? Promise.resolve(true) : llmTriage(task).catch(() => false),
+      (topic && topic.length >= 2)
+        ? Promise.resolve().then(() => { try { return searchVault(topic, 1); } catch { return []; } })
+        : Promise.resolve([] as { path: string; line: number; preview: string }[]),
+    ]);
+    let direct = llmDirect;
+    if (direct && vaultHits.length > 0) {
+      push(`triage: vault has notes on "${topic}" — routing through planner instead of direct-answer`);
+      direct = false;
+    }
+    if (direct) {
+      push(`triage: direct-answer path (skipping planner)`);
+      onProgress?.({ phase: "synthesizing" });
+      const POLISHED_DIRECT = `You're the customer's employee for this task — deliver the output they actually asked for, not a generic chatbot reply.
+
+If the task block includes a "Deliverable shape:" line, follow THAT shape exactly — it's authoritative. Otherwise: answer concisely as a professional document (40–180 words for typical answers).
+
+Rules:
+- Complete sentences. No chatbot tics ("Sure!", "Great question", trailing summaries).
+- Markdown headings welcome when structure helps; bullets only for genuinely discrete items.
+- No citation markers like [N] or [vault:...] — there are no numbered sources on this path.
+- If you had to fill a gap the customer didn't specify (assumed recipient, tone, scope, etc.), end with a single italic line: "_Assumed: <one-line on what you assumed>_". Skip this line when nothing was assumed.`;
+      const sys = (opts.personaSystemSuffix ? opts.personaSystemSuffix + "\n\n" : "") + POLISHED_DIRECT;
+      try {
+        // SPEED: direct-answer prose is short (40-180 words ≈ 240 tokens). We
+        // route through the TRIAGE profile by default, which picks the user's
+        // smallest/fastest model — qwen3.5:0.8b on this machine — instead of
+        // the larger synthesis-tier model. Measured drop: ~67s → ~15-25s on
+        // local Ollama. Customer can opt out with CLAWBOT_FAST_DIRECT_ANSWER=0
+        // when they'd rather have the larger model's prose quality. The
+        // maxTokens cap of 384 stops generation comfortably past the target.
+        const useFastDirect = process.env.CLAWBOT_FAST_DIRECT_ANSWER !== "0";
+        const meta = await ollamaGenerateWithMeta(task, sys, {
+          profile: useFastDirect ? "triage" : "synthesis",
+          maxTokens: 384,
+          onToken: (_chunk, accumulated) => onProgress?.({ partialAnswer: accumulated }),
+        });
+        const direct: Plan = { steps: [], summary: "Direct answer (no tools needed).", waves: [] };
+        return { task, plan: direct, runs: [], answer: meta.text.trim(), hadWrites: false };
+      } catch (e: any) {
+        push(`triage direct-answer failed (${String(e?.message ?? e)}) — falling back to planner`);
+        // fall through
+      }
+    }
+  }
+
+  // Heuristic planner shortcut. Common task shapes ("tell me about X",
+  // "open <path>", "scrape <url>") have one obvious tool — we skip the LLM
+  // planner entirely for those and save 3-8s. Only falls back to the LLM
+  // planner when the shape isn't recognised.
   onProgress?.({ phase: "planning" });
-  const p = await plan(task, opts.personaSystemSuffix);
+  let p = heuristicPlan(task) ?? { steps: [], summary: undefined, waves: [] };
+  if (p.steps.length > 0) {
+    push(`heuristic plan: ${p.steps.length} step(s) — ${p.summary ?? "matched shape"} (skipping LLM planner)`);
+  } else {
+    push(`planning task with local LLM`);
+    p = await plan(task, opts.personaSystemSuffix);
+  }
   if (p.steps.length === 0) {
-    push(`could not plan with available tools — falling back to direct LLM answer`);
-    onProgress?.({ phase: "answering", plan: p });
-    const sysFallback = `${opts.personaSystemSuffix ?? ""}\nAnswer in 2-3 sentences. If you can't answer, say what context you'd need from the user's vault or GitHub.`.trim();
-    // Direct fallback answer — long-form prose preferred.
-    const reply = await ollamaGenerate(`Task: ${task}`, sysFallback, { profile: "synthesis" });
-    return { task, plan: { steps: [] }, runs: [], answer: reply.trim(), hadWrites: false };
+    // Vault-first fallback: instead of answering blind, run research.deep —
+    // it searches vault + web, fetches the top sources, synthesises, and
+    // captures a note in 0-Inbox/. The whole "if it's not in the brain go
+    // find it and put it there" loop happens inside one primitive.
+    push(`planner produced no plan (LLM timed out or returned nothing parseable) — using the default research.deep plan`);
+    p = defaultVaultPlan(task);
   }
   push(`plan: ${p.steps.length} step(s)${p.summary ? ` — ${p.summary}` : ""}`);
   onProgress?.({ phase: "executing", plan: p, runs: [] });
 
-  const { runs, hadWrites } = await executePlan(p, push, (runs) => onProgress?.({ runs: [...runs] }));
+  const { runs, hadWrites, budgets, subagentTimings } = await executePlan(p, push, (runs) => onProgress?.({ runs: [...runs] }));
+  if (budgets) onProgress?.({ budgets, subagentTimings });
 
-  // Synthesize a chat-friendly answer from the step results
+  // Synthesize a chat-friendly answer from the step results. Stream tokens as
+  // they arrive into job.result.partialAnswer so the UI can render the answer
+  // materialising in real time instead of waiting for the full generation.
   onProgress?.({ phase: "synthesizing", runs });
-  const synth = await synthesize(task, p, runs, opts.personaSystemSuffix);
-  return { task, plan: p, runs, answer: synth, hadWrites };
+  const synth = await synthesize(task, p, runs, opts.personaSystemSuffix, (partial) => {
+    onProgress?.({ partialAnswer: partial });
+  });
+
+  // Post-flight QA. Split into two phases so the happy path doesn't pay for
+  // peer.review (the slowest QA call, 30-90s):
+  //   Phase A — quality.check + security.scan (fast, parallel)
+  //   Phase B — peer.review, ONLY when phase-A says the draft needs help
+  //
+  // Both phases land as real plan steps so the AgentVisualizer shows them
+  // live next to the user's other sub-agents.
+  const wantQA = (opts.autoReview ?? AUTO_REVIEW) && synth.length >= MIN_REVIEW_CHARS;
+  const trivialTask = task.trim().length < 30;
+  const plannerAlreadyReviewed = p.steps.some(s => s.tool === "peer.review");
+  // Build a compact evidence catalog from successful runs to feed quality.check.
+  // Without this the scorer is asked to grade citation_coverage but can't
+  // actually verify whether claims are sourced — it only sees the draft.
+  // Passing the same numbered evidence the synth saw makes the score meaningful.
+  const evidenceForQA = buildEvidenceCatalog(runs);
+
+  if (wantQA && !trivialTask) {
+    onProgress?.({ phase: "reviewing", runs });
+    // ---- Phase A: quality + security (parallel) ----
+    const phaseASteps: PlanStep[] = [
+      {
+        tool: "quality.check",
+        args: { task, answer: synth, sources: evidenceForQA },
+        rationale: "auto-injected: score factuality, citation coverage, persona fit (evidence-aware)",
+        label: humanStepLabel("quality.check", {}),
+      },
+      {
+        tool: "security.scan",
+        args: { content: synth, kind: "note" },
+        rationale: "auto-injected: scan answer for secrets, dodgy URLs",
+        label: humanStepLabel("security.scan", { kind: "note" }),
+      },
+    ];
+    push(`spinning up ${phaseASteps.length} QA sub-agents (quality + security)`);
+    const baseIdxA = p.steps.length;
+    const waveA = phaseASteps.map((_, i) => baseIdxA + i);
+    p.steps.push(...phaseASteps);
+    p.waves = [...(p.waves ?? p.steps.slice(0, baseIdxA).map((_, i) => [i])), waveA];
+    runs.push(...phaseASteps.map(step => ({ step, ok: false, durationMs: 0 } as StepRun)));
+    onProgress?.({ plan: p, runs: [...runs] });
+    const planA: Plan = { steps: p.steps, summary: p.summary, waves: [waveA] };
+    await executePlan(planA, push, (rs) => {
+      for (const i of waveA) if (rs[i]) runs[i] = rs[i];
+      onProgress?.({ runs: [...runs] });
+    });
+
+    // ---- Phase B: peer.review, only when the draft didn't clearly pass ----
+    if (!plannerAlreadyReviewed) {
+      const qScore = (runs.find(r => r.step.tool === "quality.check" && r.ok)?.result as any)?.score ?? 0;
+      const qPass = (runs.find(r => r.step.tool === "quality.check" && r.ok)?.result as any)?.pass === true;
+      const sPass = (runs.find(r => r.step.tool === "security.scan" && r.ok)?.result as any)?.pass !== false;
+      // GOOD bar: quality.check says pass=true AND composite score >= 0.75
+      // AND security clean. Skip peer.review on confident outputs.
+      const cleanDraft = qPass && qScore >= 0.75 && sPass;
+      if (cleanDraft) {
+        push(`quality.check pass=true, score=${qScore.toFixed(2)}, security clean — skipping peer.review (saves a 30-90s LLM call)`);
+      } else {
+        const peerStep: PlanStep = {
+          tool: "peer.review",
+          args: { task, answer: synth },
+          rationale: `auto-injected: quality score=${qScore.toFixed(2)} (pass=${qPass}) — peer review for a second opinion`,
+          label: humanStepLabel("peer.review", {}),
+        };
+        const baseIdxB = p.steps.length;
+        const waveB = [baseIdxB];
+        p.steps.push(peerStep);
+        p.waves = [...(p.waves ?? []), waveB];
+        runs.push({ step: peerStep, ok: false, durationMs: 0 });
+        onProgress?.({ plan: p, runs: [...runs] });
+        const planB: Plan = { steps: p.steps, summary: p.summary, waves: [waveB] };
+        await executePlan(planB, push, (rs) => {
+          for (const i of waveB) if (rs[i]) runs[i] = rs[i];
+          onProgress?.({ runs: [...runs] });
+        });
+      }
+    }
+  } else if (wantQA && trivialTask) {
+    push(`skipping QA wave — task is short (${task.trim().length} chars), not worth a 3-agent review`);
+  }
+
+  // Pull the structured results out of the QA runs.
+  const reviewRun = runs.find(r => r.step.tool === "peer.review" && r.ok);
+  const qualityRun = runs.find(r => r.step.tool === "quality.check" && r.ok);
+  const securityRun = runs.find(r => r.step.tool === "security.scan" && r.ok);
+  const review = reviewRun?.result ? coerceReview(reviewRun.result) : undefined;
+  let quality: any = qualityRun?.result;
+  const security = securityRun?.result;
+
+  // QUALITY RESCUE: if quality.check failed (pass=false) AND OpenRouter is
+  // configured, re-synth with the LARGE-tier model. The first attempt used
+  // whatever the dispatcher picked (often local Ollama); the rescue forces
+  // complexity:"high" so the dispatcher hands off to the bigger model. We
+  // re-score the rescued draft and keep whichever has the better score.
+  let rescuedSynth: string | undefined;
+  if (config.openrouterEnabled && quality && quality.pass === false && synth.length >= MIN_REVIEW_CHARS) {
+    push(`quality.check failed (score=${quality.score ?? "?"}, issues: ${(quality.issues ?? []).slice(0, 2).join("; ")}) — re-synthesising with the large model`);
+    try {
+      const rescue = await synthesize(task, p, runs, opts.personaSystemSuffix, undefined, { forceComplex: true });
+      if (rescue && rescue.length >= MIN_REVIEW_CHARS) {
+        rescuedSynth = rescue;
+        // Re-score the rescue draft so we know whether to keep it.
+        try {
+          const checkTool = findPrimitive("quality.check");
+          if (checkTool) {
+            const rescueQuality: any = await checkTool.handler({ task, answer: rescue });
+            const rescueScore = rescueQuality?.score ?? 0;
+            const originalScore = quality?.score ?? 0;
+            if (rescueScore > originalScore) {
+              push(`quality rescue improved score: ${originalScore} → ${rescueScore}; using the rescued draft`);
+              quality = { ...rescueQuality, rescued: true, originalScore };
+            } else {
+              push(`quality rescue produced score ${rescueScore} (not better than ${originalScore}); keeping the original`);
+              rescuedSynth = undefined;
+            }
+          }
+        } catch (e: any) {
+          push(`quality re-score failed (${String(e?.message ?? e).slice(0, 80)}); keeping the rescued draft anyway`);
+        }
+      }
+    } catch (e: any) {
+      push(`quality rescue failed (${String(e?.message ?? e).slice(0, 80)}); keeping the original draft`);
+    }
+  }
+
+  // Final answer precedence:
+  //   1. Rescued synth (large OR model) if it scored better — that's the
+  //      strongest output we have access to; favour it over a small-model
+  //      peer review revision.
+  //   2. Reviewer revision if reviewer flagged + provided one AND rescue
+  //      didn't happen (so the small-model draft isn't surfacing untouched).
+  //   3. Original synth.
+  // Original is preserved on the review object for audit either way.
+  const finalAnswer = rescuedSynth
+    ? rescuedSynth
+    : ((review && review.verdict !== "good" && review.revised_answer)
+        ? review.revised_answer
+        : synth);
+
+  return { task, plan: p, runs, answer: finalAnswer, hadWrites, review, quality, security, budgets, subagentTimings };
 }
 
-async function synthesize(task: string, p: Plan, runs: StepRun[], personaSystemSuffix?: string): Promise<string> {
+function coerceReview(r: any): PeerReview {
+  return {
+    verdict: ["good", "needs-work", "bad"].includes(r.verdict) ? r.verdict : "needs-work",
+    issues: Array.isArray(r.issues) ? r.issues : [],
+    revised_answer: typeof r.revised_answer === "string" && r.revised_answer ? r.revised_answer : undefined,
+    confidence: typeof r.confidence === "number" ? r.confidence : 0,
+    reviewer: r.peer ?? r.reviewer,
+    elapsedMs: r.elapsedMs,
+  };
+}
+
+// Pulled-from-task search query: strip filler so the vault search actually
+// hits the right notes. "give me a summary on neuroworks" → "neuroworks".
+function extractTopic(task: string): string {
+  const stripped = task
+    .replace(/^\s*(?:please\s+)?(?:can\s+you\s+|could\s+you\s+|kindly\s+)?/i, "")
+    .replace(/^(?:give\s+me\s+|tell\s+me\s+|show\s+me\s+|share\s+|provide\s+)/i, "")
+    .replace(/^(?:a\s+|the\s+|an\s+)?(?:summary|overview|recap|tldr|brief|update|status|rundown)\s+(?:on|of|about|for|regarding)\s+/i, "")
+    .replace(/^(?:summari[sz]e|recap|brief\s+me\s+on|tell\s+me\s+about|what(?:'s|\s+is)\s+(?:up\s+with\s+|going\s+on\s+with\s+)?|what\s+do\s+(?:we|i|you)\s+know\s+about)\s+/i, "")
+    .replace(/[?!.]+$/, "")
+    .trim();
+  return stripped || task.trim();
+}
+
+// Heuristic planner. Matches common task shapes to a single-tool plan
+// without calling the LLM, eliminating 3-8s of planner latency on the most
+// frequent ad-hoc tasks. Falls through (returns null) when nothing matches.
+//
+// Shapes covered:
+//   • URL-only or "scrape/browse/open <url>" → web.scrape
+//   • "tell me about X" / "explain X" / "what is X" → research.deep
+//   • Bare vault-path mention ("read 2-Permanent/x.md") → vault.read
+//   • "search the web for X" → research.deep
+function heuristicPlan(task: string): Plan | null {
+  const t = task.trim();
+  if (!t) return null;
+
+  // Bare URL or scrape/browse/open <url>
+  const urlMatch = t.match(/^\s*(?:(?:scrape|browse|open|fetch|read)\s+)?(https?:\/\/\S+)\s*$/i);
+  if (urlMatch) {
+    const url = urlMatch[1];
+    return {
+      steps: [{ tool: "web.scrape", args: { url }, rationale: "single URL — render in Playwright", label: humanStepLabel("web.scrape", { url }) }],
+      summary: `Scrape ${url}`,
+      waves: [[0]],
+    };
+  }
+
+  // Vault path read: "read 2-Permanent/x.md" or "show me 0-Inbox/note.md"
+  const pathMatch = t.match(/^\s*(?:read|show(?:\s+me)?|open|cat)\s+([\w./_-]+\.md)\s*$/i);
+  if (pathMatch) {
+    const path = pathMatch[1];
+    return {
+      steps: [{ tool: "vault.read", args: { path }, rationale: "direct vault read", label: humanStepLabel("vault.read", { path }) }],
+      summary: `Read ${path}`,
+      waves: [[0]],
+    };
+  }
+
+  // "search the web for X" (forces research.deep instead of just web.search,
+  // because the user usually wants synthesis too)
+  const webSearchMatch = t.match(/^\s*(?:search|google|look\s+up)\s+(?:the\s+)?(?:web|online|internet)\s+(?:for\s+)?(.+?)\s*$/i);
+  if (webSearchMatch) {
+    const query = webSearchMatch[1];
+    return {
+      steps: [{ tool: "research.deep", args: { query, depth: 3, capture: true }, rationale: "web research with vault capture", label: humanStepLabel("research.deep", { query }) }],
+      summary: `Research: ${query}`,
+      waves: [[0]],
+    };
+  }
+
+  // "tell me about X" / "explain X" / "what is X" / "describe X" — these are
+  // research/explainer prompts. We use research.deep so vault is checked
+  // first, web only if vault is thin.
+  const aboutMatch = t.match(/^\s*(?:tell\s+me\s+about|explain|what(?:'s|\s+is|\s+are|\s+does)|describe|how\s+does|how\s+do)\s+(.+?)[?.!]?\s*$/i);
+  if (aboutMatch && aboutMatch[1].length >= 2 && aboutMatch[1].length <= 80) {
+    const query = aboutMatch[1].trim();
+    return {
+      steps: [{ tool: "research.deep", args: { query, depth: 3, capture: true }, rationale: "explainer — vault + web research", label: humanStepLabel("research.deep", { query }) }],
+      summary: `Research: ${query}`,
+      waves: [[0]],
+    };
+  }
+
+  // Multi-perspective trigger phrases — when the task name-drops
+  // "perspectives", "compare", "side by side", "pros and cons", "investigate"
+  // / "analyse" we skip the planner LLM and go straight to the right tool.
+  // Was: the planner usually picks research.multiperspective for these but
+  // pays a 30-90s LLM call to decide; this saves that.
+  const multiPerspMatch = t.match(/\b(?:multi[\s-]?perspective|from\s+(?:different\s+|multiple\s+)?perspectives|pros?\s+and\s+cons?|investigate|analy[sz]e|compare\s+.+?\s+(?:and|vs\.?|versus)\s+.+|side[\s-]?by[\s-]?side)\b/i);
+  if (multiPerspMatch && t.length < 600) {
+    // Pull a topic from the task — strip filler verbs but keep the body.
+    const topic = t
+      .replace(/^\s*(?:use\s+(?:research\.multiperspective|multi[\s-]?perspective)[^:]*?(?::|to|on|of|for|about)\s*)/i, "")
+      .replace(/^\s*(?:investigate|analy[sz]e|explore|look\s+into|examine|compare)\s+/i, "")
+      .replace(/\s+from\s+(?:multiple|different)\s+perspectives.*$/i, "")
+      .trim()
+      .slice(0, 200);
+    if (topic.length >= 3) {
+      return {
+        steps: [{ tool: "research.multiperspective", args: { topic, perspectives: "mainstream, critical, practitioner, recent", sourcesPerPerspective: 5, capture: true }, rationale: "multi-perspective shape recognised — skipping planner LLM", label: humanStepLabel("research.multiperspective", { topic }) }],
+        summary: `Multi-perspective: ${topic}`,
+        waves: [[0]],
+      };
+    }
+  }
+
+  // "draft / write / compose / create a [doc type] for/about X" — direct
+  // synthesis without research. The planner usually does this via a single
+  // ollama.generate step; we skip its decision time. Doc type captured so
+  // the synthesiser can apply the right template (email / brief / memo / etc).
+  const draftMatch = t.match(/^\s*(?:draft|write|compose|create|prepare)\s+(?:a\s+|an\s+|the\s+|some\s+)?(.+?)\s*$/i);
+  if (draftMatch && draftMatch[1].length >= 3 && draftMatch[1].length <= 200) {
+    const body = draftMatch[1].trim();
+    return {
+      steps: [{
+        tool: "ollama.generate",
+        args: { prompt: `Task: ${t}\n\nWrite it directly. Keep it concise and well-structured.`, system: "You produce focused written deliverables. No filler, no preamble, no 'here is the…'." },
+        rationale: "draft/write request — direct synthesis without research",
+        label: humanStepLabel("ollama.generate", { prompt: body }),
+      }],
+      summary: `Draft: ${body.slice(0, 80)}`,
+      waves: [[0]],
+    };
+  }
+
+  return null;
+}
+
+function defaultVaultPlan(task: string): Plan {
+  const topic = extractTopic(task);
+  const steps: PlanStep[] = [
+    {
+      tool: "research.deep",
+      args: { query: topic, depth: 3, capture: true },
+      rationale: "default fallback: search vault + web, synthesise, capture findings to 0-Inbox/",
+      label: humanStepLabel("research.deep", { query: topic }),
+    },
+  ];
+  return { steps, summary: `Default research plan for: ${topic}`, waves: [[0]] };
+}
+
+async function synthesize(
+  task: string,
+  p: Plan,
+  runs: StepRun[],
+  personaSystemSuffix?: string,
+  onPartial?: (partial: string) => void,
+  opts: { forceComplex?: boolean } = {},
+): Promise<string> {
   const succeeded = runs.filter(r => r.ok);
   const failed = runs.filter(r => !r.ok);
   if (succeeded.length === 0) {
     return failed.length > 0 ? `I tried, but step ${runs.indexOf(failed[0]) + 1} (${failed[0].step.tool}) failed: ${failed[0].error}` : "I couldn't execute any step.";
   }
-  const compact = succeeded.map((r, i) => ({ step: i + 1, tool: r.step.tool, result: compactResult(r.result) }));
-  const sys = "You are clawbot. Given a user task and the structured results of the steps you executed to fulfill it, write a concise plain-English answer (under 120 words, markdown allowed) that directly addresses the user's task. Cite specific paths or names from the results. Don't mention the planning machinery — speak as the assistant who did the work." + (personaSystemSuffix ? `\n\nPersona: ${personaSystemSuffix}` : "");
-  const prompt = `Task: ${task}\n\nStep results:\n${JSON.stringify(compact, null, 2)}\n\nAnswer:`;
-  // Synthesis is long-form prose with reasoning over structured inputs.
-  try { return (await ollamaGenerate(prompt, sys, { profile: "synthesis" })).trim(); }
-  catch { return fallbackSynthesis(p, runs); }
+
+  // Passthrough: when a single primitive (e.g. research.deep, peer.delegate)
+  // already returned a complete answer, skip the synthesis LLM call entirely.
+  // Saves 30-60s on the most common ad-hoc shape — the primitive did the work,
+  // re-LLMing it would just paraphrase what we already have.
+  if (succeeded.length === 1 || (succeeded.length > 0 && hasOnlyOneSemanticStep(succeeded))) {
+    const candidate = succeeded[0]?.result;
+    if (candidate && typeof candidate === "object" && typeof candidate.answer === "string" && candidate.answer.trim().length >= 60) {
+      onPartial?.(candidate.answer.trim());
+      return candidate.answer.trim();
+    }
+  }
+
+  // Build a numbered evidence catalog the LLM can cite as [N]. Sources come
+  // straight from each step's result so the model has a concrete anchor for
+  // citation_coverage to score well on.
+  const evidence: { ref: number; tool: string; from: string; body: string }[] = [];
+  for (let i = 0; i < succeeded.length; i++) {
+    const r = succeeded[i];
+    const compact = compactResult(r.result);
+    const body = typeof compact === "string" ? compact : JSON.stringify(compact, null, 2);
+    evidence.push({
+      ref: i + 1,
+      tool: r.step.tool,
+      from: describeStepProvenance(r),
+      body: body.slice(0, 4000),
+    });
+  }
+
+  // The synth output lands on the customer-facing Results page, so it should
+  // read like a brief professional document — not a chat transcript. The
+  // persona's systemPromptOverride (when set, e.g. for built-in Clawbot)
+  // already enforces structure, so we let it lead. Otherwise we apply the
+  // structured-doc default.
+  const POLISHED_SYNTH = `You're the customer's employee for this task — deliver the output they actually asked for, in the shape they asked for it.
+
+If the task block includes a "Deliverable shape:" line, follow THAT shape exactly — it's authoritative and overrides every default below (e.g. email format means start with "Subject:", memo format means TO/FROM/DATE/RE header, code format means fenced block, etc.). Use the default below ONLY when no shape is specified.
+
+Default (when no Deliverable shape is given):
+- Body of a professional one-page report.
+- Markdown headings (## and ###) when the answer benefits from structure.
+- Length: 80–250 words for typical answers.
+
+Universal rules (apply to ALL deliverable shapes):
+- Write complete sentences. Use bullet lists only for genuinely discrete items (≥3).
+- No "Sure!", "Great question", "Here's the…", "Let me know if…", or other chatbot tics. Speak as the employee who did the work, not a chatbot describing it.
+- No raw JSON, no asterisks for emphasis (use **bold** sparingly), no stray dashes as bullets in narrative paragraphs.
+- Cite every substantive claim inline as [N] (matching the numbered evidence) or [vault:path/to/note.md].
+- If the evidence is thin or contradictory, say so plainly in one sentence.
+- Code in fenced blocks with the right language tag.
+- If you had to fill any gap the customer didn't specify (assumed recipient, scope, tone, what "the report" referred to, etc.), end with a single trailing italic line: "_Assumed: <one-line on what you assumed and why>_". Skip the line when nothing was assumed.`;
+  // Auto-attach a skill playbook based on the detected intent. The chat
+  // route stamps "Interpretation: intent=draft-email, …" into the enriched
+  // task; we read it back here and load the matching skill's body so the
+  // synth gets the employee-style guidance (email format, brief structure,
+  // code review checklist, etc.) without an extra LLM step. When nothing
+  // matches, the synth runs with just POLISHED_SYNTH + persona suffix.
+  let skillBlock = "";
+  try {
+    const intent = parseIntentFromTask(task);
+    if (intent) {
+      const skills = suggestSkillsForIntent(intent, 1);
+      if (skills.length > 0) {
+        const s = skills[0];
+        // Cap the skill body so a verbose playbook doesn't blow the synth's
+        // context budget. 3000 chars ~ 750 tokens — enough for any of our
+        // built-in skills, which are all under that.
+        skillBlock = `\n\n--- Skill playbook: ${s.name} ---\n${s.body.slice(0, 3000)}\n--- end playbook ---`;
+      }
+    }
+  } catch { /* skill lookup failure shouldn't block synthesis */ }
+  const sys = (personaSystemSuffix ? personaSystemSuffix + "\n\n" : "") + POLISHED_SYNTH + skillBlock;
+  const prompt = `Task: ${task}\n\nNumbered evidence:\n${evidence.map(e => `[${e.ref}] (${e.tool} — ${e.from})\n${e.body}`).join("\n\n")}\n\nWrite the report:`;
+
+  // Stream tokens as they arrive so the UI can show the answer materialising.
+  // Empty/very-short outputs (LLM returned blank, "ok", or a single sentence)
+  // get the fallback treatment too — a blank chat reply is the worst possible
+  // experience after waiting through plan + execute.
+  //
+  // Synthesis with ≥4 evidence sources OR ≥6k chars of total evidence is
+  // "complex" — the dispatcher will hand off to the large-tier OR model
+  // when available so the answer isn't gimped by a small model trying to
+  // reason over a lot of evidence.
+  const totalEvidenceChars = evidence.reduce((n, e) => n + e.body.length, 0);
+  // Complexity inference: caller's forceComplex (quality rescue path) wins,
+  // otherwise size-based heuristic.
+  const synthComplexity: "high" | "normal" = opts.forceComplex
+    ? "high"
+    : ((evidence.length >= 4 || totalEvidenceChars > 6000) ? "high" : "normal");
+  // Token budget tracks complexity. Simple synth on one piece of evidence is
+  // a 80-250 word report — 512 tokens is plenty. Complex synth (multi-source
+  // research, multiperspective) gets the full 1024-token room so the model
+  // isn't cut off mid-section. On local Ollama this shaves 10-30s off simple
+  // synth latency vs the old default-everywhere 1024.
+  const synthMaxTokens = synthComplexity === "high" ? 1024 : 512;
+  const MIN_USEFUL_SYNTH = 40;
+  try {
+    const meta = await ollamaGenerateWithMeta(prompt, sys, {
+      profile: "synthesis",
+      complexity: synthComplexity,
+      maxTokens: synthMaxTokens,
+      onToken: onPartial ? (_chunk: string, accumulated: string) => onPartial(accumulated) : undefined,
+    });
+    const text = meta.text.trim();
+    if (text.length < MIN_USEFUL_SYNTH) {
+      // Model produced nothing useful. Build a structured rescue from the
+      // evidence directly so the customer still gets *something* coherent.
+      return fallbackSynthesis(task, p, runs);
+    }
+    return text;
+  }
+  catch (e: any) {
+    return fallbackSynthesis(task, p, runs, String(e?.message ?? e));
+  }
+}
+
+// One "semantic" step = ignore non-LLM-impacting steps when deciding whether
+// the run had a single meaningful action. Used by passthrough to recognise
+// research.deep + nothing-else patterns.
+function hasOnlyOneSemanticStep(succeeded: StepRun[]): boolean {
+  const semantic = succeeded.filter(r => !["clock.now"].includes(r.step.tool));
+  return semantic.length === 1;
+}
+
+// Pluck a useful provenance string from a step's args — paths, URLs, repo names —
+// so citations can read like `[2] (vault.search — query="cognify")` instead of
+// just the tool name. Aids the citation_coverage score downstream.
+function describeStepProvenance(r: StepRun): string {
+  const a = r.step.args ?? {};
+  const fields = ["url", "path", "query", "name", "repo", "owner"];
+  const bits: string[] = [];
+  for (const k of fields) {
+    const v = (a as any)[k];
+    if (typeof v === "string" && v.length > 0) bits.push(`${k}="${v.slice(0, 80)}"`);
+  }
+  return bits.length > 0 ? bits.join(", ") : r.step.tool;
 }
 
 function compactResult(r: any): any {
@@ -243,9 +1035,67 @@ function compactResult(r: any): any {
   return r;
 }
 
-function fallbackSynthesis(p: Plan, runs: StepRun[]): string {
-  const ok = runs.filter(r => r.ok).length;
-  return `Ran ${ok}/${p.steps.length} step(s): ${p.steps.map(s => s.tool).join(" → ")}.`;
+// Rescue synth — runs when the LLM synth call threw OR returned blank. Builds
+// a coherent answer directly from the evidence by digesting each successful
+// step's result. NOT just a "Ran N steps" stub — that's user-hostile after a
+// long wait. We surface the actual content (sources, answers, paths) and
+// honestly flag what failed so the user knows where the work stopped.
+function fallbackSynthesis(task: string, p: Plan, runs: StepRun[], synthError?: string): string {
+  const ok = runs.filter(r => r.ok);
+  const failed = runs.filter(r => !r.ok);
+  const parts: string[] = [];
+
+  parts.push(`## Partial result\n\nThe synthesis step didn't complete cleanly${synthError ? ` (\`${synthError.slice(0, 100)}\`)` : ""}, so here is the raw evidence we gathered for: **${task.slice(0, 200)}**`);
+
+  if (ok.length > 0) {
+    parts.push(`### What worked`);
+    for (let i = 0; i < ok.length; i++) {
+      const r = ok[i];
+      parts.push(`**Step ${i + 1} — ${r.step.label ?? r.step.tool}**\n${compactStepSummary(r)}`);
+    }
+  } else {
+    parts.push(`### What worked\n\n_No steps completed successfully._`);
+  }
+
+  if (failed.length > 0) {
+    parts.push(`### What failed`);
+    for (const r of failed) {
+      parts.push(`- **${r.step.label ?? r.step.tool}** — ${(r.error ?? "no error message").slice(0, 200)}`);
+    }
+  }
+
+  parts.push(`---\n_Auto-generated rescue summary. Try the task again — the next attempt may have the model available._`);
+  return parts.join("\n\n");
+}
+
+// Per-step digest used by the rescue path. Pulls the most readable part of
+// each tool's result (answer / text / title / path / snippets) — never raw
+// JSON unless every more-readable shape failed.
+function compactStepSummary(r: StepRun): string {
+  const result: any = r.result;
+  if (result == null) return "_(no output)_";
+  if (typeof result === "string") return result.slice(0, 800);
+  if (typeof result.answer === "string" && result.answer.trim().length > 0) {
+    return result.answer.slice(0, 800);
+  }
+  if (typeof result.text === "string" && result.text.trim().length > 0) {
+    return result.text.slice(0, 800);
+  }
+  if (typeof result.path === "string") return `Wrote/read: \`${result.path}\``;
+  if (Array.isArray(result.results) && result.results.length > 0) {
+    return result.results.slice(0, 5).map((h: any, idx: number) =>
+      `${idx + 1}. ${h.title ?? h.path ?? h.url ?? "(item)"} — ${(h.snippet ?? h.preview ?? "").slice(0, 160)}`
+    ).join("\n");
+  }
+  if (Array.isArray(result.sources) && result.sources.length > 0) {
+    return result.sources.slice(0, 5).map((s: any, idx: number) =>
+      `${idx + 1}. [${s.title ?? s.url ?? "source"}](${s.url ?? ""})`
+    ).join("\n");
+  }
+  try {
+    const json = JSON.stringify(result);
+    return "```\n" + json.slice(0, 500) + (json.length > 500 ? "…" : "") + "\n```";
+  } catch { return "_(unprintable result)_"; }
 }
 
 // Resolve $step_N or $step_N.path.to.value references in args

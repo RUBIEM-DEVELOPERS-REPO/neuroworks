@@ -14,20 +14,36 @@ export function Dashboard() {
   const [intentBusy, setIntentBusy] = useState(false);
   const [err, setErr] = useState("");
   const [persona, setPersona] = useState<any>(null);
+  // Full roster + the live clawbot fleet so the dashboard answers "who can I
+  // hire right now, and who's currently working?" The roster comes from
+  // /api/personas; the fleet comes from /api/peers (self + reachable peers).
+  const [personas, setPersonas] = useState<any[]>([]);
+  const [fleet, setFleet] = useState<{ self: any; peers: any[] } | null>(null);
+  const [activating, setActivating] = useState<string | null>(null);
 
   async function load() {
     try {
-      const [t, j, p] = await Promise.all([
+      const [t, j, p, peers] = await Promise.all([
         api.listTemplates(),
         api.listJobs().catch(() => ({ jobs: [] as any[] })),
-        api.listPersonas().catch(() => ({ active: null } as any)),
+        api.listPersonas().catch(() => ({ active: null, personas: [] } as any)),
+        api.peers().catch(() => null),
       ]);
       setTemplates(t.templates);
       setRecent(j.jobs.slice(0, 4));
       setPersona(p.active);
+      setPersonas(Array.isArray(p.personas) ? p.personas : []);
+      if (peers) setFleet(peers);
     } catch (e: any) { setErr(e.message); }
   }
   useEffect(() => { load(); const i = setInterval(load, 6000); return () => clearInterval(i); }, []);
+
+  async function hire(personaId: string) {
+    setActivating(personaId);
+    try { await api.activatePersona(personaId); await load(); }
+    catch (e: any) { setErr(e?.message ?? String(e)); }
+    finally { setActivating(null); }
+  }
 
   // When a persona is active, prioritise its starter templates (id prefix
   // `custom-<personaId>-`) at the top of Quick Start so the dashboard reflects
@@ -105,6 +121,50 @@ export function Dashboard() {
         <AgentVisualizer />
       </section>
 
+      <section>
+        <div className="flex items-baseline justify-between mb-3 px-1">
+          <div className="text-xs uppercase tracking-[0.25em] text-cream-300/60">
+            Hire an employee — {persona ? <>currently working as <span className="text-violet-400">{persona.name}</span></> : <>no employee active</>}
+          </div>
+          <Link to="/personas" className="text-xs text-cream-300 hover:text-cream-50">Manage employees →</Link>
+        </div>
+        <div className="grid grid-cols-2 lg:grid-cols-3 gap-3">
+          {personas.length === 0 ? (
+            <div className="text-sm text-cream-300/60 col-span-3">No employees on the roster yet. Visit Personas to add one.</div>
+          ) : personas.slice(0, 6).map((p: any) => {
+            const isActive = persona?.id === p.id;
+            const isHiring = activating === p.id;
+            return (
+              <button
+                key={p.id}
+                type="button"
+                onClick={() => hire(p.id)}
+                disabled={isHiring || isActive}
+                className={`text-left rounded-xl p-4 transition-colors border ${
+                  isActive
+                    ? "bg-violet-500/10 border-violet-500/50"
+                    : "bg-ink-900 hover:bg-ink-850 border-ink-800 hover:border-violet-500/40"
+                } disabled:cursor-not-allowed`}
+              >
+                <div className="flex items-center justify-between gap-2 mb-1">
+                  <div className="font-display text-lg text-cream-50 leading-tight">{p.name}</div>
+                  {isActive
+                    ? <span className="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded bg-violet-500/20 text-violet-300 shrink-0">On the clock</span>
+                    : isHiring
+                      ? <span className="text-[10px] text-violet-400">hiring…</span>
+                      : <span className="text-[10px] text-cream-300/40 group-hover:text-violet-300">Hire</span>}
+                </div>
+                <div className="text-xs text-cream-300/60 uppercase tracking-wider">{p.role}</div>
+                <div className="text-xs text-cream-300/70 mt-2 line-clamp-2">{p.description}</div>
+              </button>
+            );
+          })}
+        </div>
+        {personas.length > 6 && (
+          <div className="text-[11px] text-cream-300/50 mt-2 px-1">+{personas.length - 6} more on the roster · <Link to="/personas" className="text-violet-400 hover:text-violet-500">see all</Link></div>
+        )}
+      </section>
+
       <section className="grid grid-cols-3 gap-4">
         <Card title="Recent activity" className="col-span-2">
           {recent.length === 0 && <div className="text-sm text-cream-300/60">No tasks yet. Pick one above to delegate something.</div>}
@@ -125,17 +185,80 @@ export function Dashboard() {
             </ul>
           )}
         </Card>
-        <Card title="At a glance">
-          <div className="space-y-2.5 text-sm">
-            <div className="flex justify-between"><span className="text-cream-300/70">Templates</span><span className="text-cream-100 font-mono">{templates?.length ?? "—"}</span></div>
-            <div className="flex justify-between"><span className="text-cream-300/70">Tasks today</span><span className="text-cream-100 font-mono">{recent.length}</span></div>
-            <div className="flex justify-between"><span className="text-cream-300/70">Agents</span><span className="text-cream-100 font-mono">1 (clawbot)</span></div>
-          </div>
+        <Card title="Clawbot fleet">
+          <ClawbotFleet fleet={fleet} templatesCount={templates?.length} tasksToday={recent.length} personasCount={personas.length} />
         </Card>
       </section>
 
       {err && <div className="text-coral-400 text-sm">Error: {err}</div>}
       {active && <TaskRunner template={active} prefill={prefill} onClose={() => { setActive(null); setPrefill(undefined); load(); }} />}
+    </div>
+  );
+}
+
+// Live snapshot of the running clawbot fleet. Each row is one clawbot — self
+// or peer — with current inflight count, role, and ready state. Replaces the
+// previous hardcoded "1 (clawbot)" line which was a lie the moment a worker
+// peer came online.
+function ClawbotFleet({ fleet, templatesCount, tasksToday, personasCount }: {
+  fleet: { self: any; peers: any[] } | null;
+  templatesCount?: number;
+  tasksToday: number;
+  personasCount: number;
+}) {
+  if (!fleet) return <div className="text-sm text-cream-300/60">Loading fleet…</div>;
+  const bots: { name: string; role: string; url?: string; ok: boolean; ready: boolean; inflight: number; model?: string; isSelf: boolean }[] = [];
+  if (fleet.self) {
+    bots.push({
+      name: fleet.self.name ?? "primary",
+      role: fleet.self.role ?? "primary",
+      url: fleet.self.url,
+      ok: true,
+      ready: !!fleet.self.ready,
+      inflight: Number(fleet.self.inflightJobs ?? 0),
+      model: fleet.self.model,
+      isSelf: true,
+    });
+  }
+  for (const p of fleet.peers ?? []) {
+    bots.push({
+      name: p.name ?? p.url ?? "peer",
+      role: p.role ?? "peer",
+      url: p.url,
+      ok: !!p.ok,
+      ready: !!p.ready,
+      inflight: Number(p.inflightJobs ?? 0),
+      model: p.model,
+      isSelf: false,
+    });
+  }
+  const activeCount = bots.filter(b => b.ok && b.ready).length;
+  return (
+    <div className="space-y-3 text-sm">
+      <div className="space-y-1.5">
+        {bots.length === 0 && <div className="text-cream-300/60">No clawbots reachable.</div>}
+        {bots.map((b, i) => (
+          <div key={i} className="flex items-center justify-between gap-2 px-2 py-1.5 rounded-md bg-ink-950 border border-ink-800">
+            <div className="flex items-center gap-2 min-w-0">
+              <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${b.ok && b.ready ? (b.inflight > 0 ? "bg-flame-400 animate-pulse" : "bg-leaf-500") : "bg-coral-500"}`} />
+              <div className="min-w-0">
+                <div className="text-xs text-cream-100 truncate">
+                  {b.name}
+                  {b.isSelf && <span className="text-[10px] text-cream-300/40 ml-1">· self</span>}
+                </div>
+                <div className="text-[10px] text-cream-300/50 truncate">{b.role}{b.model ? ` · ${b.model}` : ""}</div>
+              </div>
+            </div>
+            <span className={`text-[10px] font-mono shrink-0 ${b.inflight > 0 ? "text-flame-400" : "text-cream-300/60"}`}>{b.inflight > 0 ? `${b.inflight} working` : "idle"}</span>
+          </div>
+        ))}
+      </div>
+      <div className="border-t border-ink-800 pt-2.5 space-y-2 text-xs">
+        <div className="flex justify-between"><span className="text-cream-300/70">Clawbots online</span><span className="text-cream-100 font-mono">{activeCount}/{bots.length}</span></div>
+        <div className="flex justify-between"><span className="text-cream-300/70">Employees</span><span className="text-cream-100 font-mono">{personasCount}</span></div>
+        <div className="flex justify-between"><span className="text-cream-300/70">Templates</span><span className="text-cream-100 font-mono">{templatesCount ?? "—"}</span></div>
+        <div className="flex justify-between"><span className="text-cream-300/70">Tasks today</span><span className="text-cream-100 font-mono">{tasksToday}</span></div>
+      </div>
     </div>
   );
 }

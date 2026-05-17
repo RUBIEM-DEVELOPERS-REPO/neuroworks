@@ -7,6 +7,7 @@ const primaryNav = [
   { to: "/dashboard", label: "Dashboard", icon: "◉" },
   { to: "/chat", label: "Chat", icon: "◌" },
   { to: "/tasks", label: "Tasks", icon: "▤" },
+  { to: "/results", label: "Reports", icon: "❡" },
   { to: "/approvals", label: "Approvals", icon: "✓", badgeKey: "approvals" },
   { to: "/activity", label: "Activity", icon: "≋", badgeKey: "activity" },
   { to: "/admin", label: "Admin", icon: "⚙" },

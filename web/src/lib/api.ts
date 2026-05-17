@@ -21,7 +21,7 @@ export type Template = {
 export type Role = { id: string; label: string; description: string; count: number };
 
 export const api = {
-  health: () => req<{ ok: boolean; name: string; version: string; ready: boolean; missing: string[] }>("/api/health"),
+  health: () => req<{ ok: boolean; name: string; version: string; model: string; port: number; ready: boolean; missing: string[]; inflightJobs?: number; peers?: string[] }>("/api/health"),
   status: () => req<any>("/api/status"),
   listRepos: () => req<{ repos: any[] }>("/api/repos"),
   getRepo: (owner: string, name: string) => req<any>(`/api/repos/${owner}/${name}`),
@@ -31,18 +31,47 @@ export const api = {
   listJobs: () => req<{ jobs: any[] }>("/api/templates/jobs"),
   approveJob: (id: string) => req<{ jobId: string; status: string }>(`/api/templates/jobs/${id}/approve`, { method: "POST" }),
   rejectJob: (id: string) => req<{ jobId: string; status: string }>(`/api/templates/jobs/${id}/reject`, { method: "POST" }),
+  retryJob: (id: string) => req<{ jobId: string; retryOf: string }>(`/api/templates/jobs/${id}/retry`, { method: "POST" }),
   intent: (text: string) => req<{ source: string; templateId: string | null; inputs: Record<string, any> }>("/api/templates/intent", { method: "POST", body: JSON.stringify({ text }) }),
   brainTree: (path = "") => req<{ path: string; entries: { name: string; path: string; type: "dir" | "file" }[] }>(`/api/brain/tree?path=${encodeURIComponent(path)}`),
   brainFile: (path: string) => req<{ path: string; content: string }>(`/api/brain/file?path=${encodeURIComponent(path)}`),
   brainSearch: (q: string) => req<{ q: string; results: { path: string; line: number; preview: string }[] }>(`/api/brain/search?q=${encodeURIComponent(q)}`),
   brainLatestDigest: () => req<{ content: string }>("/api/brain/digest/latest"),
+  brainPromote: (path: string, opts?: { title?: string; tags?: string; keepOriginal?: boolean }) => req<{ promoted: true; from: string; to: string; archived: boolean }>("/api/brain/promote", { method: "POST", body: JSON.stringify({ path, ...opts }) }),
+  vaultStats: () => req<{ lastCommit: any; totalCommits: number; coalescedSavings: number; pendingWrites: number; inFlight: boolean; debounceMs: number }>("/api/status/vault"),
+  llmStatus: () => req<{
+    ollama: { ok: boolean; model: string; error?: string };
+    openrouter: { enabled: boolean; ok: boolean; model: string; error?: string };
+    primary: "ollama" | "openrouter";
+  }>("/api/status/llm"),
+  vaultRetryPush: () => req<{ pushed: boolean; error?: string; aheadBy?: number }>("/api/status/vault/retry-push", { method: "POST" }),
+  vaultClearLock: (force = false) => req<{ cleared: boolean; reason?: string; ageMs?: number; forced?: boolean }>(`/api/status/vault/clear-lock${force ? "?force=1" : ""}`, { method: "POST" }),
+  listReflections: () => req<{ reflections: { date: string; path: string; preview: string; stats?: any }[]; last?: any }>("/api/reflection"),
+  runReflection: (windowHours = 24) => req<{ date: string; path: string; stats: any; reflection: string; generatedAt: string; modelUsed?: string }>("/api/reflection/run", { method: "POST", body: JSON.stringify({ windowHours }) }),
+  getReflection: (date: string) => req<{ date: string; path: string; body: string }>(`/api/reflection/${encodeURIComponent(date)}`),
   triggerDigest: (lookbackDays = 7) => req<{ jobId: string }>("/api/tasks/digest", { method: "POST", body: JSON.stringify({ lookbackDays: String(lookbackDays) }) }),
   chat: (messages: { role: "user" | "assistant" | "system"; content: string }[]) => req<{ kind: "message" | "task"; text: string; jobId?: string; templateId?: string; requiresApproval?: boolean; brainHits?: { path: string; line: number; preview: string }[]; activePersona?: { id: string; name: string; role: string } | null }>("/api/chat", { method: "POST", body: JSON.stringify({ messages }) }),
+  saveSession: (sessionId: string, messages: { role: string; content: string; jobId?: string }[]) => req<{ saved: true; path: string; sessionId: string }>("/api/chat/save-session", { method: "POST", body: JSON.stringify({ sessionId, messages }) }),
   listPersonas: () => req<{ personas: any[]; activeId: string | null; active: any }>("/api/personas"),
   createPersona: (body: { name: string; jobDescription: string; tone?: string; role?: string; description?: string; responsibilities?: string[]; systemPromptOverride?: string }) => req<{ persona: any }>("/api/personas", { method: "POST", body: JSON.stringify(body) }),
   activatePersona: (id: string | "default") => req<{ active: any }>(`/api/personas/${id}/activate`, { method: "POST" }),
   deactivatePersona: () => req<{ active: null }>("/api/personas/deactivate", { method: "POST" }),
-  deletePersona: (id: string) => req<{ deleted: true }>(`/api/personas/${id}`, { method: "DELETE" }),
+  deletePersona: (id: string) => req<{ deleted: true; removedTemplates?: number }>(`/api/personas/${id}`, { method: "DELETE" }),
+  refreshPersonaTemplates: (id: string) => req<{ persona: string; kept: number; added: number; removed: number; ids: string[] }>(`/api/personas/${id}/refresh-templates`, { method: "POST" }),
+  listPersonaTemplates: (id: string) => req<{ templates: any[] }>(`/api/personas/${id}/templates`),
   previewPersona: (jobDescription: string) => req<{ role: string; description: string; tone: string; responsibilities: string[] }>("/api/personas/preview", { method: "POST", body: JSON.stringify({ jobDescription }) }),
-  peers: () => req<{ self: any; peers: any[] }>("/api/peers"),
+  peers: () => req<{ self: any; peers: any[]; registry?: any[] }>("/api/peers"),
+  registerPeer: (url: string) => req<{ added: boolean; url: string }>("/api/peers/register", { method: "POST", body: JSON.stringify({ url }) }),
+  deregisterPeer: (url: string) => req<{ removed: boolean }>(`/api/peers/register?url=${encodeURIComponent(url)}`, { method: "DELETE" }),
+  discoverPeers: () => req<{ found: number; tried: number }>("/api/peers/discover", { method: "POST" }),
+  workerStatus: () => req<{ running: boolean; managed: boolean; url?: string; port?: number; pid?: number; uptimeMs?: number }>("/api/peers/worker"),
+  startWorker: () => req<{ url: string; spawned: boolean; status: any }>("/api/peers/worker/start", { method: "POST" }),
+  stopWorker: () => req<{ stopped: true; status: any }>("/api/peers/worker/stop", { method: "POST" }),
+  listModels: () => req<{
+    default: string;
+    models: { name: string; family: string; paramSize?: string; sizeGB?: number; capabilities: { jsonStrict: number; reasoning: number; longForm: number; speed: number; cost: number } }[];
+    recommendations: Record<string, string>;
+    profiles: Record<string, Record<string, number>>;
+  }>("/api/models"),
+  setDefaultModel: (name: string) => req<{ default: string; previous: string; ephemeral: boolean; hint: string }>("/api/models/default", { method: "POST", body: JSON.stringify({ name }) }),
 };

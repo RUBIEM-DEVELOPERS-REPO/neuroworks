@@ -21,3 +21,19 @@ modelsRouter.get("/", async (_req, res) => {
     profiles: TASK_PROFILES,
   });
 });
+
+// Set the runtime default model. In-memory only — env wins again on restart.
+// This is the model used as the fallback when a task doesn't specify a profile.
+// (The router's profile picks still operate on capability scoring, so changing
+// the default mostly affects code paths that bypass the router with config.ollamaModel.)
+modelsRouter.post("/default", async (req, res) => {
+  const name = String(req.body?.name ?? "").trim();
+  if (!name) return res.status(400).json({ error: "name required" });
+  const models = await listModels();
+  if (!models.find(m => m.name === name)) {
+    return res.status(404).json({ error: `model not pulled locally: ${name}`, available: models.map(m => m.name) });
+  }
+  const previous = config.ollamaModel;
+  config.ollamaModel = name;
+  res.json({ default: name, previous, ephemeral: true, hint: "Restart resets to OLLAMA_MODEL in clawbot/.env." });
+});
