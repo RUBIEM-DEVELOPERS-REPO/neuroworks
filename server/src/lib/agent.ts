@@ -114,8 +114,12 @@ Tool catalog:
 // Hard cap on the planner LLM call. Slow local models occasionally take 2+
 // minutes JUST to plan — by which point the customer has given up. After
 // PLAN_TIMEOUT_MS we abandon the LLM plan and fall back to defaultVaultPlan,
-// which routes the task to research.deep. Tunable via env.
-const PLAN_TIMEOUT_MS = Number(process.env.CLAWBOT_PLAN_TIMEOUT_MS ?? "60000");
+// which routes the task to research.deep (or web.scrape for bare URLs).
+// Dropped from 60s to 30s: if the planner can't decide in 30s the model is
+// either thinking too hard or stalled — either way the heuristic fallback
+// is going to fire and the customer's better off getting SOMETHING in 30s
+// than waiting twice as long for the same outcome. Tunable via env.
+const PLAN_TIMEOUT_MS = Number(process.env.CLAWBOT_PLAN_TIMEOUT_MS ?? "30000");
 
 export async function plan(task: string, _personaSystemSuffix?: string): Promise<Plan> {
   // Persona deliberately omitted from the TOOL CHOICE prompt: tool selection
@@ -509,6 +513,18 @@ export async function planAndExecute(
   onProgress?: (patch: Partial<AgentResult> & { phase?: string }) => void,
   opts: { personaSystemSuffix?: string; autoReview?: boolean } = {},
 ): Promise<AgentResult> {
+  // CRITICAL: every heuristic below MUST run against the bare user text, not
+  // the enriched task (which is prefixed with persona framing + thread
+  // context + interpretation/deliverable blocks). Otherwise:
+  //   • looksLikeDirectAnswer fails the `^\s*<verb>` check
+  //   • heuristicPlan fails the URL/path/topic regex anchors
+  //   • extractTopic returns the persona framing as the "topic"
+  //   • defaultVaultPlan passes that garbage as the research query
+  // This bug produced 5-minute fallbacks on requests that should have
+  // matched the URL-only heuristic in milliseconds (e.g. "fetch http://...").
+  // We compute bareTask once and thread it through every heuristic.
+  const bareTask = parseUserRequestFromTask(task);
+
   // Triage first — the cheapest possible path is skipping the planner entirely
   // for prompts that don't need tools. Total round-trip drops from ~3min to
   // ~10-20s for trivial tasks.
@@ -518,11 +534,11 @@ export async function planAndExecute(
   // sequentially wasted the vault budget. Now they overlap and the result
   // is combined: if EITHER (a) triage said DIRECT AND (b) vault has no
   // hits, we take the direct-answer path. Otherwise plan.
-  if (TRIAGE_ENABLED && task.trim().length > 0 && task.trim().length <= TRIAGE_MAX_CHARS) {
-    const heuristicDirect = looksLikeDirectAnswer(task);
-    const topic = extractTopic(task);
+  if (TRIAGE_ENABLED && bareTask.length > 0 && bareTask.length <= TRIAGE_MAX_CHARS) {
+    const heuristicDirect = looksLikeDirectAnswer(bareTask);
+    const topic = extractTopic(bareTask);
     const [llmDirect, vaultHits] = await Promise.all([
-      heuristicDirect ? Promise.resolve(true) : llmTriage(task).catch(() => false),
+      heuristicDirect ? Promise.resolve(true) : llmTriage(bareTask).catch(() => false),
       (topic && topic.length >= 2)
         ? Promise.resolve().then(() => { try { return searchVault(topic, 1); } catch { return []; } })
         : Promise.resolve([] as { path: string; line: number; preview: string }[]),
@@ -572,8 +588,11 @@ Rules:
   // "open <path>", "scrape <url>") have one obvious tool — we skip the LLM
   // planner entirely for those and save 3-8s. Only falls back to the LLM
   // planner when the shape isn't recognised.
+  //
+  // bareTask (computed at top) strips persona framing so URL / path / verb
+  // anchors match from line-start.
   onProgress?.({ phase: "planning" });
-  let p = heuristicPlan(task) ?? { steps: [], summary: undefined, waves: [] };
+  let p = heuristicPlan(bareTask) ?? { steps: [], summary: undefined, waves: [] };
   if (p.steps.length > 0) {
     push(`heuristic plan: ${p.steps.length} step(s) — ${p.summary ?? "matched shape"} (skipping LLM planner)`);
   } else {
@@ -581,12 +600,11 @@ Rules:
     p = await plan(task, opts.personaSystemSuffix);
   }
   if (p.steps.length === 0) {
-    // Vault-first fallback: instead of answering blind, run research.deep —
-    // it searches vault + web, fetches the top sources, synthesises, and
-    // captures a note in 0-Inbox/. The whole "if it's not in the brain go
-    // find it and put it there" loop happens inside one primitive.
+    // Vault-first fallback uses bareTask so extractTopic doesn't fold the
+    // persona prefix into the research query (root cause of the 5-minute
+    // research.deep run measured in the wild).
     push(`planner produced no plan (LLM timed out or returned nothing parseable) — using the default research.deep plan`);
-    p = defaultVaultPlan(task);
+    p = defaultVaultPlan(bareTask);
   }
   push(`plan: ${p.steps.length} step(s)${p.summary ? ` — ${p.summary}` : ""}`);
   onProgress?.({ phase: "executing", plan: p, runs: [] });
@@ -609,8 +627,19 @@ Rules:
   //
   // Both phases land as real plan steps so the AgentVisualizer shows them
   // live next to the user's other sub-agents.
-  const wantQA = (opts.autoReview ?? AUTO_REVIEW) && synth.length >= MIN_REVIEW_CHARS;
-  const trivialTask = task.trim().length < 30;
+  // Skip the QA wave when the plan produced ZERO real successes. The synth
+  // in that case is a fallback rescue summary ("we tried X, it failed
+  // because Y") — there's no real content to quality-check, no citations
+  // to verify, and running peer.review on an apology wastes 60-90s on a
+  // task that already failed once. Detected via runs.every(!ok).
+  const allWorkFailed = runs.length > 0 && runs.every(r => !r.ok);
+  const wantQA = (opts.autoReview ?? AUTO_REVIEW) && synth.length >= MIN_REVIEW_CHARS && !allWorkFailed;
+  // Use bareTask length here too — enriched task is always > 30 chars due to
+  // the persona prefix, which neutered this QA-skip optimisation entirely.
+  const trivialTask = bareTask.trim().length < 30;
+  if (allWorkFailed) {
+    push(`skipping QA wave — all plan steps failed, the answer is a fallback rescue summary (no content to grade)`);
+  }
   const plannerAlreadyReviewed = p.steps.some(s => s.tool === "peer.review");
   // Build a compact evidence catalog from successful runs to feed quality.check.
   // Without this the scorer is asked to grade citation_coverage but can't
@@ -933,6 +962,25 @@ function heuristicPlan(task: string): Plan | null {
 }
 
 function defaultVaultPlan(task: string): Plan {
+  // Last-line-of-defense URL detection — if the bare task is "fetch <url>"
+  // or just a URL, route to web.scrape instead of pushing the URL through
+  // research.deep as a search query (which would search for the URL string,
+  // not fetch it, wasting minutes for zero value). The SSRF gate inside
+  // web.scrape will reject dangerous targets in milliseconds.
+  const urlMatch = task.trim().match(/^\s*(?:(?:scrape|browse|open|fetch|read|visit|get)\s+)?(https?:\/\/\S+)\s*$/i);
+  if (urlMatch) {
+    const url = urlMatch[1];
+    return {
+      steps: [{
+        tool: "web.scrape",
+        args: { url },
+        rationale: "default fallback: bare URL request — scrape directly instead of researching the URL string",
+        label: humanStepLabel("web.scrape", { url }),
+      }],
+      summary: `Scrape ${url}`,
+      waves: [[0]],
+    };
+  }
   const topic = extractTopic(task);
   const steps: PlanStep[] = [
     {

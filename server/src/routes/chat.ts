@@ -410,8 +410,11 @@ async function handleChat(req: any, res: any) {
       // for context-rooting (nothing to root in).
       let curation: any = undefined;
       const isDirectAnswer = Array.isArray(r.plan?.steps) ? r.plan.steps.length === 0 : false;
+      const peerAllFailed = Array.isArray(r.runs) && r.runs.length > 0 && r.runs.every((rn: any) => !rn.ok);
       if (isDirectAnswer) {
         push(`skipping curation — direct-answer output has no evidence to score / capture (saves ~30-60s)`);
+      } else if (peerAllFailed) {
+        push(`skipping curation — every plan step failed on the worker; the answer is a fallback rescue summary, nothing to grade`);
       } else if (r.status === "succeeded" && typeof r.answer === "string" && r.answer.trim().length > 0) {
         try {
           push(`curating peer output (quality + security + context-rooting)`);
@@ -447,9 +450,18 @@ async function handleChat(req: any, res: any) {
       const result = await runFromChat("general-task", { task: enrichedTask, save_as_template: true }, push, progress);
       const answer = (result as any)?.answer;
       const planSteps = (result as any)?.plan?.steps;
+      const allRuns = (result as any)?.runs;
       const isDirectAnswer = Array.isArray(planSteps) ? planSteps.length === 0 : false;
+      // Skip curation if the plan produced ZERO successes — the answer is a
+      // fallback rescue summary (an honest "X failed because Y"), not real
+      // content. Curation would score it as trash anyway and burn 30-60s.
+      const allWorkFailed = Array.isArray(allRuns) && allRuns.length > 0 && allRuns.every((r: any) => !r.ok);
       if (isDirectAnswer) {
         push(`skipping curation — direct-answer output has no evidence to score / capture (saves ~30-60s)`);
+        return result;
+      }
+      if (allWorkFailed) {
+        push(`skipping curation — all plan steps failed; the answer explains the failure, nothing to grade or capture`);
         return result;
       }
       if (typeof answer === "string" && answer.trim().length > 0) {
