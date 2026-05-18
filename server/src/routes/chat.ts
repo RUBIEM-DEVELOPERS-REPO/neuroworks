@@ -344,8 +344,8 @@ async function handleChat(req: any, res: any) {
     const pinnedPeer = delegatedPeer;
     const pinnedDecision = routingDecision;
     void runJob(job, async (push, progress) => {
-      push(`routing: ${pinnedDecision?.reason ?? "delegating to peer"}`);
-      push(`delegation reason: ${delegationReason} → peer ${pinnedPeer.name ?? pinnedPeer.url}`);
+      push(pinnedDecision?.reason ?? `Delegating this to ${pinnedPeer.name ?? pinnedPeer.url}.`);
+      push(`Why I delegated: ${delegationReason}.`);
       // Use delegateToPeer (specific) instead of delegateToBestPeer (re-picks)
       // so we always send the work to the peer we already chose. Avoids races
       // where the lightest-idle pick changes between routing and delegating.
@@ -383,7 +383,7 @@ async function handleChat(req: any, res: any) {
           }
         },
       });
-      push(`peer returned in ${(r.elapsedMs / 1000).toFixed(1)}s · status=${r.status}`);
+      push(`${pinnedPeer.name ?? "Peer worker"} returned in ${(r.elapsedMs / 1000).toFixed(1)}s — ${r.status === "succeeded" ? "succeeded" : `status: ${r.status}`}.`);
 
       // PERSONA VERIFICATION — the worker now echoes back which persona it
       // actually scoped the run to (personaIdUsed). If it differs from what
@@ -392,11 +392,11 @@ async function handleChat(req: any, res: any) {
       const expectedPersonaId = persona?.id ?? null;
       const actualPersonaId = (r as any)?.personaIdUsed ?? null;
       if (expectedPersonaId && actualPersonaId !== expectedPersonaId) {
-        const warnMsg = `⚠ persona mismatch: expected "${expectedPersonaId}" but worker used "${actualPersonaId ?? "<none>"}". Worker may not have adopted the hired employee for this run.`;
+        const warnMsg = `⚠ Persona mismatch — I expected the worker to operate as "${expectedPersonaId}" but it ran as "${actualPersonaId ?? "<none>"}". The output may not reflect the hired employee's framing.`;
         push(warnMsg);
         console.warn(`[chat] ${warnMsg} (peer=${pinnedPeer.url}, jobId=${r.jobId})`);
       } else if (expectedPersonaId && actualPersonaId === expectedPersonaId) {
-        push(`persona verified: worker scoped this run to "${(r as any).personaNameUsed ?? expectedPersonaId}"`);
+        push(`Worker confirmed it operated as "${(r as any).personaNameUsed ?? expectedPersonaId}".`);
       }
 
       // Primary acts as the editor: score quality, scan for secrets, decide
@@ -412,12 +412,12 @@ async function handleChat(req: any, res: any) {
       const isDirectAnswer = Array.isArray(r.plan?.steps) ? r.plan.steps.length === 0 : false;
       const peerAllFailed = Array.isArray(r.runs) && r.runs.length > 0 && r.runs.every((rn: any) => !rn.ok);
       if (isDirectAnswer) {
-        push(`skipping curation — direct-answer output has no evidence to score / capture (saves ~30-60s)`);
+        push(`Skipping vault capture — direct answers have no sourced evidence to file away (saves ~30-60s).`);
       } else if (peerAllFailed) {
-        push(`skipping curation — every plan step failed on the worker; the answer is a fallback rescue summary, nothing to grade`);
+        push(`Skipping vault capture — every step failed on the worker, so there's nothing to file.`);
       } else if (r.status === "succeeded" && typeof r.answer === "string" && r.answer.trim().length > 0) {
         try {
-          push(`curating peer output (quality + security + context-rooting)`);
+          push(`Curating the result — quality + security check, then deciding whether to file to your second brain.`);
           curation = await curatePeerOutput({
             task: text,
             answer: r.answer,
@@ -429,10 +429,10 @@ async function handleChat(req: any, res: any) {
             workerQuality: r.quality,
             workerSecurity: r.security,
           });
-          if (curation.captured) push(`captured to vault → ${curation.path}`);
-          else push(`curation: ${curation.reason ?? "not captured"}`);
+          if (curation.captured) push(`Filed to your second brain → ${curation.path}.`);
+          else push(`Not filed to the vault — ${curation.reason ?? "didn't pass capture criteria"}.`);
         } catch (e: any) {
-          push(`curation failed: ${String(e?.message ?? e)}`);
+          push(`Curation hit an error: ${String(e?.message ?? e)}.`);
           curation = { captured: false, reason: `curation error: ${String(e?.message ?? e)}` };
         }
       }
@@ -446,7 +446,7 @@ async function handleChat(req: any, res: any) {
     // customer sees the same QA layer they get with a worker peer.
     const pinnedDecision = routingDecision;
     void runJob(job, async (push, progress) => {
-      push(`routing: ${pinnedDecision?.reason ?? "no peer reachable — running locally"}`);
+      push(pinnedDecision?.reason ?? "Handling this myself — no peer workers are reachable.");
       const result = await runFromChat("general-task", { task: enrichedTask, save_as_template: true }, push, progress);
       const answer = (result as any)?.answer;
       const planSteps = (result as any)?.plan?.steps;
@@ -457,16 +457,16 @@ async function handleChat(req: any, res: any) {
       // content. Curation would score it as trash anyway and burn 30-60s.
       const allWorkFailed = Array.isArray(allRuns) && allRuns.length > 0 && allRuns.every((r: any) => !r.ok);
       if (isDirectAnswer) {
-        push(`skipping curation — direct-answer output has no evidence to score / capture (saves ~30-60s)`);
+        push(`Skipping vault capture — direct answers have no sourced evidence to file (saves ~30-60s).`);
         return result;
       }
       if (allWorkFailed) {
-        push(`skipping curation — all plan steps failed; the answer explains the failure, nothing to grade or capture`);
+        push(`Skipping vault capture — every step failed, so there's only a failure summary to return (nothing to file).`);
         return result;
       }
       if (typeof answer === "string" && answer.trim().length > 0) {
         try {
-          push(`self-curating output (no peer reachable — primary acts as both worker and editor)`);
+          push(`Self-curating — no peer reachable, so I'm acting as both worker and editor for this one.`);
           const curation = await curatePeerOutput({
             task: text,
             answer,
@@ -477,11 +477,11 @@ async function handleChat(req: any, res: any) {
             workerQuality: (result as any)?.quality,
             workerSecurity: (result as any)?.security,
           });
-          if (curation.captured) push(`captured to vault → ${curation.path}`);
-          else push(`curation: ${curation.reason ?? "not captured"}`);
+          if (curation.captured) push(`Filed to your second brain → ${curation.path}.`);
+          else push(`Not filed to the vault — ${curation.reason ?? "didn't pass capture criteria"}.`);
           return { ...(result as any), curation };
         } catch (e: any) {
-          push(`curation failed: ${String(e?.message ?? e)}`);
+          push(`Curation hit an error: ${String(e?.message ?? e)}.`);
           return result;
         }
       }

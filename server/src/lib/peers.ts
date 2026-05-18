@@ -104,7 +104,7 @@ export async function pickExecutor(opts: { preferRole?: string; localInflight?: 
     ok: p.ok, ready: p.ready ?? false,
   }));
   if (live.length === 0) {
-    return { decision: "local", localInflight, candidates, reason: "no reachable peers — running locally" };
+    return { decision: "local", localInflight, candidates, reason: "Handling this myself — no peer workers are reachable." };
   }
   // First pass: prefer the requested role pool. Pick lightest within it.
   let pool = opts.preferRole
@@ -123,7 +123,7 @@ export async function pickExecutor(opts: { preferRole?: string; localInflight?: 
       localInflight,
       peerInflight,
       candidates,
-      reason: `peer ${lightestPeer.name ?? lightestPeer.url} has ${peerInflight} inflight vs local ${localInflight} — peer wins`,
+      reason: `Sending this to ${lightestPeer.name ?? lightestPeer.url} — they're freer right now (${peerInflight} job${peerInflight === 1 ? "" : "s"} in progress vs ${localInflight} here).`,
     };
   }
   // Peer is equal or busier than local. Run locally — no network hop, lower
@@ -133,7 +133,7 @@ export async function pickExecutor(opts: { preferRole?: string; localInflight?: 
     localInflight,
     peerInflight,
     candidates,
-    reason: `local has ${localInflight} inflight vs lightest peer ${peerInflight} — local wins`,
+    reason: `Handling this myself — I'm at least as free as my peers (${localInflight} vs ${peerInflight} jobs in progress).`,
   };
 }
 

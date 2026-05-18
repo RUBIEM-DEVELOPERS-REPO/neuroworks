@@ -18,6 +18,12 @@ export type LLMCallOptions = {
   // mean the model stops generating sooner, which on local Ollama is the
   // dominant cost on simple tasks. Default is 1024 (~750 words).
   maxTokens?: number;
+  // Notified once when the dispatcher picks a backend + model. Lets the
+  // caller surface routing decisions in customer-facing logs (e.g. push
+  // "Bumped to GPT-4o for the synth — 8k tokens of evidence" into the chat
+  // run log so customers can see when their request used a big model and
+  // when it stayed local). Fires BEFORE the LLM call begins.
+  onRoutingDecision?: (info: { backend: Backend; model: string; reason?: string; tokenEstimate: number }) => void;
 };
 
 export type Backend = "ollama" | "openrouter";
@@ -78,6 +84,15 @@ function pickLargeOpenRouterModel(profile: LLMCallOptions["profile"]): string {
 function shouldRouteToOpenRouter(profile?: LLMCallOptions["profile"]): boolean {
   if (!config.openrouterEnabled) return false;
   if (!profile) return false;
+  // SPECIAL CASE: triage stays LOCAL by default even when OR is enabled.
+  // Triage is a yes/no classifier with a 16-token output budget; bouncing
+  // it to a remote API just adds network latency for zero quality lift.
+  // Explicit opt-in via OPENROUTER_TRIAGE_MODEL or listing triage in
+  // OPENROUTER_PROFILES.
+  if (profile === "triage") {
+    if (process.env[PROFILE_ENV_KEYS[profile]]?.trim()) return true;
+    return config.openrouterProfiles.includes(profile);
+  }
   if (process.env[PROFILE_ENV_KEYS[profile]]?.trim()) return true;
   if (config.openrouterProfiles.length > 0) return config.openrouterProfiles.includes(profile);
   return true;
@@ -232,6 +247,13 @@ async function callOllamaStream(prompt: string, system: string | undefined, mode
 // can decide what to do.
 export async function llmGenerateWithMeta(prompt: string, system?: string, opts: LLMCallOptions = {}): Promise<{ text: string; model: string }> {
   const { backend, model, reason } = await chooseBackendAndModel(opts, prompt, system);
+  const tokenEstimate = estimateTokens(prompt) + estimateTokens(system);
+  // Customer-facing notification: caller decides whether to push the
+  // routing decision into the chat run log. We pass enough context for the
+  // caller to render "thinking with <model> because <reason>" themselves.
+  if (opts.onRoutingDecision) {
+    try { opts.onRoutingDecision({ backend, model, reason, tokenEstimate }); } catch { /* consumer error */ }
+  }
   // One-line stdout breadcrumb when the complexity-based override kicks in,
   // so a customer scanning the server log can see "this synth was bumped to
   // OR because it was 8k tokens" without digging through job logs.

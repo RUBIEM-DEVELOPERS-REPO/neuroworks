@@ -126,6 +126,124 @@ export function suggestSkillsForIntent(intent: string, limit = 2): Skill[] {
   return scored.slice(0, limit).map(x => x.skill);
 }
 
+// Doc-type keyword → skill name. Used as a SECONDARY signal after intent
+// matching: if the user literally says "draft a PRD" or "ADR for X", we
+// load the matching skill even when the intent classifier missed (e.g. it
+// labelled the task as generic "draft-other" because it didn't recognise PRD).
+//
+// Map keys are the *substring* we search for in the task body (case-
+// insensitive). Word-boundary matching for short tokens prevents false hits
+// ("api" wouldn't match "rapid").
+const SKILL_KEYWORDS: { skill: string; patterns: RegExp[] }[] = [
+  { skill: "email-writing",          patterns: [/\bemail\b/i, /\breply\s+to\b/i] },
+  { skill: "memo-writing",           patterns: [/\bmemo\b/i] },
+  { skill: "report-writing",         patterns: [/\b(?:full|quarterly|annual)\s+report\b/i, /\banalysis\s+report\b/i] },
+  { skill: "brief-writing",          patterns: [/\b(?:executive\s+)?brief\b/i, /\bone[-\s]?pager\b/i] },
+  { skill: "proposal-writing",       patterns: [/\bproposal\b/i, /\bpitch\s+(?:doc|deck)\b/i, /\brfp\s+response\b/i] },
+  { skill: "product-spec",           patterns: [/\bprd\b/i, /\bproduct\s+(?:spec|requirements)\b/i, /\bproduct\s+brief\b/i] },
+  { skill: "design-doc",             patterns: [/\bdesign\s+doc(?:ument)?\b/i, /\brfc\b/i, /\btechnical\s+design\b/i] },
+  { skill: "decision-doc",           patterns: [/\badr\b/i, /\brfd\b/i, /\barchitecture\s+decision\b/i, /\bdecision\s+record\b/i] },
+  { skill: "incident-post-mortem",   patterns: [/\bpost[\s-]?mortem\b/i, /\bincident\s+(?:report|review)\b/i, /\bretro\s+for\s+(?:the\s+)?(?:incident|outage)\b/i] },
+  { skill: "root-cause-analysis",    patterns: [/\broot\s+cause\b/i, /\brca\b/i, /\b5\s+whys?\b/i, /\bfive\s+whys?\b/i] },
+  { skill: "competitive-analysis",   patterns: [/\bcompetitor\b/i, /\bcompetitive\s+(?:analysis|landscape)\b/i, /\bmarket\s+landscape\b/i] },
+  { skill: "okr-writing",            patterns: [/\bokrs?\b/i, /\bobjectives?\s+and\s+key\s+results\b/i] },
+  { skill: "one-on-one-prep",        patterns: [/\b1[\s:.-]?1\b/i, /\bone[\s-]on[\s-]one\b/i] },
+  { skill: "performance-review",     patterns: [/\b(?:perf|performance)\s+review\b/i, /\bself[\s-]?review\b/i] },
+  { skill: "status-update",          patterns: [/\bstatus\s+update\b/i, /\bweekly\s+update\b/i, /\bstandup\s+(?:update|note)\b/i] },
+  { skill: "weekly-review",          patterns: [/\bweekly\s+review\b/i, /\bweek\s+in\s+review\b/i] },
+  { skill: "meeting-agenda",         patterns: [/\b(?:meeting\s+)?agenda\b/i] },
+  { skill: "meeting-notes",          patterns: [/\bmeeting\s+notes\b/i, /\bminutes\s+of\s+the\s+meeting\b/i] },
+  { skill: "announcement-writing",   patterns: [/\bannouncement\b/i, /\bannounce\b/i] },
+  { skill: "feedback-giving",        patterns: [/\b(?:give|deliver|share)\s+(?:some\s+)?feedback\b/i, /\bfeedback\s+for\b/i] },
+  { skill: "risk-assessment",        patterns: [/\brisk\s+(?:assessment|analysis|register)\b/i, /\bidentify\s+risks?\b/i] },
+  { skill: "fact-check",             patterns: [/\bfact[\s-]?check\b/i, /\bverify\s+(?:a\s+|the\s+|this\s+)?claim\b/i, /\bis\s+it\s+true\s+that\b/i] },
+  { skill: "comparison",             patterns: [/\bcompare\s+\S+\s+(?:to|with|vs\.?|and|versus)\s+\S/i, /\bside[\s-]by[\s-]side\b/i] },
+  { skill: "contract-summary",       patterns: [/\bcontract\b/i, /\bagreement\b/i, /\bterms\s+of\s+service\b/i, /\btos\b/i, /\bnda\b/i] },
+  { skill: "local-doc-summary",      patterns: [/\b(?:what(?:'?s|\s+is|\s+does)\s+in\s+this\b|summari[sz]e\s+this\s+(?:doc|file|pdf))/i] },
+  { skill: "pr-description-writing", patterns: [/\bpull\s+request\b/i, /\bpr\s+description\b/i, /\bpr\s+body\b/i] },
+  { skill: "commit-message-writing", patterns: [/\bcommit\s+message\b/i, /\bgit\s+commit\s+msg\b/i] },
+  { skill: "testing-strategy",       patterns: [/\btest(?:ing)?\s+(?:strategy|plan)\b/i, /\bqa\s+plan\b/i] },
+  { skill: "api-design",             patterns: [/\bapi\s+design\b/i, /\brest\s+api\b/i, /\bendpoint\s+design\b/i] },
+  { skill: "debugging-help",         patterns: [/\bdebug\b/i, /\berror\b/i, /\bcrashe?s?\b/i, /\bstack\s+trace\b/i, /\bnot\s+working\b/i] },
+  { skill: "code-review",            patterns: [/\bcode\s+review\b/i, /\breview\s+(?:this\s+|the\s+|my\s+)?code\b/i] },
+  { skill: "edit-pass",              patterns: [/\bedit\s+(?:this|my)\b/i, /\bcopy[\s-]?edit\b/i, /\bpolish\b/i, /\bclean\s+up\s+the\s+writing\b/i] },
+  // "summarise/summarize" is intentionally NOT here — it's too generic and
+  // already covered by intent=summarize, AND it'd false-positive over more
+  // specific skills like contract-summary or local-doc-summary. tl;dr is fine.
+  { skill: "summarization",          patterns: [/\btl;?dr\b/i] },
+  { skill: "research-deep",          patterns: [/\bresearch\b/i, /\bdig\s+into\b/i, /\bdeep\s+dive\b/i] },
+  { skill: "vault-organization",     patterns: [/\bvault\b/i, /\bsecond\s+brain\b/i, /\bobsidian\b/i] },
+  { skill: "list-making",            patterns: [/\b(?:make|give|write)\s+(?:me\s+)?(?:a\s+)?(?:bulleted?\s+|numbered\s+|checklist|to[\s-]?do)\b/i] },
+  { skill: "table-making",           patterns: [/\b(?:make|build|create|give)\s+(?:me\s+)?(?:a\s+)?(?:comparison\s+)?table\b/i, /\b(?:as|in)\s+a\s+table\b/i] },
+];
+
+// Combined picker: matches BOTH on intent AND on doc-type keywords in the
+// task body. Solves the "intent classifier missed but the user literally
+// said 'write a PRD'" gap. Returns the top `limit` skills by composite
+// score:
+//   • 20 + specificity bonus when applies_to contains the intent exactly
+//   • 15 per distinct keyword pattern that matches the task body
+//   • 0 otherwise (skill is filtered out)
+//
+// Use this as the PRIMARY picker for the synth step. Falls back to intent-
+// only matching when no task text is supplied.
+export function suggestSkillsForTask(task: string, intent?: string, limit = 2): Skill[] {
+  const all = listSkills();
+  const intentTarget = intent?.trim().toLowerCase() ?? "";
+  const taskText = (task ?? "").slice(0, 2000); // cap the regex window
+  const scored: { skill: Skill; score: number; reasons: string[] }[] = [];
+
+  for (const s of all) {
+    let score = 0;
+    const reasons: string[] = [];
+
+    if (intentTarget && s.applies_to.length > 0 && s.applies_to.some(t => t.toLowerCase() === intentTarget)) {
+      const specificity = 10 - Math.min(9, s.applies_to.length);
+      score += 20 + specificity;
+      reasons.push(`intent=${intentTarget}`);
+    }
+
+    if (taskText) {
+      const map = SKILL_KEYWORDS.find(e => e.skill === s.name);
+      if (map) {
+        for (const pat of map.patterns) {
+          if (pat.test(taskText)) {
+            score += 15;
+            reasons.push(`keyword=${pat.source.slice(0, 30)}`);
+            break; // one keyword hit per skill is plenty
+          }
+        }
+      }
+    }
+
+    if (score > 0) scored.push({ skill: s, score, reasons });
+  }
+  scored.sort((a, b) => b.score - a.score);
+  return scored.slice(0, limit).map(x => x.skill);
+}
+
+// Return the composite score for the top-matched skill on this task, or
+// null if no skill matched. Used by the auto-draft trigger to decide
+// whether the matched skill is strong enough to skip drafting a new one.
+export function topSkillScoreForTask(task: string, intent?: string): { skill: Skill; score: number } | null {
+  const all = listSkills();
+  const intentTarget = intent?.trim().toLowerCase() ?? "";
+  const taskText = (task ?? "").slice(0, 2000);
+  let best: { skill: Skill; score: number } | null = null;
+  for (const s of all) {
+    let score = 0;
+    if (intentTarget && s.applies_to.some(t => t.toLowerCase() === intentTarget)) {
+      score += 20 + (10 - Math.min(9, s.applies_to.length));
+    }
+    if (taskText) {
+      const map = SKILL_KEYWORDS.find(e => e.skill === s.name);
+      if (map && map.patterns.some(p => p.test(taskText))) score += 15;
+    }
+    if (score > 0 && (best === null || score > best.score)) best = { skill: s, score };
+  }
+  return best;
+}
+
 // Compact one-line render for the planner's prompt catalog ("you have these
 // skills available: …"). Avoids dumping every skill body.
 export function skillsCatalog(): string {

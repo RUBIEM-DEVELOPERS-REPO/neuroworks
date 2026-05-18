@@ -505,10 +505,10 @@ export const primitives: Primitive[] = [
   },
   {
     name: "fs.find_in",
-    description: "Find files in a known user folder (downloads / desktop / documents / vault) whose name matches a substring. Use this FIRST when the customer says 'check my downloads for X', 'look in my documents for Y', etc. — it produces the path you then hand to fs.read_external (or vault.read for vault hits). Cross-platform: resolves to ~/Downloads etc. on macOS/Linux and %USERPROFILE%\\Downloads on Windows. Returns the matches sorted newest-first so 'the X I just saved' is first.",
+    description: "Find files in a known user folder (downloads / desktop / documents / vault) whose name matches a substring. Use this FIRST when the customer says 'check my downloads for X', 'look in my documents for Y', or just 'whats in this doc X' (use folder='all' for the latter — searches Downloads, Desktop, Documents, and the vault Inbox in parallel). Cross-platform: resolves to ~/Downloads etc. on macOS/Linux and %USERPROFILE%\\Downloads on Windows. Returns matches sorted newest-first so 'the X I just saved' is first.",
     readonly: true,
     args: [
-      { name: "folder", type: "string", required: true, description: "Folder shortcut: 'downloads' | 'desktop' | 'documents' | 'vault' | 'home' — or an absolute path" },
+      { name: "folder", type: "string", required: true, description: "Folder shortcut: 'downloads' | 'desktop' | 'documents' | 'vault' | 'inbox' | 'home' | 'all' — or an absolute path. 'all' searches Downloads + Desktop + Documents + Inbox in parallel." },
       { name: "name", type: "string", required: true, description: "Filename substring to match (case-insensitive). E.g. 'AIIA Reference Letter' matches 'AIIA-Reference-Letter.pdf'." },
       { name: "limit", type: "number", required: false, description: "Max matches to return (default 10, cap 50)" },
       { name: "depth", type: "number", required: false, description: "Subfolder recursion depth (default 2, cap 4)" },
@@ -526,7 +526,9 @@ export const primitives: Primitive[] = [
       // sit directly under that on all three. The "vault" shortcut maps to
       // the configured Obsidian vault path. "home" is allowed but its
       // search still goes through the same security gate, so .ssh/.aws
-      // etc. inside ~ get refused.
+      // etc. inside ~ get refused. "all" expands to a list — we hit all
+      // common user-doc folders so "whats in this doc X" works without
+      // the caller having to guess which folder X lives in.
       const home = homedir();
       const shortcuts: Record<string, string> = {
         downloads: join(home, "Downloads"),
@@ -538,14 +540,21 @@ export const primitives: Primitive[] = [
         vault: config.vaultPath,
         inbox: join(config.vaultPath, "0-Inbox"),
       };
-      const root = shortcuts[folderArg.toLowerCase()] ?? resolve(folderArg);
+      const lowerArg = folderArg.toLowerCase();
+      const roots: string[] = lowerArg === "all" || lowerArg === "any" || lowerArg === "everywhere"
+        ? [shortcuts.downloads, shortcuts.desktop, shortcuts.documents, shortcuts.inbox]
+        : [shortcuts[lowerArg] ?? resolve(folderArg)];
       // Security gate — refuses .ssh / .aws / cred-store dirs even if the
-      // customer somehow asks for them by absolute path.
+      // customer somehow asks for them by absolute path. Applied per-root.
       const { assertSafeExternalPath } = await import("./security-gates.js");
-      assertSafeExternalPath(root);
-      if (!existsSync(root)) {
-        throw new Error(`fs.find_in: folder not found at "${root}" (resolved from "${folderArg}").`);
+      for (const r of roots) assertSafeExternalPath(r);
+      const missingRoots = roots.filter(r => !existsSync(r));
+      // For 'all' we tolerate missing folders (some users don't have a
+      // ~/Desktop) and only fail when EVERY root is missing.
+      if (missingRoots.length === roots.length) {
+        throw new Error(`fs.find_in: no folders exist at ${missingRoots.map(r => `"${r}"`).join(", ")} (resolved from "${folderArg}").`);
       }
+      const livingRoots = roots.filter(r => existsSync(r));
       const needle = nameArg.toLowerCase();
       // Allow simple wildcard support: spaces or hyphens are interchangeable
       // ("AIIA Reference Letter" matches "AIIA-Reference-Letter.pdf"), and
@@ -580,12 +589,17 @@ export const primitives: Primitive[] = [
           });
         }
       }
-      walk(root, 1);
+      for (const r of livingRoots) {
+        if (hits.length >= limit) break;
+        walk(r, 1);
+      }
       // Newest first — "the X I just downloaded" is the most likely match.
       hits.sort((a, b) => (a.modified < b.modified ? 1 : -1));
       return {
         folder: folderArg,
-        resolvedRoot: root,
+        resolvedRoots: livingRoots,
+        // Keep `resolvedRoot` for backwards compat with single-folder callers.
+        resolvedRoot: livingRoots[0] ?? "",
         query: nameArg,
         count: hits.length,
         matches: hits,
@@ -1202,10 +1216,19 @@ export function humanStepLabel(tool: string, args: Record<string, any> = {}): st
     case "skill.draft":        return s("intent") ? `Drafting a "${s("intent")}" skill` : "Drafting a new skill";
     case "fs.list_external":   return s("path") ? `Looking inside ${s("path")}` : "Browsing your files";
     case "fs.read_external":   return s("path") ? `Reading ${s("path")}` : "Reading a file";
-    case "fs.find_in":         return s("folder") && s("name") ? `Looking in your ${s("folder")} for "${s("name")}"` : "Searching your local folders";
+    case "fs.find_in": {
+      const folder = s("folder");
+      const name = s("name");
+      if (!folder || !name) return "Searching your local folders";
+      const f = folder.toLowerCase();
+      const where = (f === "all" || f === "any" || f === "everywhere")
+        ? "your Downloads, Desktop, Documents, and vault Inbox"
+        : `your ${folder}`;
+      return `Looking in ${where} for "${name}"`;
+    }
     case "clock.now":          return "Checking the clock";
     case "web.search":         return s("query") ? `Searching the web for "${s("query")}"` : "Searching the web";
-    case "research.deep":      return s("query") ? `Researching "${s("query")}" — vault + web` : "Researching";
+    case "research.deep":      return s("query") ? `Researching "${s("query").slice(0, 80)}${s("query").length > 80 ? "…" : ""}" — vault + web` : "Researching";
     case "research.multiperspective": return s("topic") ? `Multi-perspective research: "${s("topic")}"` : "Multi-perspective research";
     case "peer.delegate":      return s("task") ? `Delegating to a peer clawbot` : "Delegating to a peer";
     case "peer.review":        return "Asking a peer to review the draft";

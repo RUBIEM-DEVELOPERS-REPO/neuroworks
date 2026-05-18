@@ -129,11 +129,25 @@ function OutcomeCard({ item, pushPending }: { item: Outcome; pushPending: boolea
           <div className="flex items-center gap-2 flex-wrap">
             <span className="text-sm text-cream-100">{item.label}</span>
             {item.tag && <span className="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded border border-cream-300/20 text-cream-300/60">{item.tag}</span>}
+            {typeof item.durationMs === "number" && item.durationMs > 0 && (
+              <span className="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded border border-cream-300/10 text-cream-300/50 font-mono">{formatDuration(item.durationMs)}</span>
+            )}
             {pushPending && (item.kind === "write" || item.kind === "capture") && (
               <span className="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded border border-flame-500/40 text-flame-400 bg-flame-500/10">local only</span>
             )}
           </div>
           {item.detail && <div className="text-[12px] text-cream-300/70 mt-0.5">{item.detail}</div>}
+          {Array.isArray(item.topLinks) && item.topLinks.length > 0 && (
+            <ul className="mt-1.5 space-y-0.5">
+              {item.topLinks.map((l, j) => (
+                <li key={j} className="text-[11px]">
+                  {l.external
+                    ? <a href={l.href} target="_blank" rel="noopener noreferrer" className="text-violet-400 hover:text-violet-500 break-all">→ {l.label}</a>
+                    : <Link to={l.href} className="text-violet-400 hover:text-violet-500 font-mono break-all">→ {l.label}</Link>}
+                </li>
+              ))}
+            </ul>
+          )}
           <div className="mt-1 flex items-center gap-3 flex-wrap">
             {item.link && (
               <Link to={item.link} className="font-mono text-[11px] text-violet-400 hover:text-violet-500">{item.linkLabel ?? item.link}</Link>
@@ -389,12 +403,33 @@ type Outcome = {
   linkLabel?: string;
   externalUrl?: string;
   tag?: string;
+  // Duration the sub-agent took to produce this outcome, in milliseconds.
+  // Surfaced as a small badge so bosses can see WHERE the time went without
+  // expanding "How this was done".
+  durationMs?: number;
+  // Up to 3 inline links to the most relevant artifacts (top vault matches,
+  // top web sources) — gives the exec a one-glance preview of the evidence
+  // without having to expand the card. Skipped on outcomes where headline +
+  // detail + link already say everything (e.g. "Opened issue #42").
+  topLinks?: { label: string; href: string; external?: boolean }[];
   // When present, the card becomes expandable — `OutcomeDetail` renders the
   // payload using the kind-specific renderer (perspective list, source list,
   // match list, etc.). Lets the Results page be the complete record without
   // forcing the user back to Tasks for tool-level depth.
   expanded?: { kind: string; payload: any };
 };
+
+// Format ms as a compact, exec-friendly duration. Sub-second → "ms",
+// otherwise seconds with one decimal, otherwise minutes + seconds.
+function formatDuration(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) return "";
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  const s = ms / 1000;
+  if (s < 60) return `${s.toFixed(1)}s`;
+  const m = Math.floor(s / 60);
+  const rem = Math.round(s - m * 60);
+  return `${m}m${rem > 0 ? ` ${rem}s` : ""}`;
+}
 
 function extractOutcomes(runs: any[], curation?: any): Outcome[] {
   const out: Outcome[] = [];
@@ -417,12 +452,14 @@ function extractOutcomes(runs: any[], curation?: any): Outcome[] {
     const tool = r.step.tool;
     const args = r.step.args ?? {};
     const result = r.result ?? {};
+    const durationMs = typeof r.durationMs === "number" ? r.durationMs : undefined;
     if (!r.ok) {
       out.push({
         kind: "error",
         icon: "✗",
         label: `${tool} failed`,
         detail: r.error?.slice(0, 200),
+        durationMs,
       });
       continue;
     }
@@ -434,6 +471,7 @@ function extractOutcomes(runs: any[], curation?: any): Outcome[] {
         label: tool === "vault.append" ? "Appended to note" : "Wrote new note",
         link: `/knowledge/${p}`,
         linkLabel: p,
+        durationMs,
       });
     } else if (tool === "vault.create_zettel") {
       const p = String(result.path ?? "");
@@ -445,14 +483,28 @@ function extractOutcomes(runs: any[], curation?: any): Outcome[] {
         link: `/knowledge/${p}`,
         linkLabel: p,
         tag: "permanent",
+        durationMs,
       });
     } else if (tool === "research.deep") {
+      const okSources = (result.webSources ?? []).filter((s: any) => s.ok !== false);
+      const topLinks: Outcome["topLinks"] = [
+        ...okSources.slice(0, 2).map((s: any) => ({
+          label: (s.title || s.url || "source").slice(0, 90),
+          href: String(s.url ?? ""),
+          external: true,
+        })),
+        ...(result.vaultHits ?? []).slice(0, 1).map((h: any) => ({
+          label: `${h.path}:${h.line}`,
+          href: `/knowledge/${h.path}`,
+          external: false,
+        })),
+      ].filter((l: any) => l.href);
       const headline = result.captured?.path
         ? {
             kind: "capture" as const,
             icon: "🔬",
             label: "Research note captured",
-            detail: `${result.vaultHits?.length ?? 0} vault hits · ${(result.webSources ?? []).filter((s: any) => s.ok !== false).length} web sources`,
+            detail: `${result.vaultHits?.length ?? 0} vault hits · ${okSources.length} web sources cited`,
             link: `/knowledge/${result.captured.path}`,
             linkLabel: result.captured.path,
             tag: "inbox",
@@ -461,9 +513,9 @@ function extractOutcomes(runs: any[], curation?: any): Outcome[] {
             kind: "research" as const,
             icon: "🔬",
             label: `Researched "${args.query ?? "topic"}"`,
-            detail: `${result.vaultHits?.length ?? 0} vault hits · ${(result.webSources ?? []).filter((s: any) => s.ok !== false).length} web sources`,
+            detail: `${result.vaultHits?.length ?? 0} vault hits · ${okSources.length} web sources cited`,
           };
-      out.push({ ...headline, expanded: { kind: "research.deep", payload: result } });
+      out.push({ ...headline, durationMs, topLinks, expanded: { kind: "research.deep", payload: result } });
     } else if (tool === "research.multiperspective") {
       const persStr = Array.isArray(result.perspectives) ? result.perspectives.join(", ") : "";
       const headline = result.captured?.path
@@ -483,23 +535,39 @@ function extractOutcomes(runs: any[], curation?: any): Outcome[] {
             detail: `${persStr} · ${result.sourceCount ?? 0} sources`,
             tag: "research",
           };
-      out.push({ ...headline, expanded: { kind: "multiperspective", payload: result } });
+      out.push({ ...headline, durationMs, expanded: { kind: "multiperspective", payload: result } });
     } else if (tool === "vault.search") {
-      const n = (result.matches ?? []).length;
+      const matches = result.matches ?? [];
+      const n = matches.length;
+      const topLinks: Outcome["topLinks"] = matches.slice(0, 3).map((m: any) => ({
+        label: `${m.path}:${m.line}`,
+        href: `/knowledge/${m.path}`,
+        external: false,
+      }));
       out.push({
         kind: "search",
         icon: "🔎",
         label: `Searched vault: "${args.query ?? "?"}"`,
         detail: `${n} match${n === 1 ? "" : "es"}`,
+        durationMs,
+        topLinks,
         expanded: n > 0 ? { kind: "vault.search", payload: result } : undefined,
       });
     } else if (tool === "web.search") {
-      const n = (result.results ?? []).length;
+      const results = result.results ?? [];
+      const n = results.length;
+      const topLinks: Outcome["topLinks"] = results.slice(0, 3).map((s: any) => ({
+        label: (s.title || s.url || "result").slice(0, 90),
+        href: String(s.url ?? ""),
+        external: true,
+      })).filter((l: any) => l.href);
       out.push({
         kind: "search",
         icon: "🌐",
         label: `Searched the web: "${args.query ?? "?"}"`,
         detail: `${n} result${n === 1 ? "" : "s"}`,
+        durationMs,
+        topLinks,
         expanded: n > 0 ? { kind: "web.search", payload: result } : undefined,
       });
     } else if (tool === "github.read_repo") {
@@ -510,6 +578,7 @@ function extractOutcomes(runs: any[], curation?: any): Outcome[] {
         detail: `${(result.commits ?? []).length} commits · ${(result.prs ?? []).length} PRs · ${(result.issues ?? []).length} open issues`,
         externalUrl: `https://github.com/${args.owner}/${args.name}`,
         linkLabel: `${args.owner}/${args.name}`,
+        durationMs,
         expanded: { kind: "github.read_repo", payload: result },
       });
     } else if (tool === "github.get_file") {
@@ -520,6 +589,7 @@ function extractOutcomes(runs: any[], curation?: any): Outcome[] {
         detail: result.size != null ? `${result.size.toLocaleString()} bytes` : undefined,
         externalUrl: `https://github.com/${args.owner}/${args.name}/blob/HEAD/${args.path}`,
         linkLabel: `${args.owner}/${args.name}/${args.path}`,
+        durationMs,
       });
     } else if (tool === "github.create_issue" && result.url) {
       out.push({
@@ -528,6 +598,7 @@ function extractOutcomes(runs: any[], curation?: any): Outcome[] {
         label: `Opened issue #${result.number}`,
         externalUrl: result.url,
         linkLabel: result.url,
+        durationMs,
       });
     } else if (tool === "web.scrape" && args.screenshot && result.screenshotPath) {
       out.push({
@@ -536,6 +607,7 @@ function extractOutcomes(runs: any[], curation?: any): Outcome[] {
         label: "Screenshot saved",
         link: `/knowledge/${result.screenshotPath}`,
         linkLabel: String(result.screenshotPath),
+        durationMs,
       });
     } else if (tool === "web.scrape" || tool === "web.fetch") {
       out.push({
@@ -545,6 +617,7 @@ function extractOutcomes(runs: any[], curation?: any): Outcome[] {
         detail: result.status ? `HTTP ${result.status} · ${(result.text?.length ?? 0).toLocaleString()} chars` : undefined,
         externalUrl: String(args.url ?? ""),
         linkLabel: String(args.url ?? ""),
+        durationMs,
       });
     } else if (tool === "peer.delegate") {
       out.push({
@@ -552,6 +625,7 @@ function extractOutcomes(runs: any[], curation?: any): Outcome[] {
         icon: "🤝",
         label: `Delegated to ${result.peer?.name ?? "peer"}`,
         detail: result.peer?.model ? `${result.peer.model}${result.elapsedMs ? ` · ${(result.elapsedMs / 1000).toFixed(1)}s` : ""}` : undefined,
+        durationMs,
         expanded: { kind: "peer.delegate", payload: result },
       });
     } else if (tool === "peer.review" && result.verdict) {
@@ -560,6 +634,7 @@ function extractOutcomes(runs: any[], curation?: any): Outcome[] {
         icon: "👀",
         label: `Peer review: ${result.verdict}`,
         detail: result.peer?.name ? `by ${result.peer.name}` : undefined,
+        durationMs,
       });
     }
   }

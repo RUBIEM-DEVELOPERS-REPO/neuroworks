@@ -295,6 +295,46 @@ function invalidateSearchCache() {
   SEARCH_CACHE.clear();
 }
 
+// Filename-only vault scan. Walks the vault tree but ONLY checks the .md
+// filename for the query — never opens the file. Fast (~50-200ms on a multi-
+// thousand-note vault) vs ~10-15s for full-content searchVault().
+//
+// Used by the triage block ("does this user already have notes on X?") where
+// we don't need real matches — we just need a yes/no signal that the topic
+// is present in the vault. Content search is overkill there; the slow walk
+// was the root cause of the 11s gap measured before this fix.
+export function searchVaultFilenames(query: string, limit = 5): SearchHit[] {
+  const q = query.toLowerCase();
+  // Normalise hyphens/underscores in filenames so "vault edit" matches
+  // "vault-edit.md" / "vault_edit.md". Multi-token queries require every
+  // token to appear in the filename.
+  const tokens = q.replace(/[-_\s]+/g, " ").split(" ").filter(Boolean);
+  if (tokens.length === 0) return [];
+  const out: SearchHit[] = [];
+  function walk(dir: string) {
+    if (out.length >= limit) return;
+    let entries: any[] = [];
+    try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      if (out.length >= limit) return;
+      if (HIDDEN_PREFIXES.some(p => e.name.startsWith(p))) continue;
+      const full = join(dir, e.name);
+      if (e.isDirectory()) { walk(full); continue; }
+      if (!e.name.endsWith(".md")) continue;
+      const normalised = e.name.slice(0, -3).toLowerCase().replace(/[-_]+/g, " ");
+      if (tokens.every(t => normalised.includes(t))) {
+        out.push({
+          path: relative(VAULT, full).split(sep).join("/"),
+          line: 0,
+          preview: e.name,
+        });
+      }
+    }
+  }
+  walk(VAULT);
+  return out;
+}
+
 export function searchVault(query: string, limit = 50): SearchHit[] {
   const q = query.toLowerCase();
   const key = `${q}|${limit}`;

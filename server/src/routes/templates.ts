@@ -317,16 +317,16 @@ async function generalTaskRunner(inputs: Record<string, unknown>, push: (m: stri
   const saveAs = inputs.save_as_template !== false;
   const persona = getActivePersona();
   const personaSuffix = personaSystemSuffix(persona);
-  if (persona) push(`active persona: ${persona.name} (${persona.role})`);
+  if (persona) push(`Working as ${persona.name} — ${persona.role}.`);
   const r = await planAndExecute(task, push, (patch) => progress?.(patch as Record<string, unknown>), { personaSystemSuffix: personaSuffix });
 
   // If the agent wrote anything to the vault, also commit + push
   if (r.hadWrites) {
-    push("agent wrote to vault — committing");
+    push("Wrote to your second brain — committing the changes.");
     try {
       const c = await commitAndPush(`clawbot: agent task — ${task.slice(0, 60)}`);
-      push(`vault commit: ${JSON.stringify(c)}`);
-    } catch (e: any) { push(`commit failed (non-fatal): ${e.message ?? e}`); }
+      push(`Vault commit: ${(c as any)?.ok === false ? "failed" : "done"}${(c as any)?.sha ? ` (${String((c as any).sha).slice(0, 7)})` : ""}.`);
+    } catch (e: any) { push(`Commit didn't go through (non-fatal): ${e.message ?? e}.`); }
   }
 
   let savedTemplateId: string | undefined;
@@ -343,7 +343,7 @@ async function generalTaskRunner(inputs: Record<string, unknown>, push: (m: stri
     };
     saveCustomTemplate(tpl);
     savedTemplateId = id;
-    push(`saved as template: ${id}`);
+    push(`Saved this workflow as a reusable template: ${id}.`);
   }
 
   return {

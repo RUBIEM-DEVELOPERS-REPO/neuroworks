@@ -1,8 +1,8 @@
 import { findPrimitive, humanStepLabel, primitivesPromptCatalog, primitives } from "./primitives.js";
 import { ollamaGenerate, ollamaGenerateWithMeta } from "./ollama.js";
 import { pollPeers } from "./peers.js";
-import { searchVault } from "./vault.js";
-import { suggestSkillsForIntent } from "./skills.js";
+import { searchVault, searchVaultFilenames } from "./vault.js";
+import { suggestSkillsForIntent, suggestSkillsForTask, topSkillScoreForTask } from "./skills.js";
 import { config } from "../config.js";
 
 // Parse the "Interpretation: intent=foo, target=..." line that chat.ts
@@ -15,20 +15,42 @@ function parseIntentFromTask(task: string): string | undefined {
 }
 
 // Extract just the user's actual request from the enriched task — strip
-// thread context, interpretation lines, and deliverable hints so the LLM
-// drafting a skill sees only the original ask. Used by skill auto-draft.
+// thread context, interpretation lines, deliverable hints, AND chat-template
+// preambles so heuristics + extractTopic see only the original ask.
+//
+// Three shapes get stripped (in priority order):
+//   1. Chat templates (Quick web look-up, Multi-perspective, etc.) wrap the
+//      user's typed text as "<template instructions>\n\nTopic: <bare text>".
+//      The bare text after "Topic:" is the real ask.
+//   2. Thread-context enrichment wraps as "Current request (...): <text>".
+//   3. Plain enriched tasks just have the persona prefix and trailing
+//      Interpretation: / Deliverable shape: blocks to strip.
 function parseUserRequestFromTask(task: string): string {
-  // Enriched tasks contain a "Current request (...): <text>" block when
-  // thread context was attached. Otherwise the task IS the bare text.
+  // 1. Template preamble + Topic: suffix. The web UI splices the user's typed
+  //    text in via "${activeTemplate.task}\n\nTopic: ${topic}" — without this
+  //    extraction the planner sees the full template prose as the topic
+  //    (cause of the 5-min "whats the hanta virus" research run).
+  const topicMatch = task.match(/(?:^|\n)\s*Topic:\s*([\s\S]+?)(?:\n\nInterpretation:|\n\nDeliverable shape:|$)/i);
+  if (topicMatch && topicMatch[1].trim().length > 0) return topicMatch[1].trim().slice(0, 400);
+  // 2. Thread-context block.
   const m = task.match(/Current request \(.*?\):\s*([\s\S]*?)(?:\n\nInterpretation:|\n\nDeliverable shape:|$)/);
   if (m && m[1].trim().length > 0) return m[1].trim().slice(0, 400);
-  // Strip the interpretation + deliverable blocks that chat.ts appends.
+  // 3. Plain enriched task — strip wrappers and return the body.
   return task
     .replace(/\n*Interpretation:[\s\S]*$/i, "")
     .replace(/\n*Deliverable shape:[\s\S]*$/i, "")
     .replace(/^\(You are operating as[^)]+\)\n+/, "")
     .trim()
     .slice(0, 400);
+}
+
+// True when the original task came in via a chat template (i.e. has a
+// "Topic: <X>" splice). When this is the case, the user explicitly asked for
+// the template's behavior (web look-up, multi-perspective, etc.) — we should
+// honor that and NOT shortcut to a direct LLM answer even when the bare
+// topic looks like a definition question.
+function taskWasTemplated(task: string): boolean {
+  return /(?:^|\n)\s*Topic:\s*\S/i.test(task);
 }
 
 export type PlanStep = { tool: string; args: Record<string, any>; rationale?: string; label?: string };
@@ -115,13 +137,13 @@ Tool catalog:
 // minutes JUST to plan — by which point the customer has given up. After
 // PLAN_TIMEOUT_MS we abandon the LLM plan and fall back to defaultVaultPlan,
 // which routes the task to research.deep (or web.scrape for bare URLs).
-// Dropped from 60s to 30s: if the planner can't decide in 30s the model is
-// either thinking too hard or stalled — either way the heuristic fallback
-// is going to fire and the customer's better off getting SOMETHING in 30s
-// than waiting twice as long for the same outcome. Tunable via env.
-const PLAN_TIMEOUT_MS = Number(process.env.CLAWBOT_PLAN_TIMEOUT_MS ?? "30000");
+// Dropped from 60s → 30s → 18s: with the templated-task path and `whats X`
+// heuristic, anything that DIDN'T already match the heuristic by now is a
+// genuinely unusual shape and 18s is enough for a small local planner; if
+// it isn't, the fallback is faster than waiting any longer.
+const PLAN_TIMEOUT_MS = Number(process.env.CLAWBOT_PLAN_TIMEOUT_MS ?? "18000");
 
-export async function plan(task: string, _personaSystemSuffix?: string): Promise<Plan> {
+export async function plan(task: string, _personaSystemSuffix?: string, push?: (msg: string) => void): Promise<Plan> {
   // Persona deliberately omitted from the TOOL CHOICE prompt: tool selection
   // is mechanical and must not be gated by role. (Head of AI asking about
   // NeuroWorks is still allowed to search the vault.) The persona colors the
@@ -132,7 +154,10 @@ export async function plan(task: string, _personaSystemSuffix?: string): Promise
   let vaultContext = "";
   if (topic && topic.length >= 2) {
     try {
-      const hits = searchVault(topic, 5);
+      // Filename-only scan here too: the planner only needs a hint about
+      // whether the vault has anything on this topic. Full content search
+      // would cost 10-15s on a big vault before the planner LLM even starts.
+      const hits = searchVaultFilenames(topic, 5);
       if (hits.length > 0) {
         vaultContext = `\n\nVault context: the user's vault has ${hits.length} note${hits.length === 1 ? "" : "s"} matching this topic. Sample paths: ${hits.slice(0, 3).map(h => h.path).join(", ")}. Strongly prefer vault.search / vault.read over the web for this task; the user wants their own notes prioritised.\n`;
       } else {
@@ -157,7 +182,16 @@ export async function plan(task: string, _personaSystemSuffix?: string): Promise
   let out: string;
   try {
     out = await Promise.race([
-      ollamaGenerate(`Task: ${task}`, sys, { profile: "planning" }),
+      ollamaGenerate(`Task: ${task}`, sys, {
+        profile: "planning",
+        onRoutingDecision: push ? (info) => {
+          // Only push when planner went remote — the local-Ollama-default
+          // case is the silent norm and doesn't deserve a log line.
+          if (info.backend === "openrouter") {
+            push(`Planning with ${info.model}${info.reason ? ` — ${info.reason}` : ""}.`);
+          }
+        } : undefined,
+      }),
       new Promise<string>((_, rej) =>
         setTimeout(() => rej(new Error(`planner timeout after ${PLAN_TIMEOUT_MS / 1000}s`)), PLAN_TIMEOUT_MS),
       ),
@@ -286,7 +320,15 @@ export async function executePlan(p: Plan, push: (msg: string) => void, onProgre
   // while LLM calls respect the local Ollama bottleneck.
   const budgets = await computeBudgets();
   const spinStartedAt = Date.now();
-  push(`sub-agent budget · LLM-lane ${budgets.llm} · I/O-lane ${budgets.io}${budgets.idlePeers > 0 ? ` · ${budgets.idlePeers} idle peer${budgets.idlePeers === 1 ? "" : "s"} boosting both lanes` : ""}`);
+  // Only surface the budget line when an idle peer is boosting capacity (the
+  // customer-relevant case — they paid for that worker, show it's helping) or
+  // when the budgets exceed the trivial defaults. Otherwise this line is
+  // operator-only noise that clutters the chat-side trace.
+  if (budgets.idlePeers > 0) {
+    push(`Running with help from ${budgets.idlePeers} peer worker${budgets.idlePeers === 1 ? "" : "s"} (capacity ${budgets.llm} thinking + ${budgets.io} I/O sub-agents).`);
+  } else if (process.env.CLAWBOT_VERBOSE === "1") {
+    push(`Capacity: ${budgets.llm} thinking + ${budgets.io} I/O sub-agents.`);
+  }
   onProgress?.([...runs]);
   // Inform progress callbacks via the runs payload (executePlan only emits
   // runs — we stamp the budget on the first run as a side-channel so the UI
@@ -297,7 +339,7 @@ export async function executePlan(p: Plan, push: (msg: string) => void, onProgre
     const step = p.steps[i];
     const tool = findPrimitive(step.tool)!;
     const args = resolveArgs(step.args, runs);
-    push(`step ${i + 1}/${p.steps.length}: ${step.label ?? step.tool}`);
+    push(`Step ${i + 1} of ${p.steps.length}: ${step.label ?? step.tool}`);
     runs[i] = { step, ok: false, durationMs: 0, startedAt: Date.now() };
     onProgress?.([...runs]);
     const t0 = Date.now();
@@ -348,7 +390,7 @@ export async function executePlan(p: Plan, push: (msg: string) => void, onProgre
       const llmIds = ids.filter(i => isLlmHeavy(p.steps[i].tool));
       const ioIds = ids.filter(i => !isLlmHeavy(p.steps[i].tool));
       const waveStartedAt = Date.now();
-      push(`spinning up ${ids.length} sub-agent${ids.length === 1 ? "" : "s"} · ${ioIds.length} I/O + ${llmIds.length} LLM`);
+      push(`Running ${ids.length} sub-agents in parallel (${ioIds.length} I/O + ${llmIds.length} thinking).`);
       // Run the lanes in parallel against each other. Within a lane we chunk
       // to respect the budget. I/O sub-agents start FIRST so they have a head
       // start (they're typically faster); LLM sub-agents follow on the LLM
@@ -374,9 +416,9 @@ export async function executePlan(p: Plan, push: (msg: string) => void, onProgre
       const okInWave = waveStepIds.filter(idx => runs[idx]?.ok).length;
       const failedInWave = waveStepIds.length - okInWave;
       if (failedInWave > 0) {
-        push(`wave ${w + 1} done in ${(waveMs / 1000).toFixed(1)}s · ${okInWave}/${waveStepIds.length} ok (${failedInWave} failed but partial results kept)`);
+        push(`Wave ${w + 1} finished in ${(waveMs / 1000).toFixed(1)}s — ${okInWave} of ${waveStepIds.length} sub-agents succeeded (${failedInWave} failed; partial results kept).`);
       } else {
-        push(`wave ${w + 1} done in ${(waveMs / 1000).toFixed(1)}s`);
+        push(`Wave ${w + 1} finished in ${(waveMs / 1000).toFixed(1)}s.`);
       }
     } else {
       // Single-step wave — no lane split needed.
@@ -398,13 +440,13 @@ export async function executePlan(p: Plan, push: (msg: string) => void, onProgre
       // it produced nothing, there's no evidence to build on, so we stop.
       const anySucceededOverall = runs.some(r => r.ok);
       if (!anySucceededOverall && w === 0) {
-        push(`first wave produced no successes — stopping execution; synth will fall back to a useful summary of what failed`);
+        push(`First wave had no successful sub-agents — stopping early. I'll summarise what was tried and why it didn't land.`);
         aborted = true;
       }
     }
   }
   const totalSpinMs = Date.now() - spinStartedAt;
-  push(`all sub-agents done in ${(totalSpinMs / 1000).toFixed(1)}s`);
+  push(`All sub-agents finished in ${(totalSpinMs / 1000).toFixed(1)}s.`);
   return { runs, hadWrites, budgets, subagentTimings };
 }
 
@@ -473,8 +515,9 @@ function looksLikeDirectAnswer(task: string): boolean {
   if (/^(?:hi|hello|hey|yo|sup|good\s+(?:morning|afternoon|evening)|thanks?|thank\s+you|bye|goodbye)\b[\s!,.?]*$/i.test(lower)) return true;
   if (/^[\d\s+\-*/().,]+\??$/.test(lower) && /\d/.test(lower)) return true; // pure arithmetic
   // World-knowledge question shapes — short prompts with no tool cues.
-  // "what is X" / "what are X" / "what's X" / "what does X mean"
-  if (/^\s*what(?:'s|\s+is|\s+are|\s+does|\s+do)\s+\S/i.test(t) && t.length <= 120) return true;
+  // "what is X" / "what are X" / "what's X" / "whats X" / "what does X mean"
+  // (apostrophe in "what's" is optional — users frequently type "whats")
+  if (/^\s*what(?:'?s|\s+is|\s+are|\s+does|\s+do)\s+\S/i.test(t) && t.length <= 120) return true;
   // "define X" / "explain X" / "describe X" / "tell me about X" with no tool cues
   if (/^\s*(?:define|explain|describe|clarify|elaborate(?:\s+on)?)\s+\S/i.test(t) && t.length <= 120) return true;
   // "how do/does/can/should/would X" / "how long/much/many/big X"
@@ -524,6 +567,7 @@ export async function planAndExecute(
   // matched the URL-only heuristic in milliseconds (e.g. "fetch http://...").
   // We compute bareTask once and thread it through every heuristic.
   const bareTask = parseUserRequestFromTask(task);
+  const fromTemplate = taskWasTemplated(task);
 
   // Triage first — the cheapest possible path is skipping the planner entirely
   // for prompts that don't need tools. Total round-trip drops from ~3min to
@@ -534,22 +578,33 @@ export async function planAndExecute(
   // sequentially wasted the vault budget. Now they overlap and the result
   // is combined: if EITHER (a) triage said DIRECT AND (b) vault has no
   // hits, we take the direct-answer path. Otherwise plan.
-  if (TRIAGE_ENABLED && bareTask.length > 0 && bareTask.length <= TRIAGE_MAX_CHARS) {
+  //
+  // EXCEPTION: when the task came in via a chat template (Topic: suffix),
+  // the customer explicitly asked for that template's behavior — Quick web
+  // look-up wants the web, Multi-perspective wants the fan-out. We must NOT
+  // shortcut to a direct LLM answer in that case even when the topic itself
+  // looks like a definition question.
+  if (!fromTemplate && TRIAGE_ENABLED && bareTask.length > 0 && bareTask.length <= TRIAGE_MAX_CHARS) {
     const heuristicDirect = looksLikeDirectAnswer(bareTask);
     const topic = extractTopic(bareTask);
+    // Vault pre-check uses the filename-only scan: we only need a yes/no
+    // signal "does the user have notes on this topic?" and the full content
+    // search takes 10-15s on a multi-thousand-note vault. Filename scan
+    // returns in ~50-200ms. The content search still runs later inside the
+    // research primitives when we actually need real matches.
     const [llmDirect, vaultHits] = await Promise.all([
       heuristicDirect ? Promise.resolve(true) : llmTriage(bareTask).catch(() => false),
       (topic && topic.length >= 2)
-        ? Promise.resolve().then(() => { try { return searchVault(topic, 1); } catch { return []; } })
+        ? Promise.resolve().then(() => { try { return searchVaultFilenames(topic, 1); } catch { return []; } })
         : Promise.resolve([] as { path: string; line: number; preview: string }[]),
     ]);
     let direct = llmDirect;
     if (direct && vaultHits.length > 0) {
-      push(`triage: vault has notes on "${topic}" — routing through planner instead of direct-answer`);
+      push(`Found ${vaultHits.length} note${vaultHits.length === 1 ? "" : "s"} on "${topic}" in your second brain — using those instead of answering from world knowledge.`);
       direct = false;
     }
     if (direct) {
-      push(`triage: direct-answer path (skipping planner)`);
+      push(`Answering directly — no tools needed for this one.`);
       onProgress?.({ phase: "synthesizing" });
       const POLISHED_DIRECT = `You're the customer's employee for this task — deliver the output they actually asked for, not a generic chatbot reply.
 
@@ -578,7 +633,7 @@ Rules:
         const direct: Plan = { steps: [], summary: "Direct answer (no tools needed).", waves: [] };
         return { task, plan: direct, runs: [], answer: meta.text.trim(), hadWrites: false };
       } catch (e: any) {
-        push(`triage direct-answer failed (${String(e?.message ?? e)}) — falling back to planner`);
+        push(`Direct answer didn't land cleanly (${String(e?.message ?? e).slice(0, 80)}) — switching to the planner.`);
         // fall through
       }
     }
@@ -594,19 +649,19 @@ Rules:
   onProgress?.({ phase: "planning" });
   let p = heuristicPlan(bareTask) ?? { steps: [], summary: undefined, waves: [] };
   if (p.steps.length > 0) {
-    push(`heuristic plan: ${p.steps.length} step(s) — ${p.summary ?? "matched shape"} (skipping LLM planner)`);
+    push(`Recognised the shape — going straight to the right tool (${p.steps.length} step${p.steps.length === 1 ? "" : "s"}).`);
   } else {
-    push(`planning task with local LLM`);
-    p = await plan(task, opts.personaSystemSuffix);
+    push(`Thinking about the best approach…`);
+    p = await plan(task, opts.personaSystemSuffix, push);
   }
   if (p.steps.length === 0) {
     // Vault-first fallback uses bareTask so extractTopic doesn't fold the
     // persona prefix into the research query (root cause of the 5-minute
     // research.deep run measured in the wild).
-    push(`planner produced no plan (LLM timed out or returned nothing parseable) — using the default research.deep plan`);
+    push(`Couldn't draft a tight plan in time — falling back to a vault + web search.`);
     p = defaultVaultPlan(bareTask);
   }
-  push(`plan: ${p.steps.length} step(s)${p.summary ? ` — ${p.summary}` : ""}`);
+  push(`Plan ready: ${p.steps.length} step${p.steps.length === 1 ? "" : "s"}${p.summary ? ` — ${p.summary}` : ""}.`);
   onProgress?.({ phase: "executing", plan: p, runs: [] });
 
   const { runs, hadWrites, budgets, subagentTimings } = await executePlan(p, push, (runs) => onProgress?.({ runs: [...runs] }));
@@ -618,7 +673,7 @@ Rules:
   onProgress?.({ phase: "synthesizing", runs });
   const synth = await synthesize(task, p, runs, opts.personaSystemSuffix, (partial) => {
     onProgress?.({ partialAnswer: partial });
-  });
+  }, { push });
 
   // Post-flight QA. Split into two phases so the happy path doesn't pay for
   // peer.review (the slowest QA call, 30-90s):
@@ -638,7 +693,7 @@ Rules:
   // the persona prefix, which neutered this QA-skip optimisation entirely.
   const trivialTask = bareTask.trim().length < 30;
   if (allWorkFailed) {
-    push(`skipping QA wave — all plan steps failed, the answer is a fallback rescue summary (no content to grade)`);
+    push(`Skipping quality review — every step failed, so the response is just a summary of what went wrong (nothing to grade).`);
   }
   const plannerAlreadyReviewed = p.steps.some(s => s.tool === "peer.review");
   // Build a compact evidence catalog from successful runs to feed quality.check.
@@ -664,7 +719,7 @@ Rules:
         label: humanStepLabel("security.scan", { kind: "note" }),
       },
     ];
-    push(`spinning up ${phaseASteps.length} QA sub-agents (quality + security)`);
+    push(`Reviewing the draft — running quality and security checks in parallel.`);
     const baseIdxA = p.steps.length;
     const waveA = phaseASteps.map((_, i) => baseIdxA + i);
     p.steps.push(...phaseASteps);
@@ -686,7 +741,7 @@ Rules:
       // AND security clean. Skip peer.review on confident outputs.
       const cleanDraft = qPass && qScore >= 0.75 && sPass;
       if (cleanDraft) {
-        push(`quality.check pass=true, score=${qScore.toFixed(2)}, security clean — skipping peer.review (saves a 30-90s LLM call)`);
+        push(`Quality check passed (${Math.round(qScore * 100)}%) and security is clean — peer review skipped (saves 30-90s).`);
       } else {
         const peerStep: PlanStep = {
           tool: "peer.review",
@@ -708,7 +763,7 @@ Rules:
       }
     }
   } else if (wantQA && trivialTask) {
-    push(`skipping QA wave — task is short (${task.trim().length} chars), not worth a 3-agent review`);
+    push(`Skipping quality review — short task, not worth a full QA pass.`);
   }
 
   // Pull the structured results out of the QA runs.
@@ -732,10 +787,21 @@ Rules:
   let rescuedSynth: string | undefined;
   if (quality && quality.pass === false && synth.length >= MIN_REVIEW_CHARS) {
     const intent = parseIntentFromTask(task);
-    if (intent) {
-      const existingSkills = suggestSkillsForIntent(intent, 1);
-      if (existingSkills.length === 0) {
-        push(`no skill targets intent "${intent}" — drafting one (the system learns from this struggle)`);
+    const bareTaskForSkill = parseUserRequestFromTask(task);
+    // Combined picker score: 20+ means we had an exact intent match;
+    // 15-19 means keyword-only; under 15 means no real match. We treat the
+    // last two as "the matched skill (if any) is a weak fit" — draft a new
+    // one rather than re-running with thin guidance.
+    const topMatch = topSkillScoreForTask(bareTaskForSkill, intent);
+    const matchedStrongly = topMatch !== null && topMatch.score >= 20;
+    if (intent && !matchedStrongly) {
+      const reason = topMatch === null
+        ? `no skill targets intent "${intent}" or the task body`
+        : `only weakly matched "${topMatch.skill.name}" (score ${topMatch.score}) — drafting a stronger fit`;
+      push(`${reason} — drafting a new skill playbook (the system learns from this struggle)`);
+      // We use intent here so the drafted skill is wired into the registry's
+      // applies_to list, making subsequent tasks with the same intent find
+      // it automatically.
         try {
           const { draftSkillForIntent } = await import("./skills.js");
           const firstIssue = Array.isArray(quality.issues) && quality.issues.length > 0 ? String(quality.issues[0]) : `quality score ${quality.score ?? "?"} below pass threshold`;
@@ -747,7 +813,7 @@ Rules:
           if (newSkill) {
             push(`drafted skill "${newSkill.name}" — re-running synth with the new playbook loaded`);
             try {
-              const rescue = await synthesize(task, p, runs, opts.personaSystemSuffix);
+              const rescue = await synthesize(task, p, runs, opts.personaSystemSuffix, undefined, { push });
               if (rescue && rescue.length >= MIN_REVIEW_CHARS) {
                 rescuedSynth = rescue;
                 try {
@@ -775,7 +841,6 @@ Rules:
         } catch (e: any) {
           push(`skill draft failed: ${String(e?.message ?? e).slice(0, 80)}`);
         }
-      }
     }
   }
 
@@ -788,7 +853,7 @@ Rules:
   if (!rescuedSynth && config.openrouterEnabled && quality && quality.pass === false && synth.length >= MIN_REVIEW_CHARS) {
     push(`quality.check failed (score=${quality.score ?? "?"}, issues: ${(quality.issues ?? []).slice(0, 2).join("; ")}) — re-synthesising with the large model`);
     try {
-      const rescue = await synthesize(task, p, runs, opts.personaSystemSuffix, undefined, { forceComplex: true });
+      const rescue = await synthesize(task, p, runs, opts.personaSystemSuffix, undefined, { forceComplex: true, push });
       if (rescue && rescue.length >= MIN_REVIEW_CHARS) {
         rescuedSynth = rescue;
         // Re-score the rescue draft so we know whether to keep it.
@@ -850,7 +915,7 @@ function extractTopic(task: string): string {
     .replace(/^\s*(?:please\s+)?(?:can\s+you\s+|could\s+you\s+|kindly\s+)?/i, "")
     .replace(/^(?:give\s+me\s+|tell\s+me\s+|show\s+me\s+|share\s+|provide\s+)/i, "")
     .replace(/^(?:a\s+|the\s+|an\s+)?(?:summary|overview|recap|tldr|brief|update|status|rundown)\s+(?:on|of|about|for|regarding)\s+/i, "")
-    .replace(/^(?:summari[sz]e|recap|brief\s+me\s+on|tell\s+me\s+about|what(?:'s|\s+is)\s+(?:up\s+with\s+|going\s+on\s+with\s+)?|what\s+do\s+(?:we|i|you)\s+know\s+about)\s+/i, "")
+    .replace(/^(?:summari[sz]e|recap|brief\s+me\s+on|tell\s+me\s+about|what(?:'?s|\s+is)\s+(?:up\s+with\s+|going\s+on\s+with\s+)?|what\s+do\s+(?:we|i|you)\s+know\s+about)\s+/i, "")
     .replace(/[?!.]+$/, "")
     .trim();
   return stripped || task.trim();
@@ -869,8 +934,53 @@ function heuristicPlan(task: string): Plan | null {
   const t = task.trim();
   if (!t) return null;
 
-  // Local-file lookup: "check/look/find/search in my downloads for X" /
-  // "look in my desktop for X" / "open the AIIA letter in my documents" — etc.
+  // Local-doc lookup WITHOUT a folder hint: "what's in this doc X" /
+  // "summarise this pdf X" / "read this file X" / "open X.pdf". The customer
+  // hasn't told us which folder — we sweep Downloads + Desktop + Documents +
+  // Inbox in parallel via fs.find_in folder='all'. Catches the common shape
+  // where someone refers to a doc by name without remembering where they put
+  // it. Routes BEFORE the URL/research patterns so we never fall through to
+  // a web search on a doc the user already has locally.
+  //
+  // Patterns covered:
+  //   • "what(?:'?s| is| does) (?:in |inside )?this (?:doc|file|pdf|note|letter|paper|document) X"
+  //   • "summari[sz]e (?:this |the )?(?:doc|file|pdf|note|letter) X"
+  //   • "read (?:this |the |)?X.(?:pdf|docx|md|txt|xlsx)"
+  //   • Bare "X.pdf" / "X.docx" with optional verb prefix
+  const docPhraseMatch =
+    t.match(/^\s*(?:please\s+|could\s+you\s+|can\s+you\s+)?(?:what(?:'?s|\s+is|\s+does)\s+(?:in\s+|inside\s+|about\s+)?(?:this\s+|the\s+|that\s+)?(?:doc|document|file|pdf|note|letter|paper|memo|report|deck)\s+(?:called\s+|named\s+|titled\s+)?(.+?))(?:[?.!]|\s*$)/i) ??
+    t.match(/^\s*(?:please\s+|could\s+you\s+|can\s+you\s+)?(?:summari[sz]e|recap|tldr|brief\s+me\s+on|read|open|show\s+me)\s+(?:this\s+|the\s+|that\s+)?(?:doc(?:ument)?|file|pdf|note|letter|paper|memo|report|deck)\s+(?:called\s+|named\s+|titled\s+)?(.+?)\s*[?.!]?\s*$/i) ??
+    t.match(/^\s*(?:please\s+|could\s+you\s+|can\s+you\s+)?(?:summari[sz]e|recap|tldr|read|open|show\s+me)\s+(.+?\.(?:pdf|docx|md|txt|xlsx|pptx))\s*[?.!]?\s*$/i);
+  if (docPhraseMatch) {
+    const name = docPhraseMatch[1].trim().replace(/[.?!]+$/, "");
+    // Reject pronouns / placeholders that mean the user hasn't named anything
+    // ("read this doc" with no name — better to ask).
+    const isPronounOnly = /^(?:it|this|that|one|something|anything)\s*$/i.test(name);
+    if (!isPronounOnly && name.length >= 2 && name.length <= 200) {
+      return {
+        steps: [
+          {
+            tool: "fs.find_in",
+            args: { folder: "all", name, limit: 5 },
+            rationale: "local-doc lookup (no folder hint) — sweep Downloads + Desktop + Documents + Inbox",
+            label: humanStepLabel("fs.find_in", { folder: "all", name }),
+          },
+          {
+            tool: "fs.read_external",
+            args: { path: "$step_0.matches.0.path" },
+            rationale: "read the top match (newest first) to surface its contents",
+            label: "Reading the top match",
+          },
+        ],
+        summary: `Find and read "${name}" from your usual doc folders`,
+        waves: [[0], [1]],
+      };
+    }
+  }
+
+  // Local-file lookup WITH an explicit folder hint: "check/look/find/search in
+  // my downloads for X" / "look in my desktop for X" / "open the AIIA letter
+  // in my documents" — etc.
   // Routes to fs.find_in + fs.read_external so PDFs/DOCXs run through the
   // doc-extractor cleanly. Chained via $step_0 reference so a single match
   // gets read automatically; the synth handles the "tell me what's inside"
@@ -951,14 +1061,31 @@ function heuristicPlan(task: string): Plan | null {
     };
   }
 
-  // "tell me about X" / "explain X" / "what is X" / "describe X" — these are
-  // research/explainer prompts. We use research.deep so vault is checked
-  // first, web only if vault is thin.
-  const aboutMatch = t.match(/^\s*(?:tell\s+me\s+about|explain|what(?:'s|\s+is|\s+are|\s+does)|describe|how\s+does|how\s+do)\s+(.+?)[?.!]?\s*$/i);
+  // "tell me about X" / "explain X" / "what is X" / "whats X" / "describe X" —
+  // these are research/explainer prompts. We use research.deep so vault is
+  // checked first, web only if vault is thin. (Apostrophe in "what's" is
+  // optional — users frequently type "whats".)
+  //
+  // SPEED: short definition queries (≤ 40 chars after the verb) drop to
+  // depth=2 and capture=false. Quick look-ups don't need three web fetches
+  // plus a vault commit — that's where the "5 minutes for 'whats the hanta
+  // virus'" came from. Longer / open-ended explanations keep depth=3 and
+  // still capture, because they tend to be non-trivial research notes.
+  const aboutMatch = t.match(/^\s*(?:tell\s+me\s+about|explain|what(?:'?s|\s+is|\s+are|\s+does)|describe|how\s+does|how\s+do)\s+(.+?)[?.!]?\s*$/i);
   if (aboutMatch && aboutMatch[1].length >= 2 && aboutMatch[1].length <= 80) {
     const query = aboutMatch[1].trim();
+    const isQuickLookup = query.length <= 40;
+    const depth = isQuickLookup ? 2 : 3;
+    const capture = !isQuickLookup;
     return {
-      steps: [{ tool: "research.deep", args: { query, depth: 3, capture: true }, rationale: "explainer — vault + web research", label: humanStepLabel("research.deep", { query }) }],
+      steps: [{
+        tool: "research.deep",
+        args: { query, depth, capture },
+        rationale: isQuickLookup
+          ? "short definition lookup — 2 sources, no vault capture (keeps the second brain tidy)"
+          : "explainer — vault + web research",
+        label: humanStepLabel("research.deep", { query }),
+      }],
       summary: `Research: ${query}`,
       waves: [[0]],
     };
@@ -1047,7 +1174,7 @@ async function synthesize(
   runs: StepRun[],
   personaSystemSuffix?: string,
   onPartial?: (partial: string) => void,
-  opts: { forceComplex?: boolean } = {},
+  opts: { forceComplex?: boolean; push?: (msg: string) => void } = {},
 ): Promise<string> {
   const succeeded = runs.filter(r => r.ok);
   const failed = runs.filter(r => !r.ok);
@@ -1105,24 +1232,25 @@ Universal rules (apply to ALL deliverable shapes):
 - If the evidence is thin or contradictory, say so plainly in one sentence.
 - Code in fenced blocks with the right language tag.
 - If you had to fill any gap the customer didn't specify (assumed recipient, scope, tone, what "the report" referred to, etc.), end with a single trailing italic line: "_Assumed: <one-line on what you assumed and why>_". Skip the line when nothing was assumed.`;
-  // Auto-attach a skill playbook based on the detected intent. The chat
-  // route stamps "Interpretation: intent=draft-email, …" into the enriched
-  // task; we read it back here and load the matching skill's body so the
-  // synth gets the employee-style guidance (email format, brief structure,
-  // code review checklist, etc.) without an extra LLM step. When nothing
-  // matches, the synth runs with just POLISHED_SYNTH + persona suffix.
+  // Auto-attach a skill playbook for this task. Picker uses TWO signals:
+  //   1. The intent label stamped on the enriched task ("Interpretation:
+  //      intent=draft-email, ..."). Highest weight when present.
+  //   2. Doc-type keywords in the bare user text (e.g. "PRD", "ADR",
+  //      "post-mortem", "1:1"). Catches the case where the intent classifier
+  //      missed but the user literally named the deliverable.
+  // Both signals score together; the skill with the highest composite score
+  // wins. When nothing matches, the synth runs without skill guidance.
   let skillBlock = "";
   try {
     const intent = parseIntentFromTask(task);
-    if (intent) {
-      const skills = suggestSkillsForIntent(intent, 1);
-      if (skills.length > 0) {
-        const s = skills[0];
-        // Cap the skill body so a verbose playbook doesn't blow the synth's
-        // context budget. 3000 chars ~ 750 tokens — enough for any of our
-        // built-in skills, which are all under that.
-        skillBlock = `\n\n--- Skill playbook: ${s.name} ---\n${s.body.slice(0, 3000)}\n--- end playbook ---`;
-      }
+    const bareTaskForSkill = parseUserRequestFromTask(task);
+    const skills = suggestSkillsForTask(bareTaskForSkill, intent, 1);
+    if (skills.length > 0) {
+      const s = skills[0];
+      // Cap the skill body so a verbose playbook doesn't blow the synth's
+      // context budget. 3000 chars ~ 750 tokens — enough for any of our
+      // built-in skills, which are all under that.
+      skillBlock = `\n\n--- Skill playbook: ${s.name} ---\n${s.body.slice(0, 3000)}\n--- end playbook ---`;
     }
   } catch { /* skill lookup failure shouldn't block synthesis */ }
   const sys = (personaSystemSuffix ? personaSystemSuffix + "\n\n" : "") + POLISHED_SYNTH + skillBlock;
@@ -1156,6 +1284,16 @@ Universal rules (apply to ALL deliverable shapes):
       complexity: synthComplexity,
       maxTokens: synthMaxTokens,
       onToken: onPartial ? (_chunk: string, accumulated: string) => onPartial(accumulated) : undefined,
+      onRoutingDecision: opts.push ? (info) => {
+        // Only surface the decision when it's non-default — a complexity
+        // bump, a remote model handoff. Routine local synth doesn't need a
+        // log line every time.
+        if (info.backend === "openrouter") {
+          opts.push!(`Thinking with ${info.model} (~${info.tokenEstimate.toLocaleString()} tokens of context). ${info.reason ? `Reason: ${info.reason}.` : ""}`);
+        } else if (synthComplexity === "high") {
+          opts.push!(`Thinking with local ${info.model} on a complex synth (~${info.tokenEstimate.toLocaleString()} tokens). OpenRouter isn't configured — set OPENROUTER_API_KEY to route this to a bigger model.`);
+        }
+      } : undefined,
     });
     const text = meta.text.trim();
     if (text.length < MIN_USEFUL_SYNTH) {
