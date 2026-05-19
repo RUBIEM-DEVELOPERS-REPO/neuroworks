@@ -4,6 +4,7 @@ import { pollPeers } from "./peers.js";
 import { searchVault, searchVaultFilenames } from "./vault.js";
 import { suggestSkillsForIntent, suggestSkillsForTask, topSkillScoreForTask } from "./skills.js";
 import { config } from "../config.js";
+import { PLAN_SYSTEM, POLISHED_DIRECT, POLISHED_SYNTH } from "./agent-prompts.js";
 
 // Parse the "Interpretation: intent=foo, target=..." line that chat.ts
 // appends to enriched tasks. Returns the intent label when present, or
@@ -109,37 +110,8 @@ export type AgentResult = {
   skillScore?: number;
 };
 
-const PLAN_SYSTEM = `You are a task planner for clawbot. The user gives a task in plain English; you output ONLY a JSON object describing tool steps. No prose, no markdown fences.
-
-Output schema:
-{"steps":[{"tool":"<tool-name>","args":{<key>:<value>,...},"rationale":"why"}],"summary":"one sentence about the plan"}
-
-Rules:
-- Use ONLY tools from the catalog. Invented tools are an error.
-- Reference an earlier step's output via the literal placeholder "$step_<i>" (0-indexed) optionally with a path. Example: {"path":"$step_0.matches.0.path"}.
-- Independent steps (no $step_ ref between them) run as parallel sub-agents — when the task naturally splits, prefer separate independent steps over one big serial chain. Example: searching the vault AND fetching a GitHub file are independent and should be two parallel steps.
-- Keep plans minimal — 1 to 6 steps suits most tasks.
-- Don't write files unless the task explicitly asks for it.
-- If the task can't be fulfilled with the catalog, output {"steps":[]}.
-
-EXAMPLES:
-Task: "find notes about Cognify and tell me what they say"
-{"steps":[{"tool":"vault.search","args":{"query":"Cognify"}},{"tool":"vault.read","args":{"path":"$step_0.matches.0.path"}}],"summary":"Search Cognify, read top match."}
-
-Task: "compare what my vault says about Cognify with the Cognify GitHub README"
-{"steps":[{"tool":"vault.search","args":{"query":"Cognify"}},{"tool":"github.get_file","args":{"owner":"topoteretes","name":"cognee","path":"README.md"}},{"tool":"ollama.generate","args":{"prompt":"Vault:\n$step_0.matches\n\nREADME:\n$step_1.content\n\nCompare.","system":"Compare two sources."}}],"summary":"Pull both in parallel, compare."}
-
-Task: "research what's new with Mistral models"
-{"steps":[{"tool":"research.deep","args":{"query":"Mistral models latest releases","depth":3,"capture":true}}],"summary":"Deep research with auto-capture."}
-
-Task: "analyse the case for and against giving every employee an AI agent"
-{"steps":[{"tool":"research.multiperspective","args":{"topic":"giving every employee an AI agent","perspectives":"mainstream, critical, practitioner, recent","capture":true}}],"summary":"Multi-perspective investigation."}
-
-Task: "open https://example.com/dashboard and tell me the headline metric"
-{"steps":[{"tool":"web.scrape","args":{"url":"https://example.com/dashboard","waitFor":".headline-metric","selector":".headline-metric"}}],"summary":"Render the dashboard, extract the metric."}
-
-Tool catalog:
-`;
+// PLAN_SYSTEM, POLISHED_DIRECT, POLISHED_SYNTH moved to agent-prompts.ts
+// — see that file for the prompt bodies. Imported above; usages below.
 
 // Hard cap on the planner LLM call. Slow local models occasionally take 2+
 // minutes JUST to plan — by which point the customer has given up. After
@@ -546,7 +518,15 @@ export function looksLikeDirectAnswer(task: string): boolean {
 // greetings, pure arithmetic, single-word affirmations. These bypass the
 // "if direct, try heuristicPlan first" cascade rule — we send them straight
 // to world knowledge without checking for `aboutMatch` etc.
-export function isTriviallyDirectAnswer(task: string): boolean {
+//
+// `hasPriorTurnContext` — when the full task includes thread-context
+// wrapping (e.g. "Current request (after prior turns about X): yes"),
+// affirmations like "yes" / "no" / "maybe" are meaningful answers to a
+// prior question and SHOULD route trivially. Without that wrapping,
+// a bare "yes" is meaningless — the cold-start user has nothing to
+// affirm — so we let it fall through to the LLM which will at least
+// ask "yes to what?" rather than hallucinate a confident response.
+export function isTriviallyDirectAnswer(task: string, hasPriorTurnContext = true): boolean {
   const t = task.trim();
   if (!t) return false;
   const lower = t.toLowerCase();
@@ -555,9 +535,21 @@ export function isTriviallyDirectAnswer(task: string): boolean {
   // Arithmetic-only (with or without "what is" prefix).
   if (/^[\d\s+\-*/().,]+\??$/.test(lower) && /\d/.test(lower)) return true;
   if (/^\s*what(?:'?s|\s+is)\s+[\d\s+\-*/().,]+\??$/i.test(lower)) return true;
-  // Single-word affirmations / non-questions.
-  if (/^\s*(?:yes|yeah|yep|sure|fine|no|nope|nah|maybe|idk)[\s!.?]*$/i.test(lower)) return true;
+  // Single-word affirmations / non-questions. Only trivial when we have
+  // prior-turn context for them to answer to.
+  if (/^\s*(?:yes|yeah|yep|sure|fine|no|nope|nah|maybe|idk)[\s!.?]*$/i.test(lower)) {
+    return hasPriorTurnContext;
+  }
   return false;
+}
+
+// Detect whether the enriched task carries prior-turn context. Used by
+// the affirmation branch of isTriviallyDirectAnswer to distinguish
+// "yes" answering a question we asked from "yes" arriving cold.
+function taskHasPriorTurnContext(fullTask: string): boolean {
+  // The thread-context wrapper inserted by chat.ts/templates.ts looks
+  // like "Current request (after prior turns about X): <bare ask>".
+  return /Current request \([^)]*\):/i.test(fullTask);
 }
 
 // Ask the smallest available model "does this need tools, or can you answer
@@ -632,7 +624,8 @@ export async function planAndExecute(
     // we'd rather use the user's own notes than world knowledge. Trivial
     // inputs (greetings, arithmetic) bypass this — "hi" matching a note
     // called "hi-everyone.md" shouldn't promote a greeting to vault search.
-    if (direct && vaultHits.length > 0 && !isTriviallyDirectAnswer(bareTask) && topic && topic.length >= 3) {
+    const priorContext = taskHasPriorTurnContext(task);
+    if (direct && vaultHits.length > 0 && !isTriviallyDirectAnswer(bareTask, priorContext) && topic && topic.length >= 3) {
       push(`Tier 2 — your second brain: found ${vaultHits.length} note${vaultHits.length === 1 ? "" : "s"} on "${topic}". Pulling those in instead of going to general knowledge.`);
       direct = false;
     }
@@ -653,7 +646,7 @@ export async function planAndExecute(
     // never benefit from vault or web — bypass the cascade and answer
     // directly. Without this guard, "what is 2+2" would needlessly route
     // to research.deep.
-    if (direct && !isTriviallyDirectAnswer(bareTask)) {
+    if (direct && !isTriviallyDirectAnswer(bareTask, priorContext)) {
       const speculativeHeuristic = heuristicPlan(bareTask);
       const wantsResearch = speculativeHeuristic && speculativeHeuristic.steps.length > 0
         && speculativeHeuristic.steps.some(s => s.tool === "research.deep" || s.tool === "web.search" || s.tool === "vault.search");
@@ -682,26 +675,6 @@ export async function planAndExecute(
             new Promise<any[]>(resolve => setTimeout(() => resolve([]), 1500)),
           ])
         : Promise.resolve([]);
-      const POLISHED_DIRECT = `You're the customer's employee for this task — deliver the output they actually asked for, not a generic chatbot reply.
-
-If the task block includes a "Deliverable shape:" line, follow THAT shape exactly — it's authoritative. Otherwise: answer concisely as a professional document (40–180 words for typical answers).
-
-Rules:
-- Complete sentences. No chatbot tics ("Sure!", "Great question", trailing summaries).
-- Markdown headings welcome when structure helps; bullets only for genuinely discrete items.
-- No citation markers like [N] or [vault:...] — there are no numbered sources on this path.
-
-**ANTI-HALLUCINATION RULES (load-bearing):**
-- This path runs WITHOUT tool calls — you have ONLY your training knowledge.
-- If the task names a specific acronym, proper noun, organisation, person, project, or system you don't reliably recognise — STOP. Don't guess what it stands for. Don't invent industry-standard interpretations.
-- Instead, produce a SHORT response (40-100 words) that:
-  1. Says plainly which terms you don't recognise from this task ("I don't have specific knowledge of 'AIIA' in this context")
-  2. Asks 2-4 specific questions that would unlock the real answer
-  3. Optionally offers to search the user's vault or PC for context (vault.search / fs.find_in) if they want
-- "Standard industry documentation", "typical industry practice", "generally speaking", "Association of X Y Z" for an unfamiliar acronym — these are red-flag phrases. If you find yourself reaching for them, you're filling space with invented authority. Stop and ask.
-- A correct "I don't know X — could you tell me Y?" beats a plausible-looking fabrication every time.
-
-- If you had to fill a gap the customer didn't specify (assumed recipient, tone, scope, etc.), end with a single italic line: "_Assumed: <one-line on what you assumed>_". Skip this line when nothing was assumed.`;
       const sys = (opts.personaSystemSuffix ? opts.personaSystemSuffix + "\n\n" : "") + POLISHED_DIRECT;
       try {
         // SPEED: direct-answer prose is short (40-180 words ≈ 240 tokens). We
@@ -1476,38 +1449,9 @@ async function synthesize(
     });
   }
 
-  // The synth output lands on the customer-facing Results page, so it should
-  // read like a brief professional document — not a chat transcript. The
-  // persona's systemPromptOverride (when set, e.g. for built-in Clawbot)
-  // already enforces structure, so we let it lead. Otherwise we apply the
-  // structured-doc default.
-  const POLISHED_SYNTH = `You're the customer's employee for this task — deliver the output they actually asked for, in the shape they asked for it.
-
-If the task block includes a "Deliverable shape:" line, follow THAT shape exactly — it's authoritative and overrides every default below (e.g. email format means start with "Subject:", memo format means TO/FROM/DATE/RE header, code format means fenced block, etc.). Use the default below ONLY when no shape is specified.
-
-Default (when no Deliverable shape is given):
-- Body of a professional one-page report.
-- Markdown headings (## and ###) when the answer benefits from structure.
-- Length: 80–250 words for typical answers.
-
-Universal rules (apply to ALL deliverable shapes):
-- Write complete sentences. Use bullet lists only for genuinely discrete items (≥3).
-- No "Sure!", "Great question", "Here's the…", "Let me know if…", or other chatbot tics. Speak as the employee who did the work, not a chatbot describing it.
-- No raw JSON, no asterisks for emphasis (use **bold** sparingly), no stray dashes as bullets in narrative paragraphs.
-- Cite every substantive claim inline as [N] (matching the numbered evidence) or [vault:path/to/note.md].
-- If the evidence is thin or contradictory, say so plainly in one sentence.
-- Code in fenced blocks with the right language tag.
-
-**ANTI-HALLUCINATION RULES (load-bearing — fabrications waste the customer's time):**
-- **NEVER invent the meaning of an acronym, proper noun, person, place, organisation, or specialised term that doesn't appear in the evidence.** If the task names "AIIA", "Cognify", "Project Atlas", "Section 4.2", or any other specific term and the evidence catalog doesn't define it — DO NOT guess. Treat it as a known-unknown and surface it explicitly.
-- When evidence is empty or doesn't cover the specific subject the task names, do NOT produce a generic templated document. Instead, produce a SHORT response that:
-  1. Names what you found (or didn't find) in the user's vault and on their PC
-  2. Lists what you'd need from them to do the task properly (3-5 specific questions)
-  3. Optionally offers a clearly-labelled "skeleton" with <FIELD> placeholders — but only if they explicitly want one
-- A correct "I couldn't find X — here's what I'd need" beats a confident fabricated draft EVERY time. Customers prefer accurate "I don't know" to plausible-looking lies.
-- "Standard industry documentation" / "typical industry practice" / "generally speaking" are red-flag phrases. If you find yourself writing them, you're filling space with invented authority — stop and ask instead.
-
-- If you had to fill any gap the customer didn't specify (assumed recipient, scope, tone, what "the report" referred to, etc.), end with a single trailing italic line: "_Assumed: <one-line on what you assumed and why>_". Skip the line when nothing was assumed.`;
+  // POLISHED_SYNTH body lives in agent-prompts.ts. The persona's
+  // systemPromptOverride (when set) prefaces it; the matched skill
+  // playbook gets appended below.
   // Auto-attach a skill playbook for this task. Picker uses TWO signals:
   //   1. The intent label stamped on the enriched task ("Interpretation:
   //      intent=draft-email, ..."). Highest weight when present.

@@ -41,7 +41,7 @@ describe("isTriviallyDirectAnswer", () => {
     "what is 2+2",
     "(3+4)*2",
     "2+2",
-  ])("recognises %j as trivial", (input) => {
+  ])("recognises %j as trivial (with default prior-context = true)", (input) => {
     expect(isTriviallyDirectAnswer(input)).toBe(true);
   });
 
@@ -53,6 +53,17 @@ describe("isTriviallyDirectAnswer", () => {
     "",
   ])("does NOT mark %j as trivial", (input) => {
     expect(isTriviallyDirectAnswer(input)).toBe(false);
+  });
+
+  it("treats 'yes' as NOT trivial when there's no prior-turn context", () => {
+    expect(isTriviallyDirectAnswer("yes", false)).toBe(false);
+    expect(isTriviallyDirectAnswer("no", false)).toBe(false);
+    expect(isTriviallyDirectAnswer("maybe", false)).toBe(false);
+  });
+
+  it("still treats greetings/arithmetic as trivial without prior context", () => {
+    expect(isTriviallyDirectAnswer("hi", false)).toBe(true);
+    expect(isTriviallyDirectAnswer("2+2", false)).toBe(true);
   });
 });
 
