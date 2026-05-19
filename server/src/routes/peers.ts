@@ -3,10 +3,11 @@ import { config } from "../config.js";
 import { pollPeers, localInflightCount } from "../lib/peers.js";
 import { registerPeer, deregisterPeer, listAllPeers, autodiscoverLocalPeers } from "../lib/peer-registry.js";
 import { ensureWorker, workerStatus, shutdownManagedWorker } from "../lib/worker-manager.js";
-import { newJob, runJob } from "../lib/jobs.js";
+import { newJob, runJob, listJobs } from "../lib/jobs.js";
 import { planAndExecute } from "../lib/agent.js";
 import { ollamaGenerate } from "../lib/ollama.js";
 import { personaSystemSuffix, addPersona, deletePersona, loadPersonas, type Persona } from "../lib/personas.js";
+import { loadJobsInWindow } from "../lib/job-store.js";
 
 export const peersRouter = Router();
 
@@ -129,6 +130,74 @@ peersRouter.get("/self", (_req, res) => {
     ready: config.ready,
     inflightJobs: localInflightCount(),
     peers: config.peers,
+  });
+});
+
+// Peer-aware reflection window. The primary fans out to every peer's
+// /api/peers/jobs?since=<iso>&until=<iso> when it runs the daily
+// reflection, merges results by id, and aggregates the whole fleet's
+// activity — not just its own. Returns the same slim PersistedJob shape
+// the local job-store writes, plus any in-memory jobs not yet flushed.
+//
+// Default window: last 24 hours, capped at 7 days to keep the response
+// bounded if a misconfigured caller asks for "everything".
+peersRouter.get("/jobs", (req, res) => {
+  const now = Date.now();
+  const sinceParam = String(req.query.since ?? "").trim();
+  const untilParam = String(req.query.until ?? "").trim();
+  const sinceMs = sinceParam ? new Date(sinceParam).getTime() : now - 24 * 3600_000;
+  const untilMs = untilParam ? new Date(untilParam).getTime() : now;
+  if (!Number.isFinite(sinceMs) || !Number.isFinite(untilMs) || untilMs <= sinceMs) {
+    res.status(400).json({ error: "bad_window", message: "since/until must be parseable ISO timestamps with since < until" });
+    return;
+  }
+  const MAX_RANGE_MS = 7 * 24 * 3600_000;
+  if (untilMs - sinceMs > MAX_RANGE_MS) {
+    res.status(400).json({ error: "window_too_wide", message: "window must be 7 days or less" });
+    return;
+  }
+  const persisted = loadJobsInWindow(sinceMs, untilMs);
+  const persistedIds = new Set(persisted.map(p => p.id));
+  // In-memory jobs that haven't flushed yet (still running, or just
+  // completed this same second). Slim them to the same shape.
+  const inMemory = listJobs()
+    .filter(j => {
+      const t = j.startedAt ? new Date(j.startedAt).getTime() : 0;
+      return t >= sinceMs && t < untilMs && !persistedIds.has(j.id);
+    })
+    .map(j => {
+      const r: any = j.result ?? {};
+      const inputs: any = j.inputs ?? {};
+      return {
+        id: j.id,
+        kind: j.kind,
+        status: j.status,
+        startedAt: j.startedAt,
+        finishedAt: j.finishedAt,
+        template: j.template,
+        title: j.title,
+        error: j.error,
+        retryOf: inputs.retryOf,
+        persona: r.activePersona?.name,
+        peer: r.peer?.name,
+        runs: Array.isArray(r.runs)
+          ? r.runs.map((run: any) => ({
+              tool: run?.step?.tool ?? "unknown",
+              durationMs: typeof run?.durationMs === "number" ? run.durationMs : 0,
+              ok: run?.ok === true,
+              error: run?.error,
+            }))
+          : undefined,
+        skillUsed: r.skillUsed,
+        skillScore: typeof r.skillScore === "number" ? r.skillScore : undefined,
+      };
+    });
+  res.json({
+    peer: config.name,
+    role: config.role,
+    since: new Date(sinceMs).toISOString(),
+    until: new Date(untilMs).toISOString(),
+    jobs: [...persisted, ...inMemory],
   });
 });
 
@@ -302,6 +371,8 @@ peersRouter.post("/delegate", async (req, res) => {
         personaNameUsed: resolvedPersona?.name ?? null,
         budgets: r.budgets,
         subagentTimings: r.subagentTimings,
+        skillUsed: r.skillUsed,
+        skillScore: r.skillScore,
       };
     } finally {
       // Drop the ephemeral hire if we registered one so the worker's persona

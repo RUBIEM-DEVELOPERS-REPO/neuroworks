@@ -99,6 +99,14 @@ export type AgentResult = {
   // run; `subagentTimings` is per-wave elapsed time in ms.
   budgets?: { llm: number; io: number; idlePeers: number };
   subagentTimings?: { wave: number; elapsedMs: number; ioCount: number; llmCount: number }[];
+  // Skill picker telemetry. `skillUsed` is the name of the playbook the
+  // synth was guided by; `skillScore` is the composite score (intent +
+  // keyword) from suggestSkillsForTask. Both are persisted by job-store
+  // and aggregated by the daily reflection so the picker has a feedback
+  // loop — patterns like "skill X chosen N times but the customer flagged
+  // M as wrong" become visible without manual review.
+  skillUsed?: string;
+  skillScore?: number;
 };
 
 const PLAN_SYSTEM = `You are a task planner for clawbot. The user gives a task in plain English; you output ONLY a JSON object describing tool steps. No prose, no markdown fences.
@@ -791,7 +799,7 @@ Rules:
   // to verify, and running peer.review on an apology wastes 60-90s on a
   // task that already failed once. Detected via runs.every(!ok).
   const allWorkFailed = runs.length > 0 && runs.every(r => !r.ok);
-  const wantQA = (opts.autoReview ?? AUTO_REVIEW) && synth.length >= MIN_REVIEW_CHARS && !allWorkFailed;
+  const wantQA = (opts.autoReview ?? AUTO_REVIEW) && synth.answer.length >= MIN_REVIEW_CHARS && !allWorkFailed;
   // Use bareTask length here too — enriched task is always > 30 chars due to
   // the persona prefix, which neutered this QA-skip optimisation entirely.
   const trivialTask = bareTask.trim().length < 30;
@@ -811,13 +819,13 @@ Rules:
     const phaseASteps: PlanStep[] = [
       {
         tool: "quality.check",
-        args: { task, answer: synth, sources: evidenceForQA },
+        args: { task, answer: synth.answer, sources: evidenceForQA },
         rationale: "auto-injected: score factuality, citation coverage, persona fit (evidence-aware)",
         label: humanStepLabel("quality.check", {}),
       },
       {
         tool: "security.scan",
-        args: { content: synth, kind: "note" },
+        args: { content: synth.answer, kind: "note" },
         rationale: "auto-injected: scan answer for secrets, dodgy URLs",
         label: humanStepLabel("security.scan", { kind: "note" }),
       },
@@ -848,7 +856,7 @@ Rules:
       } else {
         const peerStep: PlanStep = {
           tool: "peer.review",
-          args: { task, answer: synth },
+          args: { task, answer: synth.answer },
           rationale: `auto-injected: quality score=${qScore.toFixed(2)} (pass=${qPass}) — peer review for a second opinion`,
           label: humanStepLabel("peer.review", {}),
         };
@@ -888,7 +896,13 @@ Rules:
   // than swapping models, and (c) the drafted skill persists, helping the
   // next run too.
   let rescuedSynth: string | undefined;
-  if (quality && quality.pass === false && synth.length >= MIN_REVIEW_CHARS) {
+  // Skill picker telemetry the rescue paths can overwrite — once a
+  // drafted skill is used to rescue a failed synth, that skill is what
+  // actually guided the FINAL answer, so the reflection should learn
+  // from the rescue's pick, not the original.
+  let finalSkillUsed: string | undefined = synth.skillUsed;
+  let finalSkillScore: number | undefined = synth.skillScore;
+  if (quality && quality.pass === false && synth.answer.length >= MIN_REVIEW_CHARS) {
     const intent = parseIntentFromTask(task);
     const bareTaskForSkill = parseUserRequestFromTask(task);
     // Combined picker score: 20+ means we had an exact intent match;
@@ -917,17 +931,21 @@ Rules:
             push(`drafted skill "${newSkill.name}" — re-running synth with the new playbook loaded`);
             try {
               const rescue = await synthesize(task, p, runs, opts.personaSystemSuffix, undefined, { push });
-              if (rescue && rescue.length >= MIN_REVIEW_CHARS) {
-                rescuedSynth = rescue;
+              if (rescue && rescue.answer.length >= MIN_REVIEW_CHARS) {
+                rescuedSynth = rescue.answer;
                 try {
                   const checkTool = findPrimitive("quality.check");
                   if (checkTool) {
-                    const rq: any = await checkTool.handler({ task, answer: rescue, sources: buildEvidenceCatalog(runs) });
+                    const rq: any = await checkTool.handler({ task, answer: rescue.answer, sources: buildEvidenceCatalog(runs) });
                     const rs = rq?.score ?? 0;
                     const os = quality?.score ?? 0;
                     if (rs > os) {
                       push(`skill rescue improved score: ${os} → ${rs}; keeping the skill-rescued draft`);
                       quality = { ...rq, rescuedBy: "skill-acquisition", originalScore: os };
+                      // Rescue's pick guided the kept answer — surface it
+                      // to the reflection loop as the skill of record.
+                      finalSkillUsed = rescue.skillUsed ?? finalSkillUsed;
+                      finalSkillScore = rescue.skillScore ?? finalSkillScore;
                     } else {
                       push(`skill rescue produced ${rs} (not better than ${os}); falling through to OR rescue if available`);
                       rescuedSynth = undefined;
@@ -953,22 +971,25 @@ Rules:
   // whatever the dispatcher picked (often local Ollama); the rescue forces
   // complexity:"high" so the dispatcher hands off to the bigger model. We
   // re-score the rescued draft and keep whichever has the better score.
-  if (!rescuedSynth && config.openrouterEnabled && quality && quality.pass === false && synth.length >= MIN_REVIEW_CHARS) {
+  if (!rescuedSynth && config.openrouterEnabled && quality && quality.pass === false && synth.answer.length >= MIN_REVIEW_CHARS) {
     push(`quality.check failed (score=${quality.score ?? "?"}, issues: ${(quality.issues ?? []).slice(0, 2).join("; ")}) — re-synthesising with the large model`);
     try {
       const rescue = await synthesize(task, p, runs, opts.personaSystemSuffix, undefined, { forceComplex: true, push });
-      if (rescue && rescue.length >= MIN_REVIEW_CHARS) {
-        rescuedSynth = rescue;
+      if (rescue && rescue.answer.length >= MIN_REVIEW_CHARS) {
+        rescuedSynth = rescue.answer;
         // Re-score the rescue draft so we know whether to keep it.
         try {
           const checkTool = findPrimitive("quality.check");
           if (checkTool) {
-            const rescueQuality: any = await checkTool.handler({ task, answer: rescue });
+            const rescueQuality: any = await checkTool.handler({ task, answer: rescue.answer });
             const rescueScore = rescueQuality?.score ?? 0;
             const originalScore = quality?.score ?? 0;
             if (rescueScore > originalScore) {
               push(`quality rescue improved score: ${originalScore} → ${rescueScore}; using the rescued draft`);
               quality = { ...rescueQuality, rescued: true, originalScore };
+              // Rescue's skill pick guided the kept draft — record it.
+              finalSkillUsed = rescue.skillUsed ?? finalSkillUsed;
+              finalSkillScore = rescue.skillScore ?? finalSkillScore;
             } else {
               push(`quality rescue produced score ${rescueScore} (not better than ${originalScore}); keeping the original`);
               rescuedSynth = undefined;
@@ -995,9 +1016,13 @@ Rules:
     ? rescuedSynth
     : ((review && review.verdict !== "good" && review.revised_answer)
         ? review.revised_answer
-        : synth);
+        : synth.answer);
 
-  return { task, plan: p, runs, answer: finalAnswer, hadWrites, review, quality, security, budgets, subagentTimings };
+  return {
+    task, plan: p, runs, answer: finalAnswer, hadWrites, review, quality, security, budgets, subagentTimings,
+    skillUsed: finalSkillUsed,
+    skillScore: finalSkillScore,
+  };
 }
 
 function coerceReview(r: any): PeerReview {
@@ -1398,6 +1423,17 @@ function defaultVaultPlan(task: string): Plan {
   return { steps, summary: `Default research plan for: ${topic}`, waves: [[0]] };
 }
 
+// SynthResult bundles the synth body with the picker telemetry the
+// reflection loop wants to learn from. answer is the same string the
+// previous string-returning shape produced; skillUsed/skillScore are
+// undefined when no skill matched. Callers that only need the text can
+// destructure { answer }.
+type SynthResult = {
+  answer: string;
+  skillUsed?: string;
+  skillScore?: number;
+};
+
 async function synthesize(
   task: string,
   p: Plan,
@@ -1405,11 +1441,11 @@ async function synthesize(
   personaSystemSuffix?: string,
   onPartial?: (partial: string) => void,
   opts: { forceComplex?: boolean; push?: (msg: string) => void } = {},
-): Promise<string> {
+): Promise<SynthResult> {
   const succeeded = runs.filter(r => r.ok);
   const failed = runs.filter(r => !r.ok);
   if (succeeded.length === 0) {
-    return humanizeAllFail(task, failed);
+    return { answer: humanizeAllFail(task, failed) };
   }
 
   // Passthrough: when a single primitive (e.g. research.deep, peer.delegate)
@@ -1420,7 +1456,7 @@ async function synthesize(
     const candidate = succeeded[0]?.result;
     if (candidate && typeof candidate === "object" && typeof candidate.answer === "string" && candidate.answer.trim().length >= 60) {
       onPartial?.(candidate.answer.trim());
-      return candidate.answer.trim();
+      return { answer: candidate.answer.trim() };
     }
   }
 
@@ -1481,16 +1517,26 @@ Universal rules (apply to ALL deliverable shapes):
   // Both signals score together; the skill with the highest composite score
   // wins. When nothing matches, the synth runs without skill guidance.
   let skillBlock = "";
+  let pickedSkill: string | undefined;
+  let pickedSkillScore: number | undefined;
   try {
     const intent = parseIntentFromTask(task);
     const bareTaskForSkill = parseUserRequestFromTask(task);
-    const skills = suggestSkillsForTask(bareTaskForSkill, intent, 1);
-    if (skills.length > 0) {
-      const s = skills[0];
-      // Cap the skill body so a verbose playbook doesn't blow the synth's
-      // context budget. 3000 chars ~ 750 tokens — enough for any of our
-      // built-in skills, which are all under that.
-      skillBlock = `\n\n--- Skill playbook: ${s.name} ---\n${s.body.slice(0, 3000)}\n--- end playbook ---`;
+    // Use topSkillScoreForTask so we get the composite score for the
+    // feedback loop, then re-fetch the body via suggestSkillsForTask only
+    // when we have a hit. Two lookups but both are O(skills) and cheap.
+    const top = topSkillScoreForTask(bareTaskForSkill, intent);
+    if (top) {
+      const skills = suggestSkillsForTask(bareTaskForSkill, intent, 1);
+      if (skills.length > 0) {
+        const s = skills[0];
+        pickedSkill = s.name;
+        pickedSkillScore = top.score;
+        // Cap the skill body so a verbose playbook doesn't blow the synth's
+        // context budget. 3000 chars ~ 750 tokens — enough for any of our
+        // built-in skills, which are all under that.
+        skillBlock = `\n\n--- Skill playbook: ${s.name} ---\n${s.body.slice(0, 3000)}\n--- end playbook ---`;
+      }
     }
   } catch { /* skill lookup failure shouldn't block synthesis */ }
   const sys = (personaSystemSuffix ? personaSystemSuffix + "\n\n" : "") + POLISHED_SYNTH + skillBlock;
@@ -1539,12 +1585,15 @@ Universal rules (apply to ALL deliverable shapes):
     if (text.length < MIN_USEFUL_SYNTH) {
       // Model produced nothing useful. Build a structured rescue from the
       // evidence directly so the customer still gets *something* coherent.
-      return fallbackSynthesis(task, p, runs);
+      // Skill picker telemetry still travels with the fallback so the
+      // reflection can spot "skill X consistently picked but body too thin
+      // for the model" patterns.
+      return { answer: fallbackSynthesis(task, p, runs), skillUsed: pickedSkill, skillScore: pickedSkillScore };
     }
-    return text;
+    return { answer: text, skillUsed: pickedSkill, skillScore: pickedSkillScore };
   }
   catch (e: any) {
-    return fallbackSynthesis(task, p, runs, String(e?.message ?? e));
+    return { answer: fallbackSynthesis(task, p, runs, String(e?.message ?? e)), skillUsed: pickedSkill, skillScore: pickedSkillScore };
   }
 }
 

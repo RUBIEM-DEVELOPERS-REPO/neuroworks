@@ -16,7 +16,8 @@ import { listJobs, type Job } from "./jobs.js";
 import { writeVaultFile } from "./vault.js";
 import { enqueueVaultCommit } from "./commit-queue.js";
 import { llmGenerate } from "./llm.js";
-import { loadJobsInWindow, asJob } from "./job-store.js";
+import { loadJobsInWindow, asJob, type PersistedJob } from "./job-store.js";
+import { config } from "../config.js";
 
 const REFLECTION_DIR = "_neuroworks/reflections";
 
@@ -39,6 +40,12 @@ export type DailyStats = {
   slowestSteps: { tool: string; durationSec: number; jobId: string }[];
   toolStats: { tool: string; runs: number; ok: number; failed: number; avgDurationSec: number; failureRate: number }[];
   retries: { jobId: string; title?: string }[];
+  // Skill picker telemetry — surfaces which playbook guided each task and
+  // how often picks correlated with success. Reflection uses this to spot
+  // patterns like "skill X chosen N times but only succeeded M". Skills
+  // with avgScore < 20 are keyword-only matches (no intent agreement),
+  // which is the weakest signal the picker offers.
+  skillStats: { skill: string; runs: number; ok: number; failed: number; successRate: number; avgScore: number }[];
 };
 
 export type ReflectionResult = {
@@ -55,16 +62,18 @@ let inFlight: Promise<ReflectionResult> | null = null;
 
 // Pull every job that falls inside the window.
 //
-// Sources:
-//   1. .neuroworks/jobs/<date>.jsonl — durable, survives restarts and
-//      the in-memory RECENT=50 eviction.
-//   2. listJobs() in-memory cap — still consulted so jobs that haven't
-//      flushed to disk yet (mid-run, or persisted just before this call)
-//      are caught. Dedupe by id.
+// Sources, in this order of trust:
+//   1. .neuroworks/jobs/<date>.jsonl — local disk, durable.
+//   2. listJobs() in-memory cap — local jobs not yet flushed.
+//   3. Each peer's /api/peers/jobs?since=&until= — the secondary's work
+//      that a delegation routed there. Without this, the reflection
+//      only sees what the primary handled and dramatically undercounts
+//      fleet activity on busy days.
 //
-// Disk takes precedence over memory if both report the same id (disk
-// reflects the FINAL status; in-memory may be stale for finished jobs).
-function collectJobsInWindow(windowStartMs: number, windowEndMs: number): Job[] {
+// Dedupe by id. Disk wins over memory wins over peers, since disk
+// reflects FINAL status; in-memory may be mid-run; peer responses are a
+// snapshot in time.
+async function collectJobsInWindow(windowStartMs: number, windowEndMs: number): Promise<Job[]> {
   const seen = new Set<string>();
   const out: Job[] = [];
   for (const rec of loadJobsInWindow(windowStartMs, windowEndMs)) {
@@ -79,6 +88,37 @@ function collectJobsInWindow(windowStartMs: number, windowEndMs: number): Job[] 
     seen.add(j.id);
     out.push(j);
   }
+  // Fan out to peers in parallel. 5s per-peer timeout — reflection runs
+  // nightly, no rush, but we don't want one slow peer to stall the whole
+  // pipeline. Errors are swallowed: a missing peer just means we
+  // aggregate less, not that we crash the run.
+  if (config.peers.length > 0) {
+    const since = new Date(windowStartMs).toISOString();
+    const until = new Date(windowEndMs).toISOString();
+    const peerResults = await Promise.allSettled(
+      config.peers.map(async (base) => {
+        const url = `${base.replace(/\/+$/, "")}/api/peers/jobs?since=${encodeURIComponent(since)}&until=${encodeURIComponent(until)}`;
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), 5_000);
+        try {
+          const r = await fetch(url, { signal: ctrl.signal });
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          const data = (await r.json()) as { jobs?: PersistedJob[] };
+          return data.jobs ?? [];
+        } finally {
+          clearTimeout(timer);
+        }
+      }),
+    );
+    for (const r of peerResults) {
+      if (r.status !== "fulfilled") continue;
+      for (const rec of r.value) {
+        if (seen.has(rec.id)) continue;
+        seen.add(rec.id);
+        out.push(asJob(rec));
+      }
+    }
+  }
   return out;
 }
 
@@ -92,6 +132,7 @@ function aggregate(jobs: Job[], windowStartMs: number, windowEndMs: number): Dai
   const slowSteps: { tool: string; durationSec: number; jobId: string }[] = [];
   const toolBuckets: Record<string, { runs: number; ok: number; failed: number; totalSec: number }> = {};
   const retries: { jobId: string; title?: string }[] = [];
+  const skillBuckets: Record<string, { runs: number; ok: number; failed: number; totalScore: number }> = {};
 
   let succeeded = 0, failed = 0, rejected = 0;
 
@@ -119,6 +160,20 @@ function aggregate(jobs: Job[], windowStartMs: number, windowEndMs: number): Dai
     const peerName = r.peer?.name;
     if (peerName) byPeer[peerName] = (byPeer[peerName] ?? 0) + 1;
     if ((j.inputs as any)?.retryOf) retries.push({ jobId: j.id, title: j.title });
+
+    // Skill picker telemetry. We bucket every job that had a skill pick
+    // — including failed ones — so the reflection can spot patterns like
+    // "skill X chosen 12 times but only succeeded 4". avgScore tracks
+    // how confident the picker was: < 20 means keyword-only, 20+ means
+    // intent agreement, 30+ means both signals fired.
+    const skill = typeof r.skillUsed === "string" ? r.skillUsed : undefined;
+    if (skill) {
+      skillBuckets[skill] = skillBuckets[skill] ?? { runs: 0, ok: 0, failed: 0, totalScore: 0 };
+      skillBuckets[skill].runs++;
+      if (j.status === "succeeded") skillBuckets[skill].ok++;
+      else if (j.status === "failed" || j.status === "rejected") skillBuckets[skill].failed++;
+      if (typeof r.skillScore === "number") skillBuckets[skill].totalScore += r.skillScore;
+    }
 
     if (j.status === "failed" && j.error) {
       // Bucket failures by a normalised prefix so similar errors merge.
@@ -154,6 +209,14 @@ function aggregate(jobs: Job[], windowStartMs: number, windowEndMs: number): Dai
     avgDurationSec: v.runs > 0 ? Math.round((v.totalSec / v.runs) * 10) / 10 : 0,
     failureRate: v.runs > 0 ? Math.round((v.failed / v.runs) * 100) / 100 : 0,
   })).sort((a, b) => b.runs - a.runs);
+  const skillStats = Object.entries(skillBuckets).map(([skill, v]) => ({
+    skill,
+    runs: v.runs,
+    ok: v.ok,
+    failed: v.failed,
+    successRate: v.runs > 0 ? Math.round((v.ok / v.runs) * 100) / 100 : 0,
+    avgScore: v.runs > 0 ? Math.round((v.totalScore / v.runs) * 10) / 10 : 0,
+  })).sort((a, b) => b.runs - a.runs);
 
   return {
     date,
@@ -175,6 +238,7 @@ function aggregate(jobs: Job[], windowStartMs: number, windowEndMs: number): Dai
     slowestSteps: slowSteps.slice(0, 8),
     toolStats: toolStats.slice(0, 12),
     retries,
+    skillStats: skillStats.slice(0, 12),
   };
 }
 
@@ -238,6 +302,12 @@ ${stats.slowestSteps.map(s => `- ${s.tool} — ${s.durationSec}s (job ${s.jobId.
 ### Tool reliability
 ${stats.toolStats.map(t => `- ${t.tool}: ${t.runs} runs, ${(t.failureRate * 100).toFixed(0)}% failure rate, avg ${t.avgDurationSec}s`).join("\n") || "_(no tool runs)_"}
 
+### Skill picker correlations
+${stats.skillStats.length > 0
+  ? stats.skillStats.map(s => `- ${s.skill}: ${s.runs} runs (${s.ok} ok, ${s.failed} failed) — ${(s.successRate * 100).toFixed(0)}% success, avg picker score ${s.avgScore} (${s.avgScore >= 30 ? "intent + keyword" : s.avgScore >= 20 ? "intent only" : "keyword only — weak match"})`).join("\n")
+  : "_(no skill picks recorded)_"}
+${stats.skillStats.some(s => s.runs >= 3 && s.successRate < 0.5) ? "_Note: at least one skill has 3+ runs and a sub-50% success rate — investigate whether the playbook needs revision or the picker is misrouting._" : ""}
+
 ${stats.retries.length > 0 ? `### Retried tasks\n${stats.retries.map(r => `- ${r.title ?? r.jobId} (${r.jobId.slice(0, 8)})`).join("\n")}` : ""}
 
 Write the reflection. Honest, terse, numerically grounded.`;
@@ -291,10 +361,12 @@ export async function runReflection(opts: { windowHours?: number; force?: boolea
   const windowHours = opts.windowHours ?? 24;
   const windowEndMs = Date.now();
   const windowStartMs = windowEndMs - windowHours * 3600_000;
-  const jobs = collectJobsInWindow(windowStartMs, windowEndMs);
-  const stats = aggregate(jobs, windowStartMs, windowEndMs);
-
   inFlight = (async () => {
+    // Peer fan-out makes collectJobsInWindow async; resolve inside the
+    // promise so concurrent runReflection() callers share the same
+    // peer-fetch wave rather than each issuing their own.
+    const jobs = await collectJobsInWindow(windowStartMs, windowEndMs);
+    const stats = aggregate(jobs, windowStartMs, windowEndMs);
     const { text, modelUsed } = await synthesizeReflection(stats);
     const generatedAt = new Date().toISOString();
     const path = `${REFLECTION_DIR}/${stats.date}.md`;

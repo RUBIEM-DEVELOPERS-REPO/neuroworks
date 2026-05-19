@@ -73,6 +73,8 @@ templatesRouter.post("/jobs/:id/retry", async (req, res) => {
       security: r.security,
       budgets: r.budgets,
       subagentTimings: r.subagentTimings,
+      skillUsed: r.skillUsed,
+      skillScore: r.skillScore,
     };
   });
 });
@@ -365,6 +367,8 @@ async function generalTaskRunner(inputs: Record<string, unknown>, push: (m: stri
     review: r.review,
     quality: r.quality,
     security: r.security,
+    skillUsed: r.skillUsed,
+    skillScore: r.skillScore,
     savedTemplateId,
   };
 }
