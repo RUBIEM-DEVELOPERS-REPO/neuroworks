@@ -1,4 +1,4 @@
-import { readFileSync, readdirSync, renameSync, statSync, writeFileSync, mkdirSync, existsSync, rmSync, copyFileSync } from "node:fs";
+import { readFileSync, readdirSync, renameSync, statSync, writeFileSync, mkdirSync, existsSync, rmSync, copyFileSync, watch, type FSWatcher } from "node:fs";
 import { join, relative, resolve, sep } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
@@ -315,6 +315,61 @@ const SEARCH_CACHE_MAX = 200;
 
 function invalidateSearchCache() {
   SEARCH_CACHE.clear();
+}
+
+// External-edit detection. The cache is invalidated whenever
+// writeVaultFile runs, which covers every NeuroWorks-side write — but
+// the user editing a note directly in Obsidian (or any other tool) is
+// invisible to that path. fs.watch recursively notices those edits and
+// busts the cache so the next searchVault picks up the change.
+//
+// Windows: fs.watch supports { recursive: true } natively (ReadDirectoryChangesW).
+// We catch + log any setup errors instead of crashing — a missing
+// watcher just degrades to the 60s TTL behaviour, not a server outage.
+//
+// We also coalesce: an Obsidian save typically fires multiple events
+// (write, rename for autosave, etc.) within milliseconds. A single
+// invalidation per burst is enough.
+let vaultWatcher: FSWatcher | null = null;
+let watchInvalidateTimer: NodeJS.Timeout | null = null;
+const WATCH_COALESCE_MS = 250;
+
+export function startVaultWatcher(): void {
+  if (vaultWatcher) return;
+  if (process.env.CLAWBOT_VAULT_WATCH === "0") {
+    console.log("[vault] fs.watch disabled via CLAWBOT_VAULT_WATCH=0 — search cache only busts on server-side writes");
+    return;
+  }
+  try {
+    vaultWatcher = watch(VAULT, { recursive: true, persistent: false }, (eventType, filename) => {
+      if (!filename) return;
+      const name = String(filename);
+      // Filter to .md/.canvas changes only — we don't care about images,
+      // PDFs, or .git internals for search-cache purposes.
+      if (!/\.(md|canvas)$/i.test(name)) return;
+      // Skip the .git directory — git operations (during commitAndPush
+      // / pull) fire a flood of events that would invalidate the cache
+      // for no useful reason.
+      if (name.startsWith(".git") || name.includes(`${sep}.git${sep}`) || name.includes("/.git/")) return;
+      if (watchInvalidateTimer) clearTimeout(watchInvalidateTimer);
+      watchInvalidateTimer = setTimeout(() => {
+        watchInvalidateTimer = null;
+        invalidateSearchCache();
+      }, WATCH_COALESCE_MS);
+    });
+    vaultWatcher.on("error", (e: any) => {
+      console.warn(`[vault] watcher error: ${e?.message ?? e}`);
+    });
+    console.log(`[vault] watching ${VAULT} for external edits`);
+  } catch (e: any) {
+    console.warn(`[vault] could not start watcher (${e?.message ?? e}) — falling back to ${SEARCH_CACHE_TTL_MS}ms TTL`);
+    vaultWatcher = null;
+  }
+}
+
+export function stopVaultWatcher(): void {
+  if (watchInvalidateTimer) { clearTimeout(watchInvalidateTimer); watchInvalidateTimer = null; }
+  if (vaultWatcher) { try { vaultWatcher.close(); } catch { /* tolerate */ } vaultWatcher = null; }
 }
 
 // Filename-only vault scan. Walks the vault tree but ONLY checks the .md
