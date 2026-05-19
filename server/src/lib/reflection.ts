@@ -16,6 +16,7 @@ import { listJobs, type Job } from "./jobs.js";
 import { writeVaultFile } from "./vault.js";
 import { enqueueVaultCommit } from "./commit-queue.js";
 import { llmGenerate } from "./llm.js";
+import { loadJobsInWindow, asJob } from "./job-store.js";
 
 const REFLECTION_DIR = "_neuroworks/reflections";
 
@@ -52,18 +53,33 @@ export type ReflectionResult = {
 let lastResult: ReflectionResult | null = null;
 let inFlight: Promise<ReflectionResult> | null = null;
 
-// Pull every job from the in-memory store that falls inside the window.
-// We can't reach across restarts (jobs.ts caps at 50 in memory), so the
-// scheduler runs once a day and captures whatever's still in memory PLUS
-// what the journal already wrote to the vault. Practical limit: a single
-// day's reflection sees only the jobs that didn't get evicted from the
-// RECENT cap. That's the right scope — heavy-traffic days the reflection
-// captures the latest representative sample, not every job.
+// Pull every job that falls inside the window.
+//
+// Sources:
+//   1. .neuroworks/jobs/<date>.jsonl — durable, survives restarts and
+//      the in-memory RECENT=50 eviction.
+//   2. listJobs() in-memory cap — still consulted so jobs that haven't
+//      flushed to disk yet (mid-run, or persisted just before this call)
+//      are caught. Dedupe by id.
+//
+// Disk takes precedence over memory if both report the same id (disk
+// reflects the FINAL status; in-memory may be stale for finished jobs).
 function collectJobsInWindow(windowStartMs: number, windowEndMs: number): Job[] {
-  return listJobs().filter(j => {
+  const seen = new Set<string>();
+  const out: Job[] = [];
+  for (const rec of loadJobsInWindow(windowStartMs, windowEndMs)) {
+    if (seen.has(rec.id)) continue;
+    seen.add(rec.id);
+    out.push(asJob(rec));
+  }
+  for (const j of listJobs()) {
+    if (seen.has(j.id)) continue;
     const t = j.startedAt ? new Date(j.startedAt).getTime() : 0;
-    return t >= windowStartMs && t <= windowEndMs;
-  });
+    if (t < windowStartMs || t >= windowEndMs) continue;
+    seen.add(j.id);
+    out.push(j);
+  }
+  return out;
 }
 
 function aggregate(jobs: Job[], windowStartMs: number, windowEndMs: number): DailyStats {

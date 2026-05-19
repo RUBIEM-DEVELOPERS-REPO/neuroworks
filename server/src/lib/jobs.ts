@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { journal } from "./journal.js";
 import { getActivePersona } from "./personas.js";
+import { persistJobRecord } from "./job-store.js";
 
 export type Job = {
   id: string;
@@ -60,6 +61,12 @@ export async function runJob<T>(j: Job, fn: (push: (msg: string) => void, progre
     // Mirror the job into the vault so every task NeuroWorks runs is in the
     // second brain. Don't await — never block the response on vault I/O.
     void journalJob(j);
+    // Append a slim JSONL record to .neuroworks/jobs/ so the nightly
+    // reflection still sees this job after the in-memory RECENT=50 cap
+    // evicts it or the server restarts. Synchronous + best-effort —
+    // appendFileSync is fast, and persistJobRecord swallows errors so a
+    // disk hiccup can't fail the response.
+    persistJobRecord(j);
   }
 }
 
