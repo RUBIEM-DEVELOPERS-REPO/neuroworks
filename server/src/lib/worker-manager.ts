@@ -97,10 +97,38 @@ export async function ensureWorker(opts: { waitForReady?: boolean } = {}): Promi
   for (const w of workers.values()) {
     if (!w.child.killed) return { url: w.url, spawned: false };
   }
-  // Maybe an external peer is already there.
+  // Maybe an external peer is already there (env-seeded via
+  // CLAWBOT_PEERS or registered at runtime).
   const peers = await pollPeers();
   const alive = peers.find(p => p.ok && p.ready);
   if (alive) return { url: alive.url, spawned: false };
+
+  // Race guard: probe BASE_PORT directly for a live secondary the
+  // user might have started manually (`pnpm secondary`) but that
+  // hasn't been registered as a peer yet. autodiscoverLocalPeers
+  // would catch this on the next 60s tick, but the boot-time
+  // auto-spawn fires at 5s — without this probe, we'd race the
+  // manual secondary and end up with two workers on the same port.
+  // The probe times out fast (1.5s) so unreachable ports don't stall
+  // the spawn we'd actually want to do.
+  try {
+    const probeUrl = `http://127.0.0.1:${BASE_PORT}`;
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 1500);
+    try {
+      const r = await fetch(`${probeUrl}/api/peers/self`, { signal: ctrl.signal });
+      if (r.ok) {
+        // A worker (manually started or surviving from a previous run)
+        // is already there. Register it so the primary discovers it
+        // properly, then return without spawning.
+        try { registerPeer(probeUrl, "registered", "discovered on BASE_PORT before spawn"); } catch { /* tolerate */ }
+        console.log(`  ⓦ skipping worker spawn — already alive at ${probeUrl}`);
+        return { url: probeUrl, spawned: false };
+      }
+    } finally {
+      clearTimeout(timer);
+    }
+  } catch { /* port silent or refused — spawn path runs */ }
 
   // Spawn the first worker on BASE_PORT, coalescing concurrent callers.
   const handle = await spawnOnPort(BASE_PORT);
