@@ -23,6 +23,66 @@ export type Primitive = {
   handler: (args: Record<string, any>) => Promise<any>;
 };
 
+// Per-root listing cache for fs.find_in. Many tasks in a row hit the
+// same root (Downloads, Desktop, etc.); re-walking 10k+ files on every
+// call is the dominant cost. Keyed on the (sorted-roots, depth) pair so
+// folder='all' (4 roots) shares cache entries with folder='downloads'.
+// Invalidates when either:
+//   (a) 30s pass since the cache entry was written, OR
+//   (b) the root directory's own mtime advances (catches new
+//       downloads / new files dropped on Desktop).
+// (b) is the more important trigger — TTL is just belt-and-suspenders.
+type FindCacheEntry = {
+  at: number;
+  rootMtimes: number[];
+  files: { path: string; name: string; ext: string; size: number; modified: string; folder: string }[];
+};
+const FIND_CACHE = new Map<string, FindCacheEntry>();
+const FIND_CACHE_TTL_MS = Number(process.env.CLAWBOT_FIND_CACHE_TTL_MS ?? "30000");
+const FIND_CACHE_MAX = 32;
+
+function findCacheKey(roots: string[], depth: number): string {
+  return [...roots].sort().join("|") + `@d=${depth}`;
+}
+
+function currentRootMtimes(roots: string[]): number[] {
+  const out: number[] = [];
+  for (const r of roots) {
+    try { out.push(statSync(r).mtimeMs); } catch { out.push(0); }
+  }
+  return out;
+}
+
+export function pickCachedListing(roots: string[], depth: number): FindCacheEntry["files"] | null {
+  const key = findCacheKey(roots, depth);
+  const hit = FIND_CACHE.get(key);
+  if (!hit) return null;
+  if (Date.now() - hit.at > FIND_CACHE_TTL_MS) { FIND_CACHE.delete(key); return null; }
+  const current = currentRootMtimes(roots);
+  // ANY root's mtime advanced → stale. We invalidate the WHOLE entry
+  // rather than partial-refresh because partial state across roots is a
+  // recipe for inconsistent results.
+  if (current.length !== hit.rootMtimes.length) { FIND_CACHE.delete(key); return null; }
+  for (let i = 0; i < current.length; i++) {
+    if (current[i] !== hit.rootMtimes[i]) { FIND_CACHE.delete(key); return null; }
+  }
+  return hit.files;
+}
+
+export function cacheListing(roots: string[], depth: number, files: FindCacheEntry["files"]): void {
+  if (FIND_CACHE.size >= FIND_CACHE_MAX) {
+    // Drop the oldest entry to bound memory if a wide range of roots
+    // got cached (unusual — most users stick to ~4 root combinations).
+    const oldest = [...FIND_CACHE.entries()].sort((a, b) => a[1].at - b[1].at)[0];
+    if (oldest) FIND_CACHE.delete(oldest[0]);
+  }
+  FIND_CACHE.set(findCacheKey(roots, depth), {
+    at: Date.now(),
+    rootMtimes: currentRootMtimes(roots),
+    files,
+  });
+}
+
 export const primitives: Primitive[] = [
   {
     name: "vault.search",
@@ -561,37 +621,53 @@ export const primitives: Primitive[] = [
       // multiple needle tokens all need to be present somewhere in the name.
       const needleTokens = needle.replace(/[-_\s]+/g, " ").split(" ").filter(Boolean);
       type Hit = { path: string; name: string; ext: string; size: number; modified: string; folder: string };
-      const hits: Hit[] = [];
-      function walk(dir: string, d: number) {
-        if (hits.length >= limit || d > depth) return;
-        let entries: any[] = [];
-        try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return; }
-        for (const e of entries) {
-          if (hits.length >= limit) return;
-          if (e.name.startsWith(".")) continue; // skip hidden / dotfiles
-          const full = join(dir, e.name);
-          if (e.isDirectory()) { walk(full, d + 1); continue; }
-          // Match: every needle token must appear in the basename when the
-          // basename's separators are normalised to spaces. So "AIIA Ref"
-          // matches "aiia-reference-letter.pdf", "AIIA_Reference.docx", etc.
-          const normalised = e.name.toLowerCase().replace(/[-_]+/g, " ");
-          if (!needleTokens.every(t => normalised.includes(t))) continue;
-          let st: any;
-          try { st = statSync(full); } catch { continue; }
-          if (!st.isFile()) continue;
-          hits.push({
-            path: full,
-            name: e.name,
-            ext: extname(e.name).toLowerCase(),
-            size: st.size,
-            modified: st.mtime.toISOString(),
-            folder: dir,
-          });
+      // Per-root listing cache. Many calls in a row hit the same root
+      // ("look in my downloads for X", then "ok now find Y", then "find
+      // Z") and re-walking Downloads (10k+ files for some users) on
+      // every call is the dominant cost. We cache the FULL file list
+      // per (root, depth) — needle filtering runs against the cached
+      // list, not the disk. The cached list expires when (a) 30s pass
+      // OR (b) the root directory's mtime advances past what we saw at
+      // cache time (catches a new download landing in the folder).
+      const cached = pickCachedListing(livingRoots, depth);
+      let allFiles: Hit[];
+      if (cached) {
+        allFiles = cached;
+      } else {
+        const collected: Hit[] = [];
+        function walk(dir: string, d: number) {
+          if (d > depth) return;
+          let entries: any[] = [];
+          try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return; }
+          for (const e of entries) {
+            if (e.name.startsWith(".")) continue; // skip hidden / dotfiles
+            const full = join(dir, e.name);
+            if (e.isDirectory()) { walk(full, d + 1); continue; }
+            let st: any;
+            try { st = statSync(full); } catch { continue; }
+            if (!st.isFile()) continue;
+            collected.push({
+              path: full,
+              name: e.name,
+              ext: extname(e.name).toLowerCase(),
+              size: st.size,
+              modified: st.mtime.toISOString(),
+              folder: dir,
+            });
+          }
         }
+        for (const r of livingRoots) walk(r, 1);
+        allFiles = collected;
+        cacheListing(livingRoots, depth, collected);
       }
-      for (const r of livingRoots) {
+      // Filter by needle tokens against the cached listing. Matching
+      // logic preserved verbatim: every token must appear in the
+      // basename with separators normalised to spaces.
+      const hits: Hit[] = [];
+      for (const h of allFiles) {
         if (hits.length >= limit) break;
-        walk(r, 1);
+        const normalised = h.name.toLowerCase().replace(/[-_]+/g, " ");
+        if (needleTokens.every(t => normalised.includes(t))) hits.push(h);
       }
       // Newest first — "the X I just downloaded" is the most likely match.
       hits.sort((a, b) => (a.modified < b.modified ? 1 : -1));
