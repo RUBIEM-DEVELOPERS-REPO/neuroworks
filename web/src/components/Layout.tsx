@@ -14,6 +14,7 @@ const primaryNav = [
 ];
 const secondaryNav = [
   { to: "/templates", label: "Templates", icon: "◫" },
+  { to: "/skills", label: "Skills", icon: "◇" },
   { to: "/knowledge", label: "Knowledge", icon: "◈" },
   { to: "/personas", label: "Personas", icon: "◐" },
   { to: "/settings", label: "Settings", icon: "⚒" },
