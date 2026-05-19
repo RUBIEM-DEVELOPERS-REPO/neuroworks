@@ -18,6 +18,7 @@ import { loadPersonas } from "./lib/personas.js";
 import { ensureAllPersonasHaveTemplates } from "./lib/persona-templates.js";
 import { startReflectionScheduler, stopReflectionScheduler } from "./lib/reflection.js";
 import { reflectionRouter } from "./routes/reflection.js";
+import { originGuard } from "./lib/origin-guard.js";
 
 const app = express();
 // JSON body, but also accept text/plain (navigator.sendBeacon defaults to
@@ -30,6 +31,12 @@ app.use((_req, res, next) => {
   next();
 });
 app.options("*", (_req, res) => res.sendStatus(204));
+// Host + Origin allow-list check. Defends against DNS rebinding (Host
+// header carries the attacker's domain, not 127.0.0.1:7471) and cross-
+// origin browser POSTs (Origin header reveals the source page). Loopback
+// bind alone isn't enough — text/plain JSON POSTs skip CORS preflight.
+// See origin-guard.ts for the threat model.
+app.use(originGuard);
 
 app.get("/api/health", (_req, res) => res.json({
   ok: true,
