@@ -21,7 +21,7 @@
 // a wave of sub-agent writes, short enough that the user doesn't wait for
 // their note to appear in the vault.
 
-import { commitAndPush } from "./vault.js";
+import { commitAndPush, vaultAheadBy } from "./vault.js";
 
 const DEBOUNCE_MS = Number(process.env.CLAWBOT_COMMIT_DEBOUNCE_MS ?? "4000");
 
@@ -118,8 +118,31 @@ async function flushNow(): Promise<CommitResult | null> {
 }
 
 // Observability — surfaced by /api/status so the Admin page can show
-// "last commit 12s ago · 14 coalesced writes saved".
+// "last commit 12s ago · 14 coalesced writes saved". The aheadBy field
+// (when present) tells the user how many local commits have NOT reached
+// origin — important when commitAndPush silently timed out and the
+// commit is durable-locally but invisible to anyone else syncing the
+// vault repo.
+//
+// Cached at ~5s freshness so consumers polling /api/status don't
+// trigger a git status call on every refresh.
+let aheadByCache: { at: number; value: number | null } | null = null;
+const AHEAD_BY_TTL_MS = 5_000;
+
+export async function refreshAheadBy(): Promise<number | null> {
+  const v = await vaultAheadBy();
+  aheadByCache = { at: Date.now(), value: v };
+  return v;
+}
+
 export function vaultCommitStats() {
+  // Refresh aheadBy in the background if stale — first call returns
+  // null/undefined; subsequent calls within 5s see the fresh value.
+  // This avoids making the stats endpoint async (and rippling out to
+  // every other caller).
+  if (!aheadByCache || Date.now() - aheadByCache.at > AHEAD_BY_TTL_MS) {
+    void refreshAheadBy().catch(() => { /* tolerate */ });
+  }
   return {
     lastCommit,
     totalCommits,
@@ -127,6 +150,8 @@ export function vaultCommitStats() {
     pendingWrites: pending?.resolvers.length ?? 0,
     inFlight: inFlight !== null,
     debounceMs: DEBOUNCE_MS,
+    aheadBy: aheadByCache?.value ?? null,
+    aheadByAt: aheadByCache?.at ?? null,
   };
 }
 

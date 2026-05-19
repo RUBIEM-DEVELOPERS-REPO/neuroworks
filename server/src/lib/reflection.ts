@@ -312,15 +312,35 @@ ${stats.retries.length > 0 ? `### Retried tasks\n${stats.retries.map(r => `- ${r
 
 Write the reflection. Honest, terse, numerically grounded.`;
 
-  try {
-    const meta = await import("./llm.js").then(m => m.llmGenerateWithMeta(prompt, sys, { profile: "synthesis", complexity: "high" }));
-    return { text: meta.text.trim(), modelUsed: meta.model };
-  } catch (e: any) {
-    // Fallback: produce a stat-only reflection so the file still lands.
-    return {
-      text: `_LLM reflection failed (\`${String(e?.message ?? e).slice(0, 100)}\`). The raw stats above are still valid — review them manually._\n\n## What to try next\n- Investigate the LLM error above and re-run \`/api/reflection/run\` once it's resolved.`,
-    };
+  // Single retry before falling back. The reflection LLM call is a
+  // big complex synthesis (large context, complexity:"high") that goes
+  // through OpenRouter when configured — a transient 429 or network
+  // blip would otherwise lose the whole day's reflection. One retry
+  // with a 2s backoff catches the common transient failures (TLS
+  // hiccup, rate-limit window) without dragging the run out if the
+  // underlying problem is real (auth, model not pulled).
+  let lastErr: any;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const meta = await import("./llm.js").then(m => m.llmGenerateWithMeta(prompt, sys, { profile: "synthesis", complexity: "high" }));
+      if (attempt > 0) {
+        console.log(`[reflection] LLM call succeeded on retry`);
+      }
+      return { text: meta.text.trim(), modelUsed: meta.model };
+    } catch (e: any) {
+      lastErr = e;
+      if (attempt === 0) {
+        const msg = String(e?.message ?? e).slice(0, 100);
+        console.warn(`[reflection] LLM call failed (${msg}) — retrying once in 2s`);
+        await new Promise(r => setTimeout(r, 2_000));
+        continue;
+      }
+    }
   }
+  // Fallback: produce a stat-only reflection so the file still lands.
+  return {
+    text: `_LLM reflection failed after retry (\`${String(lastErr?.message ?? lastErr).slice(0, 100)}\`). The raw stats above are still valid — review them manually._\n\n## What to try next\n- Investigate the LLM error above and re-run \`/api/reflection/run\` once it's resolved.`,
+  };
 }
 
 function renderMarkdown(result: { stats: DailyStats; text: string; generatedAt: string; modelUsed?: string }): string {

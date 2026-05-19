@@ -135,6 +135,19 @@ export function importBinaryIntoVault(rel: string, sourceAbsPath: string): { rel
   return { rel, abs: full, size: st.size };
 }
 
+// Cheap "how many local commits haven't reached origin" probe. Useful
+// when commitAndPush silently timed out — the local commit is durable
+// but the user has no visual signal that origin is behind. Surfaced
+// via vaultCommitStats() → /api/status. Returns null when status
+// itself fails (e.g. vault is not a git repo, or a transient lock).
+export async function vaultAheadBy(): Promise<number | null> {
+  try {
+    const git = simpleGit(VAULT);
+    const status = await git.status();
+    return typeof status.ahead === "number" ? status.ahead : null;
+  } catch { return null; }
+}
+
 // Push the current HEAD without committing. Used to retry a failed push when
 // the prior commitAndPush left commits locally but couldn't reach origin (the
 // most common case: large pack history times out the first push, but a retry

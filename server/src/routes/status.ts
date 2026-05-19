@@ -6,6 +6,8 @@ import { llmHealth } from "../lib/llm.js";
 import { latestRun } from "../lib/github.js";
 import { vaultCommitStats } from "../lib/commit-queue.js";
 import { pushOnly, clearStaleVaultLock } from "../lib/vault.js";
+import { localInflightCount } from "../lib/peers.js";
+import { jobStoreStats } from "../lib/job-store.js";
 
 export const statusRouter = Router();
 
@@ -59,6 +61,16 @@ statusRouter.post("/vault/clear-lock", (req, res) => {
   res.json(clearStaleVaultLock());
 });
 
+// Unified status endpoint. The Admin / Dashboard pages previously had
+// to call both /api/health (for identity + capability flags) AND
+// /api/status (for runtime state) to get a complete picture. /health is
+// preserved for peer probes (fast, no external calls), but /status now
+// returns everything /health does plus the runtime detail — so the web
+// UI can hit a single endpoint.
+//
+// Sub-routes (/status/llm, /status/vault, etc.) stay focused for finer
+// queries; the catch-all keeps the convenience-flavoured "everything"
+// view callers expect.
 statusRouter.get("/", async (_req, res) => {
   const metaPath = join(config.vaultPath, "_clawbot", "_meta", "last-run.json");
   let lastDigest: any = null;
@@ -85,6 +97,20 @@ statusRouter.get("/", async (_req, res) => {
     lastWorkflow = { error: `degraded: missing env ${config.missing.join(", ")}` };
   }
   res.json({
+    // Identity + capability — same shape /api/health returns. Mirrored
+    // here so the UI doesn't need a second round-trip just for the
+    // version/openrouter flags.
+    name: config.name,
+    role: config.role,
+    version: "0.1.0",
+    model: config.ollamaModel,
+    openrouter: config.openrouterEnabled
+      ? { enabled: true, model: config.openrouterModel }
+      : { enabled: false },
+    port: config.port,
+    inflightJobs: localInflightCount(),
+    peers: config.peers,
+    // Runtime state — what /status carried previously.
     ready: config.ready,
     missing: config.missing,
     vaultPath: config.vaultPath,
@@ -94,5 +120,9 @@ statusRouter.get("/", async (_req, res) => {
     lastWorkflow,
     ollama,
     llm,
+    // Operational stats added in this consolidation pass — saves the
+    // Admin page extra calls to /status/vault + a future /jobs/store.
+    vaultCommits: vaultCommitStats(),
+    jobStore: jobStoreStats(),
   });
 });
