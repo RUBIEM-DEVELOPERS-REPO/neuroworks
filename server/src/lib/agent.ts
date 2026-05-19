@@ -25,7 +25,7 @@ function parseIntentFromTask(task: string): string | undefined {
 //   2. Thread-context enrichment wraps as "Current request (...): <text>".
 //   3. Plain enriched tasks just have the persona prefix and trailing
 //      Interpretation: / Deliverable shape: blocks to strip.
-function parseUserRequestFromTask(task: string): string {
+export function parseUserRequestFromTask(task: string): string {
   // 1. Template preamble + Topic: suffix. The web UI splices the user's typed
   //    text in via "${activeTemplate.task}\n\nTopic: ${topic}" — without this
   //    extraction the planner sees the full template prose as the topic
@@ -506,7 +506,7 @@ const TRIAGE_MAX_CHARS = 200;
 // the planner. The vault-hits check downstream still vetoes a direct path
 // when the user's notes actually cover the topic.
 const TOOL_CUES = /\b(?:my\s+(?:vault|notes?|brain|second\s+brain|repos?|files?|docs?|inbox)|the\s+(?:vault|repo|repository|inbox)|in\s+(?:my|the)\s+(?:vault|notes?|brain|repo|inbox|files?|docs?)|find|search|look\s+(?:up|for|inside)|browse|fetch|scrape|read\s+\S+\.(?:md|pdf|docx|xlsx|txt|json|yaml|yml|csv)|github\.com|https?:\/\/|[a-zA-Z]:\\|\/[\w-]+\/[\w-]+|\.md\b|\.pdf\b|\.docx\b)/i;
-function looksLikeDirectAnswer(task: string): boolean {
+export function looksLikeDirectAnswer(task: string): boolean {
   const t = task.trim();
   if (t.length === 0 || t.length > TRIAGE_MAX_CHARS) return false;
   const lower = t.toLowerCase();
@@ -538,7 +538,7 @@ function looksLikeDirectAnswer(task: string): boolean {
 // greetings, pure arithmetic, single-word affirmations. These bypass the
 // "if direct, try heuristicPlan first" cascade rule — we send them straight
 // to world knowledge without checking for `aboutMatch` etc.
-function isTriviallyDirectAnswer(task: string): boolean {
+export function isTriviallyDirectAnswer(task: string): boolean {
   const t = task.trim();
   if (!t) return false;
   const lower = t.toLowerCase();
@@ -1013,7 +1013,7 @@ function coerceReview(r: any): PeerReview {
 
 // Pulled-from-task search query: strip filler so the vault search actually
 // hits the right notes. "give me a summary on neuroworks" → "neuroworks".
-function extractTopic(task: string): string {
+export function extractTopic(task: string): string {
   const stripped = task
     .replace(/^\s*(?:please\s+)?(?:can\s+you\s+|could\s+you\s+|kindly\s+)?/i, "")
     .replace(/^(?:give\s+me\s+|tell\s+me\s+|show\s+me\s+|share\s+|provide\s+)/i, "")
@@ -1025,6 +1025,12 @@ function extractTopic(task: string): string {
     // hits — letting the direct-answer path hallucinate the meaning of
     // proper nouns it doesn't know. Article (a/an/the/some/new) optional.
     .replace(/^(?:draft|write|compose|create|prepare|produce|generate|build|put\s+together|make)\s+(?:a\s+|an\s+|the\s+|some\s+|new\s+)?(?:short\s+|quick\s+|brief\s+|long\s+|formal\s+|professional\s+)?/i, "")
+    // After the verb strips above run, a leading noise preposition often
+    // remains: "tell me " (stripped) leaves "about neuroworks"; "give me
+    // info " leaves "on neuroworks"; "summary on neuroworks" leaves "on
+    // neuroworks" when the summary strip narrowly misses. Drop the bare
+    // preposition so the topic is the actual subject.
+    .replace(/^(?:about|regarding|concerning|on|of)\s+/i, "")
     .replace(/[?!.]+$/, "")
     .trim();
   return stripped || task.trim();
@@ -1039,7 +1045,7 @@ function extractTopic(task: string): string {
 //   • "tell me about X" / "explain X" / "what is X" → research.deep
 //   • Bare vault-path mention ("read 2-Permanent/x.md") → vault.read
 //   • "search the web for X" → research.deep
-function heuristicPlan(task: string): Plan | null {
+export function heuristicPlan(task: string): Plan | null {
   const t = task.trim();
   if (!t) return null;
 
@@ -1058,7 +1064,11 @@ function heuristicPlan(task: string): Plan | null {
   //   <verb> <target> (in)?to my? vault|knowledge|second brain|neuroworks|...
   //   <verb> <target> (in)?to 0-Inbox|1-Literature|1-projects|2-Permanent
   const importMatch =
-    t.match(/^\s*(?:please\s+|could\s+you\s+|can\s+you\s+)?(?:move|copy|import|save|file|add|put|drop|stash|archive)\s+(.+?)\s+(?:(?:in)?to|into|to|in)\s+(?:my\s+|the\s+)?(?:vault|second\s+brain|knowledge(?:\s+base)?|neuroworks|obsidian|brain|inbox|0-inbox|1-literature|1-projects|2-permanent)\s*[.?!]?\s*$/i);
+    // Optional trailing modifier handles "...to my vault and delete the
+    // original" / "...to neuroworks and remove from downloads". The
+    // removeOriginal flag below detects that modifier on the FULL task,
+    // so the regex only needs to TOLERATE the trailing phrase.
+    t.match(/^\s*(?:please\s+|could\s+you\s+|can\s+you\s+)?(?:move|copy|import|save|file|add|put|drop|stash|archive)\s+(.+?)\s+(?:(?:in)?to|into|to|in)\s+(?:my\s+|the\s+)?(?:vault|second\s+brain|knowledge(?:\s+base)?|neuroworks|obsidian|brain|inbox|0-inbox|1-literature|1-projects|2-permanent)(?:\s+(?:and\s+(?:then\s+)?|then\s+)?(?:delete|remove)\s+(?:the\s+)?(?:original|originals|source|copy|file|it)?(?:\s+from\s+\w+)?)?\s*[.?!]?\s*$/i);
   if (importMatch) {
     // Strip leading articles AND the "and delete/remove" intent suffix so the
     // captured target is just the filename. E.g. "and delete tax-return.pdf"
@@ -1113,6 +1123,23 @@ function heuristicPlan(task: string): Plan | null {
         waves: [[0], [1]],
       };
     }
+  }
+
+  // Vault path read MUST match before the local-doc heuristic below.
+  // "read 0-Inbox/note.md" superficially looks like docPhraseMatch's
+  // ".md path" branch, but docPhraseMatch routes to fs.find_in (which
+  // sweeps Downloads/Desktop/Documents/Inbox, NOT the vault) — the file
+  // would never be found. The slash-required regex prevents this from
+  // catching bare filenames ("read foo.md") that genuinely need the
+  // local-doc sweep.
+  const vaultPathMatch = t.match(/^\s*(?:read|show(?:\s+me)?|open|cat)\s+([\w._-]+(?:[/\\][\w._-]+)+\.md)\s*$/i);
+  if (vaultPathMatch) {
+    const path = vaultPathMatch[1].replace(/\\/g, "/");
+    return {
+      steps: [{ tool: "vault.read", args: { path }, rationale: "direct vault read — slashed path resolves inside the vault", label: humanStepLabel("vault.read", { path }) }],
+      summary: `Read ${path} from your vault`,
+      waves: [[0]],
+    };
   }
 
   // Local-doc lookup WITHOUT a folder hint: "what's in this doc X" /
