@@ -512,7 +512,9 @@ function looksLikeDirectAnswer(task: string): boolean {
   const lower = t.toLowerCase();
   // Tool-cue blocklist applies to every direct-answer pattern below.
   if (TOOL_CUES.test(t)) return false;
-  if (/^(?:hi|hello|hey|yo|sup|good\s+(?:morning|afternoon|evening)|thanks?|thank\s+you|bye|goodbye)\b[\s!,.?]*$/i.test(lower)) return true;
+  if (/^(?:hi|hello|hey|yo|sup|good\s+(?:morning|afternoon|evening)|thanks?|thank\s+you|bye|goodbye|cool|ok|okay|got\s+it|nice|sweet|sounds\s+good)\b[\s!,.?]*$/i.test(lower)) return true;
+  // Single-word affirmations / non-questions.
+  if (/^\s*(?:yes|yeah|yep|sure|fine|no|nope|nah|maybe|idk)[\s!.?]*$/i.test(lower)) return true;
   if (/^[\d\s+\-*/().,]+\??$/.test(lower) && /\d/.test(lower)) return true; // pure arithmetic
   // World-knowledge question shapes — short prompts with no tool cues.
   // "what is X" / "what are X" / "what's X" / "whats X" / "what does X mean"
@@ -528,6 +530,25 @@ function looksLikeDirectAnswer(task: string): boolean {
   if (/^\s*(?:can|could)\s+you\s+(?:help|explain|describe|tell|clarify|elaborate|summari[sz]e|recommend|suggest)\b/i.test(t) && t.length <= 140) return true;
   // Pure "compare X and Y" / "X vs Y" reasoning prompts
   if (/^\s*(?:compare|contrast)\s+\S+\s+(?:and|vs\.?|versus|with|to)\s+\S/i.test(t) && t.length <= 160) return true;
+  return false;
+}
+
+// True when the prompt is the kind of trivial input where world knowledge
+// is the right tier and NEITHER the vault NOR web research would help:
+// greetings, pure arithmetic, single-word affirmations. These bypass the
+// "if direct, try heuristicPlan first" cascade rule — we send them straight
+// to world knowledge without checking for `aboutMatch` etc.
+function isTriviallyDirectAnswer(task: string): boolean {
+  const t = task.trim();
+  if (!t) return false;
+  const lower = t.toLowerCase();
+  // Greetings, thanks, farewells — never benefit from vault/web.
+  if (/^(?:hi|hello|hey|yo|sup|good\s+(?:morning|afternoon|evening)|thanks?|thank\s+you|bye|goodbye|cool|ok|okay|got\s+it|nice|sweet|sounds\s+good)\b[\s!,.?]*$/i.test(lower)) return true;
+  // Arithmetic-only (with or without "what is" prefix).
+  if (/^[\d\s+\-*/().,]+\??$/.test(lower) && /\d/.test(lower)) return true;
+  if (/^\s*what(?:'?s|\s+is)\s+[\d\s+\-*/().,]+\??$/i.test(lower)) return true;
+  // Single-word affirmations / non-questions.
+  if (/^\s*(?:yes|yeah|yep|sure|fine|no|nope|nah|maybe|idk)[\s!.?]*$/i.test(lower)) return true;
   return false;
 }
 
@@ -599,13 +620,60 @@ export async function planAndExecute(
         : Promise.resolve([] as { path: string; line: number; preview: string }[]),
     ]);
     let direct = llmDirect;
-    if (direct && vaultHits.length > 0) {
-      push(`Found ${vaultHits.length} note${vaultHits.length === 1 ? "" : "s"} on "${topic}" in your second brain — using those instead of answering from world knowledge.`);
+    // Vault override: if filename scan hit AND the topic is non-trivial,
+    // we'd rather use the user's own notes than world knowledge. Trivial
+    // inputs (greetings, arithmetic) bypass this — "hi" matching a note
+    // called "hi-everyone.md" shouldn't promote a greeting to vault search.
+    if (direct && vaultHits.length > 0 && !isTriviallyDirectAnswer(bareTask) && topic && topic.length >= 3) {
+      push(`Tier 2 — your second brain: found ${vaultHits.length} note${vaultHits.length === 1 ? "" : "s"} on "${topic}". Pulling those in instead of going to general knowledge.`);
       direct = false;
     }
+    // CONTEXT CASCADE: even when triage thinks "direct answer is fine", we
+    // still defer to heuristicPlan if it recognises a shape that includes
+    // tools. The cascade we want is:
+    //   1. chat input (already in `task` via buildEnrichedTask)
+    //   2. vault (heuristicPlan's vault/research.deep paths)
+    //   3. web (research.deep / web.search)
+    //   4. world knowledge (this direct-answer path) — final fallback only
+    // For "what is hanta virus" with empty vault, that means research.deep
+    // (vault + web) runs BEFORE we settle for the model's training data.
+    // World knowledge only kicks in when no heuristic shape matches AND
+    // the question is conversational / definitional with no topic worth
+    // researching.
+    //
+    // EXCEPTION: truly trivial inputs (greetings, arithmetic, "yes"/"no")
+    // never benefit from vault or web — bypass the cascade and answer
+    // directly. Without this guard, "what is 2+2" would needlessly route
+    // to research.deep.
+    if (direct && !isTriviallyDirectAnswer(bareTask)) {
+      const speculativeHeuristic = heuristicPlan(bareTask);
+      const wantsResearch = speculativeHeuristic && speculativeHeuristic.steps.length > 0
+        && speculativeHeuristic.steps.some(s => s.tool === "research.deep" || s.tool === "web.search" || s.tool === "vault.search");
+      if (wantsResearch) {
+        push(`Tier 2/3 — checking your second brain first, then the web if needed (instead of guessing from general knowledge).`);
+        direct = false;
+      }
+    }
     if (direct) {
-      push(`Answering directly — no tools needed for this one.`);
+      // Tier 4 — final fallback. World knowledge only. We ALSO race a
+      // capped vault content search in parallel: if the second brain
+      // actually has matter on this topic by the time the LLM finishes,
+      // we'll have grounded the answer; if not, we use world knowledge
+      // cleanly. 1.5s cap so a big vault never blocks a trivial answer.
+      push(`Tier 4 — general knowledge. (Your second brain has no notes on this; no web search needed for the shape.)`);
       onProgress?.({ phase: "synthesizing" });
+      const vaultContentRace: Promise<{ path: string; line: number; preview: string }[]> = (topic && topic.length >= 2)
+        ? Promise.race([
+            new Promise<any[]>((resolve) => {
+              // Lazy-import the slow content scan only when we actually need
+              // it — keeps the hot-path triage scan fast.
+              import("./vault.js").then(({ searchVault }) => {
+                try { resolve(searchVault(topic, 3)); } catch { resolve([]); }
+              }).catch(() => resolve([]));
+            }),
+            new Promise<any[]>(resolve => setTimeout(() => resolve([]), 1500)),
+          ])
+        : Promise.resolve([]);
       const POLISHED_DIRECT = `You're the customer's employee for this task — deliver the output they actually asked for, not a generic chatbot reply.
 
 If the task block includes a "Deliverable shape:" line, follow THAT shape exactly — it's authoritative. Otherwise: answer concisely as a professional document (40–180 words for typical answers).
@@ -614,6 +682,17 @@ Rules:
 - Complete sentences. No chatbot tics ("Sure!", "Great question", trailing summaries).
 - Markdown headings welcome when structure helps; bullets only for genuinely discrete items.
 - No citation markers like [N] or [vault:...] — there are no numbered sources on this path.
+
+**ANTI-HALLUCINATION RULES (load-bearing):**
+- This path runs WITHOUT tool calls — you have ONLY your training knowledge.
+- If the task names a specific acronym, proper noun, organisation, person, project, or system you don't reliably recognise — STOP. Don't guess what it stands for. Don't invent industry-standard interpretations.
+- Instead, produce a SHORT response (40-100 words) that:
+  1. Says plainly which terms you don't recognise from this task ("I don't have specific knowledge of 'AIIA' in this context")
+  2. Asks 2-4 specific questions that would unlock the real answer
+  3. Optionally offers to search the user's vault or PC for context (vault.search / fs.find_in) if they want
+- "Standard industry documentation", "typical industry practice", "generally speaking", "Association of X Y Z" for an unfamiliar acronym — these are red-flag phrases. If you find yourself reaching for them, you're filling space with invented authority. Stop and ask.
+- A correct "I don't know X — could you tell me Y?" beats a plausible-looking fabrication every time.
+
 - If you had to fill a gap the customer didn't specify (assumed recipient, tone, scope, etc.), end with a single italic line: "_Assumed: <one-line on what you assumed>_". Skip this line when nothing was assumed.`;
       const sys = (opts.personaSystemSuffix ? opts.personaSystemSuffix + "\n\n" : "") + POLISHED_DIRECT;
       try {
@@ -625,12 +704,22 @@ Rules:
         // when they'd rather have the larger model's prose quality. The
         // maxTokens cap of 384 stops generation comfortably past the target.
         const useFastDirect = process.env.CLAWBOT_FAST_DIRECT_ANSWER !== "0";
-        const meta = await ollamaGenerateWithMeta(task, sys, {
-          profile: useFastDirect ? "triage" : "synthesis",
-          maxTokens: 384,
-          onToken: (_chunk, accumulated) => onProgress?.({ partialAnswer: accumulated }),
-        });
-        const direct: Plan = { steps: [], summary: "Direct answer (no tools needed).", waves: [] };
+        const [meta, lateVaultHits] = await Promise.all([
+          ollamaGenerateWithMeta(task, sys, {
+            profile: useFastDirect ? "triage" : "synthesis",
+            maxTokens: 384,
+            onToken: (_chunk, accumulated) => onProgress?.({ partialAnswer: accumulated }),
+          }),
+          vaultContentRace,
+        ]);
+        // If the late vault search found something AFTER the model already
+        // answered (which usually means the answer is world-knowledge-only),
+        // flag it for the customer so they know there's vault context they
+        // could promote next time.
+        if (lateVaultHits.length > 0) {
+          push(`Note: your second brain has ${lateVaultHits.length} note${lateVaultHits.length === 1 ? "" : "s"} that mention this topic (e.g. ${lateVaultHits[0].path}) — re-ask if you want me to use those instead of general knowledge.`);
+        }
+        const direct: Plan = { steps: [], summary: "Direct answer (general knowledge — no vault notes, no web search).", waves: [] };
         return { task, plan: direct, runs: [], answer: meta.text.trim(), hadWrites: false };
       } catch (e: any) {
         push(`Direct answer didn't land cleanly (${String(e?.message ?? e).slice(0, 80)}) — switching to the planner.`);
@@ -649,7 +738,20 @@ Rules:
   onProgress?.({ phase: "planning" });
   let p = heuristicPlan(bareTask) ?? { steps: [], summary: undefined, waves: [] };
   if (p.steps.length > 0) {
-    push(`Recognised the shape — going straight to the right tool (${p.steps.length} step${p.steps.length === 1 ? "" : "s"}).`);
+    // Customer-facing context-tier badge based on what the plan touches.
+    // Helps the customer see "this answer drew on your vault" vs "this
+    // pulled from the web" vs "this just used a single tool" at a glance.
+    const tools = new Set(p.steps.map(s => s.tool));
+    const hitsVault = ["vault.search", "vault.read", "vault.scan_docs"].some(t => tools.has(t));
+    const hitsWeb = ["research.deep", "research.multiperspective", "web.search", "web.fetch", "web.scrape", "web.firecrawl"].some(t => tools.has(t));
+    const hitsLocal = ["fs.find_in", "fs.read_external", "fs.list_external"].some(t => tools.has(t));
+    let tier = "Tier 1 — chat context";
+    if (hitsVault && hitsWeb) tier = "Tier 2+3 — your second brain + the web";
+    else if (hitsVault) tier = "Tier 2 — your second brain";
+    else if (hitsWeb) tier = "Tier 3 — the web";
+    else if (hitsLocal) tier = "Tier 2 — your local files";
+    else tier = "Direct tool use";
+    push(`Recognised the shape — ${tier}, ${p.steps.length} step${p.steps.length === 1 ? "" : "s"}.`);
   } else {
     push(`Thinking about the best approach…`);
     p = await plan(task, opts.personaSystemSuffix, push);
@@ -657,8 +759,9 @@ Rules:
   if (p.steps.length === 0) {
     // Vault-first fallback uses bareTask so extractTopic doesn't fold the
     // persona prefix into the research query (root cause of the 5-minute
-    // research.deep run measured in the wild).
-    push(`Couldn't draft a tight plan in time — falling back to a vault + web search.`);
+    // research.deep run measured in the wild). This IS the default cascade:
+    // vault search inside research.deep, then web if the vault is thin.
+    push(`Couldn't draft a tight plan in time — falling back to the standard cascade: your second brain first, then the web.`);
     p = defaultVaultPlan(bareTask);
   }
   push(`Plan ready: ${p.steps.length} step${p.steps.length === 1 ? "" : "s"}${p.summary ? ` — ${p.summary}` : ""}.`);
@@ -916,6 +1019,12 @@ function extractTopic(task: string): string {
     .replace(/^(?:give\s+me\s+|tell\s+me\s+|show\s+me\s+|share\s+|provide\s+)/i, "")
     .replace(/^(?:a\s+|the\s+|an\s+)?(?:summary|overview|recap|tldr|brief|update|status|rundown)\s+(?:on|of|about|for|regarding)\s+/i, "")
     .replace(/^(?:summari[sz]e|recap|brief\s+me\s+on|tell\s+me\s+about|what(?:'?s|\s+is)\s+(?:up\s+with\s+|going\s+on\s+with\s+)?|what\s+do\s+(?:we|i|you)\s+know\s+about)\s+/i, "")
+    // Drafting verbs: "draft an AIIA Reference Letter" → "AIIA Reference
+    // Letter". Without this strip, the triage vault check searches for the
+    // verb-prefixed phrase ("draft aiia reference letter") and gets zero
+    // hits — letting the direct-answer path hallucinate the meaning of
+    // proper nouns it doesn't know. Article (a/an/the/some/new) optional.
+    .replace(/^(?:draft|write|compose|create|prepare|produce|generate|build|put\s+together|make)\s+(?:a\s+|an\s+|the\s+|some\s+|new\s+)?(?:short\s+|quick\s+|brief\s+|long\s+|formal\s+|professional\s+)?/i, "")
     .replace(/[?!.]+$/, "")
     .trim();
   return stripped || task.trim();
@@ -933,6 +1042,78 @@ function extractTopic(task: string): string {
 function heuristicPlan(task: string): Plan | null {
   const t = task.trim();
   if (!t) return null;
+
+  // Import-to-vault: "move/copy/import/save/file/add X to my vault" /
+  // "save X to my knowledge" / "put X in neuroworks". Chains fs.find_in
+  // (to resolve a bare filename across user folders) → fs.import_to_vault
+  // (copy the binary + write a markdown sidecar so it shows up in the
+  // knowledge view). MUST match before the read-only doc heuristic below,
+  // because "save X to my vault" superficially looks like a read request.
+  //
+  // We detect the "remove original" intent from the verb: "move" with
+  // "and delete" / "and remove from" implies removeOriginal=true. Bare
+  // "move" stays copy-semantics — the user typically wants a backup, not
+  // an evacuation.
+  // Matches either:
+  //   <verb> <target> (in)?to my? vault|knowledge|second brain|neuroworks|...
+  //   <verb> <target> (in)?to 0-Inbox|1-Literature|1-projects|2-Permanent
+  const importMatch =
+    t.match(/^\s*(?:please\s+|could\s+you\s+|can\s+you\s+)?(?:move|copy|import|save|file|add|put|drop|stash|archive)\s+(.+?)\s+(?:(?:in)?to|into|to|in)\s+(?:my\s+|the\s+)?(?:vault|second\s+brain|knowledge(?:\s+base)?|neuroworks|obsidian|brain|inbox|0-inbox|1-literature|1-projects|2-permanent)\s*[.?!]?\s*$/i);
+  if (importMatch) {
+    // Strip leading articles AND the "and delete/remove" intent suffix so the
+    // captured target is just the filename. E.g. "and delete tax-return.pdf"
+    // → "tax-return.pdf" (the remove flag is detected separately on the full t).
+    const target = importMatch[1].trim()
+      .replace(/^(?:and\s+(?:then\s+)?(?:delete|remove)\s+)/i, "")
+      .replace(/^(?:then\s+(?:delete|remove)\s+)/i, "")
+      .replace(/^(?:the\s+|this\s+|that\s+|a\s+|an\s+)/i, "")
+      .replace(/[.?!]+$/, "")
+      .trim();
+    // Whole-folder imports aren't supported by fs.import_to_vault (it imports
+    // one file at a time). If the user asked for a folder, fall through to
+    // the planner so it can build a multi-step plan.
+    const looksLikeFolder = /^(?:downloads?|desktop|documents?|docs|all\s+(?:my\s+)?(?:pdfs?|docs?|files?))$/i.test(target);
+    if (!looksLikeFolder && target.length >= 2 && target.length <= 200) {
+      // Heuristic for removal: explicit "move ... and delete/remove" — or
+      // a literal "move ... to my vault and remove from <folder>".
+      const removeOriginal = /\b(?:and\s+(?:delete|remove)|then\s+(?:delete|remove)|move\s+and\s+delete)\b/i.test(t);
+      // If the target ALREADY looks like an absolute path, skip the find
+      // step — go straight to import.
+      const isAbsolute = /^[a-zA-Z]:[\\/]/.test(target) || target.startsWith("/");
+      if (isAbsolute) {
+        return {
+          steps: [
+            {
+              tool: "fs.import_to_vault",
+              args: { path: target, vaultFolder: "0-Inbox", removeOriginal },
+              rationale: "absolute-path import — copy into vault + write sidecar",
+              label: humanStepLabel("fs.import_to_vault", { path: target, vaultFolder: "0-Inbox" }),
+            },
+          ],
+          summary: `Import ${target.split(/[\\/]/).pop() ?? target} into your second brain`,
+          waves: [[0]],
+        };
+      }
+      return {
+        steps: [
+          {
+            tool: "fs.find_in",
+            args: { folder: "all", name: target, limit: 5 },
+            rationale: "resolve the named file across Downloads + Desktop + Documents + Inbox before importing",
+            label: humanStepLabel("fs.find_in", { folder: "all", name: target }),
+          },
+          {
+            tool: "fs.import_to_vault",
+            args: { path: "$step_0.matches.0.path", vaultFolder: "0-Inbox", removeOriginal },
+            rationale: "copy the top match into the vault and write a markdown sidecar so it shows up in NeuroWorks Knowledge",
+            label: humanStepLabel("fs.import_to_vault", { path: target, vaultFolder: "0-Inbox" }),
+          },
+        ],
+        summary: `Find "${target}" on your PC and ${removeOriginal ? "move" : "copy"} it into your second brain`,
+        waves: [[0], [1]],
+      };
+    }
+  }
 
   // Local-doc lookup WITHOUT a folder hint: "what's in this doc X" /
   // "summarise this pdf X" / "read this file X" / "open X.pdf". The customer
@@ -1114,22 +1295,44 @@ function heuristicPlan(task: string): Plan | null {
     }
   }
 
-  // "draft / write / compose / create a [doc type] for/about X" — direct
-  // synthesis without research. The planner usually does this via a single
-  // ollama.generate step; we skip its decision time. Doc type captured so
-  // the synthesiser can apply the right template (email / brief / memo / etc).
-  const draftMatch = t.match(/^\s*(?:draft|write|compose|create|prepare)\s+(?:a\s+|an\s+|the\s+|some\s+)?(.+?)\s*$/i);
+  // "draft / write / compose / create a [doc type] for/about X" — grounded
+  // synthesis. Was previously a bare ollama.generate which let the model
+  // fabricate meanings for proper nouns / acronyms (e.g. "draft an AIIA
+  // Reference Letter" → hallucinated "Association of International Investors").
+  // Now we preflight: vault.search (the user's second brain) AND fs.find_in
+  // (Downloads + Desktop + Documents + Inbox) in parallel. The synth then
+  // has REAL evidence — prior notes on the topic, prior versions of the
+  // document on the PC — and the anti-hallucination rules in POLISHED_SYNTH
+  // kick in when both searches return empty (model must ask, not invent).
+  const draftMatch = t.match(/^\s*(?:draft|write|compose|create|prepare|produce|generate|build|put\s+together|make)\s+(?:a\s+|an\s+|the\s+|some\s+|new\s+)?(?:short\s+|quick\s+|brief\s+|long\s+|formal\s+|professional\s+)?(.+?)\s*$/i);
   if (draftMatch && draftMatch[1].length >= 3 && draftMatch[1].length <= 200) {
     const body = draftMatch[1].trim();
+    // Search topic: strip generic doc-type suffix so we hunt the SUBJECT,
+    // not the type. "an AIIA Reference Letter" → search for "AIIA Reference",
+    // which finds your existing vault notes about AIIA AND any AIIA-named
+    // file in Downloads. Keep the full body for the synth so it knows the
+    // deliverable shape (reference letter, memo, brief, etc.).
+    const searchTopic = body
+      .replace(/\s+(?:letter|email|memo|report|brief|proposal|plan|note|doc|document|update|summary|spec|prd|adr|deck|pitch|post)$/i, "")
+      .trim() || body;
     return {
-      steps: [{
-        tool: "ollama.generate",
-        args: { prompt: `Task: ${t}\n\nWrite it directly. Keep it concise and well-structured.`, system: "You produce focused written deliverables. No filler, no preamble, no 'here is the…'." },
-        rationale: "draft/write request — direct synthesis without research",
-        label: humanStepLabel("ollama.generate", { prompt: body }),
-      }],
-      summary: `Draft: ${body.slice(0, 80)}`,
-      waves: [[0]],
+      steps: [
+        {
+          tool: "vault.search",
+          args: { query: searchTopic },
+          rationale: "ground the draft in any prior context in the user's second brain — avoid fabricating meaning for unfamiliar terms",
+          label: humanStepLabel("vault.search", { query: searchTopic }),
+        },
+        {
+          tool: "fs.find_in",
+          args: { folder: "all", name: searchTopic, limit: 3 },
+          rationale: "check the user's PC (Downloads + Desktop + Documents + Inbox) for prior versions of this doc — runs in parallel with the vault search",
+          label: humanStepLabel("fs.find_in", { folder: "all", name: searchTopic }),
+        },
+      ],
+      summary: `Find context for "${body.slice(0, 80)}" then draft it`,
+      // Both searches run in the same wave — they're independent.
+      waves: [[0, 1]],
     };
   }
 
@@ -1231,6 +1434,16 @@ Universal rules (apply to ALL deliverable shapes):
 - Cite every substantive claim inline as [N] (matching the numbered evidence) or [vault:path/to/note.md].
 - If the evidence is thin or contradictory, say so plainly in one sentence.
 - Code in fenced blocks with the right language tag.
+
+**ANTI-HALLUCINATION RULES (load-bearing — fabrications waste the customer's time):**
+- **NEVER invent the meaning of an acronym, proper noun, person, place, organisation, or specialised term that doesn't appear in the evidence.** If the task names "AIIA", "Cognify", "Project Atlas", "Section 4.2", or any other specific term and the evidence catalog doesn't define it — DO NOT guess. Treat it as a known-unknown and surface it explicitly.
+- When evidence is empty or doesn't cover the specific subject the task names, do NOT produce a generic templated document. Instead, produce a SHORT response that:
+  1. Names what you found (or didn't find) in the user's vault and on their PC
+  2. Lists what you'd need from them to do the task properly (3-5 specific questions)
+  3. Optionally offers a clearly-labelled "skeleton" with <FIELD> placeholders — but only if they explicitly want one
+- A correct "I couldn't find X — here's what I'd need" beats a confident fabricated draft EVERY time. Customers prefer accurate "I don't know" to plausible-looking lies.
+- "Standard industry documentation" / "typical industry practice" / "generally speaking" are red-flag phrases. If you find yourself writing them, you're filling space with invented authority — stop and ask instead.
+
 - If you had to fill any gap the customer didn't specify (assumed recipient, scope, tone, what "the report" referred to, etc.), end with a single trailing italic line: "_Assumed: <one-line on what you assumed and why>_". Skip the line when nothing was assumed.`;
   // Auto-attach a skill playbook for this task. Picker uses TWO signals:
   //   1. The intent label stamped on the enriched task ("Interpretation:

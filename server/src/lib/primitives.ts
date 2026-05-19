@@ -1,9 +1,9 @@
-import { existsSync, readdirSync, readFileSync, statSync, appendFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync, appendFileSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve, basename, extname, sep, join } from "node:path";
 import { config } from "../config.js";
 import { ollamaGenerate, ollamaGenerateWithMeta } from "./ollama.js";
-import { listVault, readVaultFile, searchVault, writeVaultFile } from "./vault.js";
+import { listVault, readVaultFile, searchVault, writeVaultFile, importBinaryIntoVault } from "./vault.js";
 import { extractDocText, extractDocsParallel } from "./doc-extractor.js";
 import { listOwnedRepos, recentCommits, openPRs, openIssues, readme, octokit } from "./github.js";
 import { delegateToBestPeer, reviewWithPeer } from "./peers.js";
@@ -603,6 +603,156 @@ export const primitives: Primitive[] = [
         query: nameArg,
         count: hits.length,
         matches: hits,
+      };
+    },
+  },
+  {
+    name: "fs.import_to_vault",
+    description: "Copy a file from the user's PC into their Obsidian vault and write a markdown sidecar so it shows up in NeuroWorks's knowledge view. Use for any 'move/copy/save/import/file this doc into my vault/knowledge/neuroworks' request. Preserves the original on disk by default — the user gets a SEARCHABLE copy in their second brain while the source stays where they had it. Chain with fs.find_in to resolve a partial filename first (e.g. find then import 'AIIA Reference Letter'). Returns the vault-relative paths of both the imported binary and the sidecar so the synth can render a link.",
+    readonly: false,
+    args: [
+      { name: "path", type: "string", required: true, description: "Absolute path to the source file on the user's PC (chain from $step_0.matches.0.path after fs.find_in)" },
+      { name: "vaultFolder", type: "string", required: false, description: "Vault destination folder (default '0-Inbox'). Allowed: '0-Inbox', '1-Literature', '1-projects', '2-Permanent'. Use 0-Inbox for fleeting captures, 1-Literature for reference material, 1-projects for project artifacts." },
+      { name: "title", type: "string", required: false, description: "Override the sidecar note title (default: extract from filename)" },
+      { name: "removeOriginal", type: "boolean", required: false, description: "Delete the source file after import (default false — copy semantics). Set true when the user literally says 'move and delete' or 'remove from downloads'." },
+      { name: "summarise", type: "boolean", required: false, description: "Extract a short auto-summary of the doc's text into the sidecar (default true for binary docs)" },
+    ],
+    handler: async (args) => {
+      const src = String(args.path ?? "").trim();
+      if (!src) throw new Error("fs.import_to_vault: 'path' is required");
+      // SECURITY GATE: don't let an agent import .env or .ssh keys into the
+      // vault as a bypass route. assertSafeExternalPath blocks known-sensitive
+      // shapes (override with CLAWBOT_FS_UNRESTRICTED=1 for trusted work).
+      const { assertSafeExternalPath } = await import("./security-gates.js");
+      assertSafeExternalPath(src);
+      const fullSrc = resolve(src);
+      if (!existsSync(fullSrc)) {
+        throw new Error(`fs.import_to_vault: source file not found at "${fullSrc}". If you used a relative path or just a filename, run fs.find_in first to resolve it.`);
+      }
+      const st = statSync(fullSrc);
+      if (!st.isFile()) throw new Error(`fs.import_to_vault: "${fullSrc}" is a directory, not a file. Loop over its contents and import individually.`);
+
+      // Choose vault folder. Allow-list the four standard top-level folders;
+      // reject anything weird so the agent can't pollute _clawbot/ etc.
+      const requested = String(args.vaultFolder ?? "0-Inbox").trim().replace(/^\/+|\/+$/g, "");
+      const allowedFolders = ["0-Inbox", "1-Literature", "1-projects", "2-Permanent"];
+      const vaultFolder = allowedFolders.includes(requested) ? requested : "0-Inbox";
+
+      const srcName = basename(fullSrc);
+      const ext = extname(srcName).toLowerCase();
+      const stem = srcName.slice(0, srcName.length - ext.length);
+      // Slug for the sidecar — kebab-case, ASCII, capped at 60 chars so it
+      // plays well with Obsidian wikilinks and filesystem limits.
+      const slug = stem.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60) || "imported";
+      const stamp = new Date().toISOString().slice(0, 10);
+      const today = stamp;
+      const importedAt = new Date().toISOString();
+
+      // Filename collision: append -2, -3, etc. so we never overwrite an
+      // existing vault file.
+      function uniqueRel(folder: string, name: string): string {
+        const base = name.slice(0, name.length - extname(name).length);
+        const baseExt = extname(name);
+        let candidate = `${folder}/${name}`;
+        let i = 2;
+        while (existsSync(resolve(config.vaultPath, candidate))) {
+          candidate = `${folder}/${base}-${i}${baseExt}`;
+          i++;
+        }
+        return candidate;
+      }
+      const binaryRel = uniqueRel(vaultFolder, srcName);
+      const sidecarRel = uniqueRel(vaultFolder, `${stamp}-${slug}.md`);
+
+      // 1. Copy the binary into the vault.
+      const copied = importBinaryIntoVault(binaryRel, fullSrc);
+
+      // 2. Try to extract a summary if it's a binary doc (PDF/DOCX/XLSX).
+      //    For plain markdown/text we read directly. Best-effort — a failed
+      //    extraction shouldn't block the import; we still copied the binary.
+      const wantSummary = args.summarise !== false;
+      const binaryDocExt = new Set([".pdf", ".docx", ".xlsx", ".xls", ".xlsm"]);
+      let extractedExcerpt = "";
+      let kind = ext.replace(/^\./, "") || "file";
+      let pages: number | undefined;
+      if (wantSummary) {
+        try {
+          if (binaryDocExt.has(ext)) {
+            const r = await extractDocText(copied.abs);
+            extractedExcerpt = (r.text ?? "").slice(0, 2000).trim();
+            kind = r.kind || kind;
+            pages = r.pages;
+          } else if (ext === ".md" || ext === ".markdown" || ext === ".txt") {
+            const raw = readFileSync(copied.abs, "utf8");
+            // Strip any leading frontmatter so the excerpt is real content.
+            const stripped = raw.replace(/^---\n[\s\S]*?\n---\n?/, "").trim();
+            extractedExcerpt = stripped.slice(0, 2000);
+          }
+        } catch (e: any) {
+          // Don't fail the import — just note that we couldn't extract.
+          extractedExcerpt = `_Couldn't auto-extract text (${String(e?.message ?? e).slice(0, 80)}). The binary is still in the vault — open it directly to read._`;
+        }
+      }
+
+      const noteTitle = String(args.title ?? "").trim() || stem.replace(/[-_]+/g, " ").trim() || srcName;
+      const sizeKB = (st.size / 1024).toFixed(1);
+      const sidecarBody = [
+        `---`,
+        `title: "${noteTitle.replace(/"/g, "'")}"`,
+        `imported_from: "${fullSrc.replace(/\\/g, "/")}"`,
+        `imported_at: ${importedAt}`,
+        `created: ${today}`,
+        `kind: ${kind}`,
+        `size_kb: ${sizeKB}`,
+        pages != null ? `pages: ${pages}` : null,
+        `tags: [imported, neuroworks]`,
+        `---`,
+        ``,
+        `# ${noteTitle}`,
+        ``,
+        `Imported from \`${fullSrc}\` on ${today}. Original size ${sizeKB} KB${pages != null ? `, ${pages} page${pages === 1 ? "" : "s"}` : ""}.`,
+        ``,
+        `The full file is filed in your vault at [[${binaryRel}]] — click through to open it in Obsidian, or browse it under NeuroWorks Knowledge.`,
+        ``,
+        wantSummary && extractedExcerpt ? `## Excerpt (first ${Math.min(2000, extractedExcerpt.length)} chars)\n\n${extractedExcerpt}\n` : "",
+        `## Source provenance`,
+        `- Original path: \`${fullSrc}\``,
+        `- Imported by: clawbot \`fs.import_to_vault\``,
+        `- ${args.removeOriginal === true ? "Original was REMOVED from the PC after import." : "Original preserved on the PC."}`,
+        ``,
+      ].filter(Boolean).join("\n");
+
+      writeVaultFile(sidecarRel, sidecarBody);
+      void enqueueVaultCommit(`neuroworks: import — ${srcName} → ${vaultFolder}`);
+
+      // 3. Optionally remove the original. Only when the user explicitly
+      //    asked (removeOriginal=true) — default is COPY semantics so a
+      //    misfired "save this to my vault" never destroys the PC copy.
+      let removedOriginal = false;
+      if (args.removeOriginal === true) {
+        try {
+          rmSync(fullSrc, { force: false });
+          removedOriginal = true;
+        } catch (e: any) {
+          // Don't fail the import — the vault copy is the important part.
+          // Just surface that the removal didn't happen.
+          extractedExcerpt += `\n\n_Note: couldn't remove the original at ${fullSrc} (${String(e?.message ?? e).slice(0, 80)}). It's still on your PC._`;
+        }
+      }
+
+      return {
+        importedTo: binaryRel,
+        sidecar: sidecarRel,
+        originalPath: fullSrc,
+        sizeBytes: st.size,
+        kind,
+        pages,
+        excerptChars: extractedExcerpt.length,
+        removedOriginal,
+        vaultFolder,
+        // Hint for the synth: the user wants to know what's in the doc AND
+        // that it's been filed. Both bits matter.
+        message: `Filed "${srcName}" to your vault at ${binaryRel} (sidecar: ${sidecarRel}).${removedOriginal ? " Original removed from PC." : ""}`,
       };
     },
   },
@@ -1225,6 +1375,13 @@ export function humanStepLabel(tool: string, args: Record<string, any> = {}): st
         ? "your Downloads, Desktop, Documents, and vault Inbox"
         : `your ${folder}`;
       return `Looking in ${where} for "${name}"`;
+    }
+    case "fs.import_to_vault": {
+      const path = s("path");
+      const folder = s("vaultFolder") || "0-Inbox";
+      if (!path) return "Filing a file into your second brain";
+      const file = path.split(/[\\/]/).pop() ?? path;
+      return `Filing "${file}" into your second brain (${folder})`;
     }
     case "clock.now":          return "Checking the clock";
     case "web.search":         return s("query") ? `Searching the web for "${s("query")}"` : "Searching the web";

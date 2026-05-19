@@ -1,4 +1,4 @@
-import { readFileSync, readdirSync, renameSync, statSync, writeFileSync, mkdirSync, existsSync, rmSync } from "node:fs";
+import { readFileSync, readdirSync, renameSync, statSync, writeFileSync, mkdirSync, existsSync, rmSync, copyFileSync } from "node:fs";
 import { join, relative, resolve, sep } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
@@ -111,6 +111,28 @@ export function writeVaultFile(rel: string, content: string) {
   // Vault changed — drop the search cache so the next searchVault picks up
   // the new note instead of returning stale results from the 60s window.
   invalidateSearchCache();
+}
+
+// Copy a binary file INTO the vault. PDFs, DOCXs, images — anything the
+// text-based writeVaultFile can't safely scan or write. Skips the secret
+// scan (binaries aren't strings; we'd produce garbage hits) but still
+// applies the inside-vault containment check so a path-traversal arg
+// can't escape D:\Main brain.
+//
+// Returns the absolute path written so the caller can compute file size,
+// log provenance, etc.
+export function importBinaryIntoVault(rel: string, sourceAbsPath: string): { rel: string; abs: string; size: number } {
+  const full = resolve(VAULT, rel);
+  ensureInsideVault(full);
+  const st = statSync(sourceAbsPath);
+  if (!st.isFile()) throw new Error(`source is not a file: ${sourceAbsPath}`);
+  mkdirSync(resolve(full, ".."), { recursive: true });
+  // copyFileSync preserves the original — the agent's contract with the
+  // user is COPY-not-MOVE for "save to my vault" unless the user
+  // explicitly asks to remove the original.
+  copyFileSync(sourceAbsPath, full);
+  invalidateSearchCache();
+  return { rel, abs: full, size: st.size };
 }
 
 // Push the current HEAD without committing. Used to retry a failed push when

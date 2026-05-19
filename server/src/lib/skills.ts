@@ -160,6 +160,10 @@ const SKILL_KEYWORDS: { skill: string; patterns: RegExp[] }[] = [
   { skill: "comparison",             patterns: [/\bcompare\s+\S+\s+(?:to|with|vs\.?|and|versus)\s+\S/i, /\bside[\s-]by[\s-]side\b/i] },
   { skill: "contract-summary",       patterns: [/\bcontract\b/i, /\bagreement\b/i, /\bterms\s+of\s+service\b/i, /\btos\b/i, /\bnda\b/i] },
   { skill: "local-doc-summary",      patterns: [/\b(?:what(?:'?s|\s+is|\s+does)\s+in\s+this\b|summari[sz]e\s+this\s+(?:doc|file|pdf))/i] },
+  // pc-doc-handling fires for "move/copy/save/file/import/add X to my vault/
+  // knowledge/neuroworks/brain". Higher specificity than local-doc-summary
+  // because it covers the find→read→file flow, not just read.
+  { skill: "pc-doc-handling",        patterns: [/\b(?:move|copy|import|save|file|add|put|drop|stash|archive)\b.{0,40}\b(?:to|into|in)\s+(?:my\s+|the\s+)?(?:vault|second\s+brain|knowledge|neuroworks|obsidian|brain|inbox)\b/i] },
   { skill: "pr-description-writing", patterns: [/\bpull\s+request\b/i, /\bpr\s+description\b/i, /\bpr\s+body\b/i] },
   { skill: "commit-message-writing", patterns: [/\bcommit\s+message\b/i, /\bgit\s+commit\s+msg\b/i] },
   { skill: "testing-strategy",       patterns: [/\btest(?:ing)?\s+(?:strategy|plan)\b/i, /\bqa\s+plan\b/i] },
