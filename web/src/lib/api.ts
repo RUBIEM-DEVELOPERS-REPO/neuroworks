@@ -74,4 +74,21 @@ export const api = {
     profiles: Record<string, Record<string, number>>;
   }>("/api/models"),
   setDefaultModel: (name: string) => req<{ default: string; previous: string; ephemeral: boolean; hint: string }>("/api/models/default", { method: "POST", body: JSON.stringify({ name }) }),
+  // Open a live event stream for a running job. Returns the
+  // EventSource so the caller can attach onmessage / onclose handlers
+  // and close() when the consumer unmounts. Use this for streaming
+  // long jobs (chat tasks, digest runs) into the UI without polling.
+  jobStream: (id: string): EventSource => new EventSource(`/api/tasks/jobs/${encodeURIComponent(id)}/stream`),
+  listSkills: () => req<{
+    count: number;
+    skills: { name: string; description: string; source: "builtin" | "user" | "remote"; applies_to: string[]; bodyChars: number }[];
+  }>("/api/skills"),
+  getSkill: (name: string) => req<{
+    name: string;
+    description: string;
+    source: "builtin" | "user" | "remote";
+    applies_to: string[];
+    path: string;
+    body: string;
+  }>(`/api/skills/${encodeURIComponent(name)}`),
 };

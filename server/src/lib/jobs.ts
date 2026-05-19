@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { EventEmitter } from "node:events";
 import { journal } from "./journal.js";
 import { getActivePersona } from "./personas.js";
 import { persistJobRecord } from "./job-store.js";
@@ -23,6 +24,44 @@ export type Job = {
 const jobs = new Map<string, Job>();
 const RECENT = 50;
 
+// Per-job event stream for SSE consumers. Emits:
+//   "log"   — a new line was appended to j.log (payload: line string)
+//   "patch" — j.result got a progress patch (payload: patch object)
+//   "done"  — job finished (payload: { status, error? })
+// Listeners are added by the /api/jobs/:id/stream route and removed
+// when the consumer disconnects. EventEmitter handles multiple
+// listeners per job natively, so several browser tabs can watch the
+// same run without extra wiring.
+const jobEvents = new Map<string, EventEmitter>();
+
+export function getJobEvents(id: string): EventEmitter | null {
+  return jobEvents.get(id) ?? null;
+}
+
+function ensureEmitter(id: string): EventEmitter {
+  let ee = jobEvents.get(id);
+  if (!ee) {
+    ee = new EventEmitter();
+    // 0 disables the leak warning — a long-running job with 4 browser
+    // tabs subscribed is a normal pattern, not a leak.
+    ee.setMaxListeners(0);
+    jobEvents.set(id, ee);
+  }
+  return ee;
+}
+
+function dropEmitter(id: string): void {
+  const ee = jobEvents.get(id);
+  if (!ee) return;
+  // Give listeners a tick to receive the "done" event before tearing
+  // down. removeAllListeners is sync; the SSE consumer's `done` handler
+  // would race the removal otherwise.
+  setTimeout(() => {
+    try { ee.removeAllListeners(); } catch { /* tolerate */ }
+    jobEvents.delete(id);
+  }, 200);
+}
+
 export function newJob(kind: string): Job {
   const j: Job = { id: randomUUID(), kind, status: "pending", startedAt: new Date().toISOString(), log: [] };
   jobs.set(j.id, j);
@@ -40,9 +79,17 @@ export type ProgressUpdater = (patch: Record<string, unknown>) => void;
 
 export async function runJob<T>(j: Job, fn: (push: (msg: string) => void, progress: ProgressUpdater) => Promise<T>): Promise<void> {
   j.status = "running";
-  const push = (m: string) => { j.log.push(`[${new Date().toISOString()}] ${m}`); };
+  const ee = ensureEmitter(j.id);
+  const push = (m: string) => {
+    const line = `[${new Date().toISOString()}] ${m}`;
+    j.log.push(line);
+    // SSE subscribers receive each line as it's appended. Errors in
+    // listeners must not crash the job runner — wrap in try.
+    try { ee.emit("log", line); } catch { /* tolerate */ }
+  };
   const progress: ProgressUpdater = (patch) => {
     j.result = { ...(j.result ?? {}), ...patch } as Record<string, unknown>;
+    try { ee.emit("patch", patch); } catch { /* tolerate */ }
   };
   try {
     const final = await fn(push, progress);
@@ -67,6 +114,10 @@ export async function runJob<T>(j: Job, fn: (push: (msg: string) => void, progre
     // appendFileSync is fast, and persistJobRecord swallows errors so a
     // disk hiccup can't fail the response.
     persistJobRecord(j);
+    // Notify SSE subscribers the job ended so they can close their
+    // streams cleanly, then drop the emitter after a short grace.
+    try { ee.emit("done", { status: j.status, error: j.error }); } catch { /* tolerate */ }
+    dropEmitter(j.id);
   }
 }
 
