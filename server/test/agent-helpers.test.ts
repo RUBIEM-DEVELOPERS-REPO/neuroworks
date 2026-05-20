@@ -100,6 +100,21 @@ describe("extractTopic", () => {
   it("strips 'tell me about …'", () => {
     expect(extractTopic("tell me about neuroworks")).toBe("neuroworks");
   });
+
+  it("strips 'summarise what my vault says about X' (regression — F-grade outcome)", () => {
+    // Previously left "what my vault says about neuroworks" as the
+    // topic, which then routed to a literal web search that hit
+    // Slovak-language sites matching "my" (Slovak word).
+    expect(extractTopic("summarise what my vault says about neuroworks")).toBe("neuroworks");
+  });
+
+  it("strips 'summarise what my notes have on X'", () => {
+    expect(extractTopic("summarise what my notes have on q3 hiring")).toBe("q3 hiring");
+  });
+
+  it("strips 'tell me what we know about X'", () => {
+    expect(extractTopic("tell me what we know about neuroworks")).toBe("neuroworks");
+  });
 });
 
 describe("heuristicPlan", () => {
@@ -137,6 +152,18 @@ describe("heuristicPlan", () => {
     const p = heuristicPlan("search the web for hanta virus symptoms");
     expect(p).not.toBeNull();
     expect(p!.steps[0].tool).toBe("research.deep");
+  });
+
+  it("routes 'summarise X' to research.deep (regression — used to fall through to LLM planner)", () => {
+    const p = heuristicPlan("summarise neuroworks");
+    expect(p).not.toBeNull();
+    expect(p!.steps[0].tool).toBe("research.deep");
+  });
+
+  it("routes 'recap X' / 'tldr X' / 'brief me on X' to research.deep", () => {
+    expect(heuristicPlan("recap the q3 freeze")?.steps[0].tool).toBe("research.deep");
+    expect(heuristicPlan("tldr neuroworks")?.steps[0].tool).toBe("research.deep");
+    expect(heuristicPlan("brief me on the auth migration")?.steps[0].tool).toBe("research.deep");
   });
 
   it("returns null for empty input", () => {

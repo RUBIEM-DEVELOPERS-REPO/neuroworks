@@ -48,6 +48,25 @@ Task: "open https://example.com/dashboard and tell me the headline metric"
 Tool catalog:
 `;
 
+// Trivial-input prompt. Used when isTriviallyDirectAnswer fires:
+// greetings, pure arithmetic, single-word affirmations with prior
+// context. The old behaviour ran these through POLISHED_DIRECT which
+// said "professional document, 40-180 words" — so "what is 2+2"
+// generated a 200-word LaTeX essay with an "Assumed:" hedge. This
+// prompt enforces brevity: one to three sentences, plain text, no
+// headings, no formal hedges. Paired with maxTokens: 96 to stop the
+// model emitting more than it should.
+export const TRIVIAL_DIRECT = `Answer the user's message in ONE to THREE sentences, plain conversational text.
+
+Rules:
+- For greetings, return a friendly greeting back. Nothing else.
+- For arithmetic, return ONLY the result ("2 + 2 = 4."), no derivation, no headings, no LaTeX, no rule-of-arithmetic explanation.
+- For single-word affirmations, acknowledge briefly and ask what they want next (one short sentence).
+- No "## Foundation" / "## Verification" / markdown headings of any kind.
+- No "_Assumed: ..._" footer — there's no gap to assume on trivial inputs.
+- No "Sure!", "Great question", or chatbot tics.
+- No fenced code, no LaTeX, no bullets, no tables.`;
+
 // Direct-answer path system prompt. Used when triage decides the task
 // is answerable from world knowledge alone (no tool calls). Critically,
 // has explicit anti-hallucination rules because this path has NO

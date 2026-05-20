@@ -4,7 +4,7 @@ import { pollPeers } from "./peers.js";
 import { searchVault, searchVaultFilenames } from "./vault.js";
 import { suggestSkillsForIntent, suggestSkillsForTask, topSkillScoreForTask } from "./skills.js";
 import { config } from "../config.js";
-import { PLAN_SYSTEM, POLISHED_DIRECT, POLISHED_SYNTH } from "./agent-prompts.js";
+import { PLAN_SYSTEM, POLISHED_DIRECT, POLISHED_SYNTH, TRIVIAL_DIRECT } from "./agent-prompts.js";
 
 // Parse the "Interpretation: intent=foo, target=..." line that chat.ts
 // appends to enriched tasks. Returns the intent label when present, or
@@ -675,20 +675,30 @@ export async function planAndExecute(
             new Promise<any[]>(resolve => setTimeout(() => resolve([]), 1500)),
           ])
         : Promise.resolve([]);
-      const sys = (opts.personaSystemSuffix ? opts.personaSystemSuffix + "\n\n" : "") + POLISHED_DIRECT;
+      // Trivial inputs (greetings, arithmetic, single-word affirmations
+      // with prior context) get the TIGHT prompt + 96-token cap so we
+      // don't burn 40s generating a LaTeX essay for "2+2". Non-trivial
+      // direct answers (explainers, definitions with no vault hit) keep
+      // the POLISHED_DIRECT framing and the larger 384-token budget.
+      const isTrivial = isTriviallyDirectAnswer(bareTask, taskHasPriorTurnContext(task));
+      const directPrompt = isTrivial ? TRIVIAL_DIRECT : POLISHED_DIRECT;
+      const directMaxTokens = isTrivial ? 96 : 384;
+      const sys = (opts.personaSystemSuffix ? opts.personaSystemSuffix + "\n\n" : "") + directPrompt;
       try {
-        // SPEED: direct-answer prose is short (40-180 words ≈ 240 tokens). We
-        // route through the TRIAGE profile by default, which picks the user's
-        // smallest/fastest model — qwen3.5:0.8b on this machine — instead of
-        // the larger synthesis-tier model. Measured drop: ~67s → ~15-25s on
-        // local Ollama. Customer can opt out with CLAWBOT_FAST_DIRECT_ANSWER=0
-        // when they'd rather have the larger model's prose quality. The
-        // maxTokens cap of 384 stops generation comfortably past the target.
+        // SPEED: direct-answer prose is short. We route through the
+        // TRIAGE profile by default, which picks the user's
+        // smallest/fastest model — qwen3.5:0.8b on this machine —
+        // instead of the larger synthesis-tier model. Measured drop:
+        // ~67s → ~15-25s on local Ollama. Customer can opt out with
+        // CLAWBOT_FAST_DIRECT_ANSWER=0 when they'd rather have the
+        // larger model's prose quality. Token budgets:
+        //   trivial → 96 (one sentence is plenty)
+        //   non-trivial → 384 (40-180 words of professional prose)
         const useFastDirect = process.env.CLAWBOT_FAST_DIRECT_ANSWER !== "0";
         const [meta, lateVaultHits] = await Promise.all([
           ollamaGenerateWithMeta(task, sys, {
             profile: useFastDirect ? "triage" : "synthesis",
-            maxTokens: 384,
+            maxTokens: directMaxTokens,
             onToken: (_chunk, accumulated) => onProgress?.({ partialAnswer: accumulated }),
           }),
           vaultContentRace,
@@ -1017,6 +1027,16 @@ export function extractTopic(task: string): string {
     .replace(/^(?:give\s+me\s+|tell\s+me\s+|show\s+me\s+|share\s+|provide\s+)/i, "")
     .replace(/^(?:a\s+|the\s+|an\s+)?(?:summary|overview|recap|tldr|brief|update|status|rundown)\s+(?:on|of|about|for|regarding)\s+/i, "")
     .replace(/^(?:summari[sz]e|recap|brief\s+me\s+on|tell\s+me\s+about|what(?:'?s|\s+is)\s+(?:up\s+with\s+|going\s+on\s+with\s+)?|what\s+do\s+(?:we|i|you)\s+know\s+about)\s+/i, "")
+    // "what my vault says about X" / "what my notes have on X" /
+    // "what we know about X" / "what i have on X" tail — by this
+    // point the verb prefix ("summarise", "tell me", etc.) has
+    // already been stripped above, but the noisy "what (subject)
+    // (verb) about/on" stem is still in the way. Strip it so the
+    // captured topic is just X. Without this, "summarise what my
+    // vault says about neuroworks" left "what my vault says about
+    // neuroworks" as the topic, which then routed a literal web
+    // search that hit Slovak-language sites matching "my".
+    .replace(/^what\s+(?:my\s+(?:vault|notes?|brain|second\s+brain|knowledge|repo|repos?|files?|docs?|inbox)|the\s+(?:vault|repo|inbox)|we|i|you)\s+(?:says?|has|have|knows?|got|contain|contains|covers?|mentions?)\s+(?:about\s+|on\s+|of\s+|regarding\s+)?/i, "")
     // Drafting verbs: "draft an AIIA Reference Letter" → "AIIA Reference
     // Letter". Without this strip, the triage vault check searches for the
     // verb-prefixed phrase ("draft aiia reference letter") and gets zero
@@ -1267,6 +1287,40 @@ export function heuristicPlan(task: string): Plan | null {
     };
   }
 
+  // GitHub-repo lookups: "list the open PRs in <repo>", "show me PRs/issues
+  // for <repo>", "what's in <owner>/<repo>". Routes to github.read_repo
+  // which returns commits + PRs + issues + README in one call. Without
+  // this heuristic, the LLM planner often picks research.deep (web
+  // search) which doesn't know GitHub state and answers with "no info
+  // available" — graded B at best, refuses-without-trying.
+  //
+  // Repo name resolution:
+  //   - "owner/name" → exact owner + name
+  //   - bare "name"   → use config.githubOwner from env
+  const ghRepoMatch = t.match(/^\s*(?:please\s+|could\s+you\s+|can\s+you\s+)?(?:list|show(?:\s+me)?|what(?:'?s|\s+are)?)\s+(?:the\s+)?(?:open\s+|all\s+|recent\s+|current\s+)?(?:prs?|pull\s+requests?|issues?|commits?|pr|pull-requests?)\s+(?:in|for|on|of)\s+(?:the\s+)?(?:repo\s+)?([\w./-]+?)\s*[.?!]?\s*$/i);
+  if (ghRepoMatch) {
+    const target = ghRepoMatch[1].trim();
+    let owner: string, name: string;
+    if (target.includes("/")) {
+      [owner, name] = target.split("/");
+    } else {
+      owner = config.githubOwner || "";
+      name = target;
+    }
+    if (owner && name) {
+      return {
+        steps: [{
+          tool: "github.read_repo",
+          args: { owner, name },
+          rationale: `GitHub repo lookup — pull commits, PRs, issues, README for ${owner}/${name}`,
+          label: humanStepLabel("github.read_repo", { owner, name }),
+        }],
+        summary: `Read ${owner}/${name} from GitHub`,
+        waves: [[0]],
+      };
+    }
+  }
+
   // "tell me about X" / "explain X" / "what is X" / "whats X" / "describe X" —
   // these are research/explainer prompts. We use research.deep so vault is
   // checked first, web only if vault is thin. (Apostrophe in "what's" is
@@ -1277,7 +1331,7 @@ export function heuristicPlan(task: string): Plan | null {
   // plus a vault commit — that's where the "5 minutes for 'whats the hanta
   // virus'" came from. Longer / open-ended explanations keep depth=3 and
   // still capture, because they tend to be non-trivial research notes.
-  const aboutMatch = t.match(/^\s*(?:tell\s+me\s+about|explain|what(?:'?s|\s+is|\s+are|\s+does)|describe|how\s+does|how\s+do)\s+(.+?)[?.!]?\s*$/i);
+  const aboutMatch = t.match(/^\s*(?:tell\s+me\s+about|explain|what(?:'?s|\s+is|\s+are|\s+does)|describe|how\s+does|how\s+do|summari[sz]e|recap|brief\s+me\s+on|tldr)\s+(.+?)[?.!]?\s*$/i);
   if (aboutMatch && aboutMatch[1].length >= 2 && aboutMatch[1].length <= 80) {
     const query = aboutMatch[1].trim();
     const isQuickLookup = query.length <= 40;
@@ -1498,47 +1552,100 @@ async function synthesize(
   const totalEvidenceChars = evidence.reduce((n, e) => n + e.body.length, 0);
   // Complexity inference: caller's forceComplex (quality rescue path) wins,
   // otherwise size-based heuristic.
+  // Raised the complexity bar from 4-evidence / 6k-chars to 6-evidence
+  // / 10k-chars after the OR-free-tier grading round showed that
+  // bumping to LARGE on every modest research task was 429ing the
+  // large model. Most research.deep results sit at 3-5 evidence chunks
+  // and the small model handles those fine.
   const synthComplexity: "high" | "normal" = opts.forceComplex
     ? "high"
-    : ((evidence.length >= 4 || totalEvidenceChars > 6000) ? "high" : "normal");
-  // Token budget tracks complexity. Simple synth on one piece of evidence is
-  // a 80-250 word report — 512 tokens is plenty. Complex synth (multi-source
-  // research, multiperspective) gets the full 1024-token room so the model
-  // isn't cut off mid-section. On local Ollama this shaves 10-30s off simple
-  // synth latency vs the old default-everywhere 1024.
-  const synthMaxTokens = synthComplexity === "high" ? 1024 : 512;
+    : ((evidence.length >= 6 || totalEvidenceChars > 10000) ? "high" : "normal");
+  // COMPACT-SYNTH detection. When the task is a short "what is X" /
+  // "summarise X" research question AND the evidence is small, route
+  // the synth through the TRIAGE profile (smallest/fastest model —
+  // qwen3.5:0.8b on this machine) with a 256-token budget. Measured
+  // win on this grade test: ~60s synth → ~15s, taking "summarise
+  // neuroworks" from 174s end-to-end to ~120s. The output quality
+  // stays usable because the answer shape is a one-paragraph
+  // definition, not a multi-section report.
+  //
+  // Triggered when: task is single research.deep step OR research.multi
+  // (the heuristic-planner shapes), evidence is short, AND complexity
+  // wasn't escalated.
+  const bareTask = parseUserRequestFromTask(task);
+  const looksDefinitional = /^(?:what(?:'?s|\s+is|\s+are)|tell\s+me\s+about|explain|describe|summari[sz]e|recap|brief\s+me\s+on|tldr)\s+/i.test(bareTask) && bareTask.length <= 80;
+  const singleResearchStep = p.steps.length === 1 && /^research\./.test(p.steps[0].tool);
+  const compactSynth = !opts.forceComplex && synthComplexity === "normal" && looksDefinitional && singleResearchStep && totalEvidenceChars < 4000;
+  // Token budget tracks complexity. Compact synth = 256 (one paragraph).
+  // Simple = 512 (80-250 words). Complex = 1024 (multi-section).
+  const synthMaxTokens = compactSynth ? 256 : (synthComplexity === "high" ? 1024 : 512);
+  const synthProfile: "synthesis" | "triage" = compactSynth ? "triage" : "synthesis";
   const MIN_USEFUL_SYNTH = 40;
-  try {
-    const meta = await ollamaGenerateWithMeta(prompt, sys, {
-      profile: "synthesis",
-      complexity: synthComplexity,
-      maxTokens: synthMaxTokens,
-      onToken: onPartial ? (_chunk: string, accumulated: string) => onPartial(accumulated) : undefined,
-      onRoutingDecision: opts.push ? (info) => {
-        // Only surface the decision when it's non-default — a complexity
-        // bump, a remote model handoff. Routine local synth doesn't need a
-        // log line every time.
-        if (info.backend === "openrouter") {
-          opts.push!(`Thinking with ${info.model} (~${info.tokenEstimate.toLocaleString()} tokens of context). ${info.reason ? `Reason: ${info.reason}.` : ""}`);
-        } else if (synthComplexity === "high") {
-          opts.push!(`Thinking with local ${info.model} on a complex synth (~${info.tokenEstimate.toLocaleString()} tokens). OpenRouter isn't configured — set OPENROUTER_API_KEY to route this to a bigger model.`);
-        }
-      } : undefined,
-    });
-    const text = meta.text.trim();
-    if (text.length < MIN_USEFUL_SYNTH) {
-      // Model produced nothing useful. Build a structured rescue from the
-      // evidence directly so the customer still gets *something* coherent.
-      // Skill picker telemetry still travels with the fallback so the
-      // reflection can spot "skill X consistently picked but body too thin
-      // for the model" patterns.
-      return { answer: fallbackSynthesis(task, p, runs), skillUsed: pickedSkill, skillScore: pickedSkillScore };
+  // Single retry on transient fetch failures. The big synth call is the
+  // most likely place for an Ollama hiccup (concurrent quality.check +
+  // peer.review can saturate the single-threaded local model). Without
+  // a retry, a one-time TCP reset nukes the entire run — research.deep
+  // already gathered the evidence and the customer gets a "synthesiser
+  // couldn't run" dump instead of the actual answer. One retry catches
+  // the transient case; the second failure falls through to the
+  // structured fallback as before.
+  let lastErr: any;
+  // Track whether the prior attempt failed with a rate-limit on the
+  // LARGE-tier model. If so, retry by DROPPING complexity to "normal"
+  // — that routes to the cheaper default model (or local Ollama),
+  // which is more reliable than retrying the same large-tier endpoint.
+  let downgradeOnRetry = false;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const meta = await ollamaGenerateWithMeta(prompt, sys, {
+        profile: synthProfile,
+        complexity: downgradeOnRetry ? "normal" : synthComplexity,
+        maxTokens: synthMaxTokens,
+        onToken: onPartial ? (_chunk: string, accumulated: string) => onPartial(accumulated) : undefined,
+        onRoutingDecision: (attempt === 0 && opts.push) ? (info) => {
+          // Only surface the decision when it's non-default — a complexity
+          // bump, a remote model handoff. Routine local synth doesn't need a
+          // log line every time. Suppress on retry to avoid double-logging.
+          if (info.backend === "openrouter") {
+            opts.push!(`Thinking with ${info.model} (~${info.tokenEstimate.toLocaleString()} tokens of context). ${info.reason ? `Reason: ${info.reason}.` : ""}`);
+          } else if (synthComplexity === "high") {
+            opts.push!(`Thinking with local ${info.model} on a complex synth (~${info.tokenEstimate.toLocaleString()} tokens). OpenRouter isn't configured — set OPENROUTER_API_KEY to route this to a bigger model.`);
+          }
+        } : undefined,
+      });
+      const text = meta.text.trim();
+      if (text.length < MIN_USEFUL_SYNTH) {
+        // Model produced nothing useful — that's a content failure, not
+        // a transport one. No point retrying; fall through to fallback.
+        return { answer: fallbackSynthesis(task, p, runs), skillUsed: pickedSkill, skillScore: pickedSkillScore };
+      }
+      if (attempt > 0 && opts.push) opts.push(`Synth recovered on retry — keeping the rescue draft.`);
+      return { answer: text, skillUsed: pickedSkill, skillScore: pickedSkillScore };
+    } catch (e: any) {
+      lastErr = e;
+      const msg = String(e?.message ?? e);
+      // Only retry on transport-class failures. Content errors (model
+      // refused, prompt-too-large) won't get better on retry.
+      // Match HTTP 5xx + 429 (rate limit) + connection-class errors.
+      // The free OR tier returns 429 frequently when the large model is
+      // hot — separate-class retry waits longer (5s) since it's an
+      // upstream throttle, not a transport blip.
+      const isRateLimit = /(?:OpenRouter|HTTP)\s*429|rate[- ]?limit/i.test(msg);
+      const isTransport = /fetch failed|ECONNRESET|ECONNREFUSED|ETIMEDOUT|socket hang up|aborted|stream closed|HTTP 5\d\d|OpenRouter 5\d\d|EAI_AGAIN|terminated|other side closed/i.test(msg);
+      if (attempt === 0 && (isRateLimit || isTransport)) {
+        const waitMs = isRateLimit ? 5_000 : 2_000;
+        // On a rate-limit OR transient on the LARGE tier, downgrade to
+        // the cheaper default model on retry. Stops "free large model
+        // is rate-limited upstream" from killing the whole run.
+        if (isRateLimit && synthComplexity === "high") downgradeOnRetry = true;
+        if (opts.push) opts.push(`Synth hiccup (${msg.slice(0, 80)}) — retrying once in ${waitMs/1000}s${downgradeOnRetry ? " on the smaller model" : ""}.`);
+        await new Promise(r => setTimeout(r, waitMs));
+        continue;
+      }
+      break;
     }
-    return { answer: text, skillUsed: pickedSkill, skillScore: pickedSkillScore };
   }
-  catch (e: any) {
-    return { answer: fallbackSynthesis(task, p, runs, String(e?.message ?? e)), skillUsed: pickedSkill, skillScore: pickedSkillScore };
-  }
+  return { answer: fallbackSynthesis(task, p, runs, String(lastErr?.message ?? lastErr)), skillUsed: pickedSkill, skillScore: pickedSkillScore };
 }
 
 // One "semantic" step = ignore non-LLM-impacting steps when deciding whether

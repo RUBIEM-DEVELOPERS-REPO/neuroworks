@@ -188,6 +188,36 @@ async function handleChat(req: any, res: any) {
     }
   }
 
+  // 2.6 ARITHMETIC SHORT-CIRCUIT. Pure-arithmetic queries ("2+2",
+  // "what is 12 * (7-3)") have a deterministic answer and don't
+  // benefit from the LLM agent at all. The old path routed them
+  // through templates.ts → planAndExecute → triage → direct-answer
+  // with the small model, costing 15-25s of LLM time + agent
+  // overhead. Short-circuiting here makes the response sub-50ms.
+  //
+  // Safe eval: the whitelist regex restricts the input to digits,
+  // whitespace, and the 6 arithmetic operators + parentheses +
+  // comma/decimal point. No identifiers, no globals — Function
+  // constructor on that sanitized string can't reach out.
+  const arithMatch = text.trim().match(/^\s*(?:what(?:'?s|\s+is)\s+)?([\d\s+\-*/().,]+?)\s*\??\s*$/i);
+  if (arithMatch && /\d/.test(arithMatch[1]) && /[+\-*/]/.test(arithMatch[1])) {
+    const expr = arithMatch[1].replace(/,/g, "").trim();
+    if (/^[\d\s+\-*/().]+$/.test(expr)) {
+      try {
+        const result = new Function(`"use strict"; return (${expr});`)();
+        if (typeof result === "number" && Number.isFinite(result)) {
+          const pretty = Number.isInteger(result)
+            ? String(result)
+            : (Math.round(result * 1e10) / 1e10).toString();
+          return res.json({
+            kind: "message",
+            text: `${expr.replace(/\s+/g, " ").trim()} = ${pretty}`,
+          });
+        }
+      } catch { /* fall through to agent */ }
+    }
+  }
+
   // 3. No template matched — route to general-task agent. The agent plans + executes
   //    using primitives, optionally saves the plan as a custom template for next time.
   const tpl = templates.find(t => t.id === "general-task")!;
@@ -793,6 +823,22 @@ function detectAmbiguity(text: string): { ambiguous: boolean; question: string }
   // Empty / punctuation-only messages.
   if (t.length < 2 || /^[?.!,…\s-]+$/.test(t)) {
     return { ambiguous: true, question: "I caught your message but couldn't read what you'd like me to do — could you spell out the task or ask a question?" };
+  }
+  // Greetings, thanks, farewells — return a warm one-liner instead of
+  // demanding clarification. The previous catch-all turned "hi" into
+  // "hi on its own doesn't tell me what to do" which felt cold.
+  // Matches the same shapes the agent's isTriviallyDirectAnswer
+  // recognises so the surface is consistent.
+  if (/^(?:hi|hello|hey|yo|sup|hiya|howdy|good\s+(?:morning|afternoon|evening)|gm|ga|ge)\b[\s!,.?]*$/i.test(t)) {
+    const hour = new Date().getHours();
+    const tod = hour < 12 ? "morning" : hour < 18 ? "afternoon" : "evening";
+    return { ambiguous: true, question: `Hey — good ${tod}. What can I help with? Drop a task (e.g. "summarise my vault on X" or "save the resume.pdf in my downloads to my vault") and I'll get going.` };
+  }
+  if (/^(?:thanks?|thank\s+you|ty|thx|appreciate(?:\s+it)?|cheers)\b[\s!,.?]*$/i.test(t)) {
+    return { ambiguous: true, question: "Anytime. Send another task whenever you're ready." };
+  }
+  if (/^(?:bye|goodbye|see\s+ya|later|cya|gn|good\s+night)\b[\s!,.?]*$/i.test(t)) {
+    return { ambiguous: true, question: "Catch you later — I'll be here when you need me." };
   }
   // Bare confirmation with no pending action. Checked before the single-word
   // catch-all so confirmations get the dedicated "no pending suggestion" copy.
