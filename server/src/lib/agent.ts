@@ -624,9 +624,19 @@ export async function planAndExecute(
     // we'd rather use the user's own notes than world knowledge. Trivial
     // inputs (greetings, arithmetic) bypass this — "hi" matching a note
     // called "hi-everyone.md" shouldn't promote a greeting to vault search.
+    //
+    // EXCLUDE agent-internal job tracker files (_neuroworks/jobs/*) —
+    // those are scratch records of past runs ("Research: who is X"),
+    // not real user knowledge. Without this filter, the second run of
+    // any query routes itself to research.deep because the FIRST run's
+    // job-tracker file matched the topic name. Round-2 harness hit this
+    // for "who is dario amodei" — the bare entity query stayed in
+    // research mode (which couldn't find him) instead of falling through
+    // to direct-answer / world knowledge.
+    const realVaultHits = vaultHits.filter(h => !/^_neuroworks\/jobs\//i.test(h.path));
     const priorContext = taskHasPriorTurnContext(task);
-    if (direct && vaultHits.length > 0 && !isTriviallyDirectAnswer(bareTask, priorContext) && topic && topic.length >= 3) {
-      push(`Tier 2 — your second brain: found ${vaultHits.length} note${vaultHits.length === 1 ? "" : "s"} on "${topic}". Pulling those in instead of going to general knowledge.`);
+    if (direct && realVaultHits.length > 0 && !isTriviallyDirectAnswer(bareTask, priorContext) && topic && topic.length >= 3) {
+      push(`Tier 2 — your second brain: found ${realVaultHits.length} note${realVaultHits.length === 1 ? "" : "s"} on "${topic}". Pulling those in instead of going to general knowledge.`);
       direct = false;
     }
     // CONTEXT CASCADE: even when triage thinks "direct answer is fine", we
@@ -786,6 +796,17 @@ export async function planAndExecute(
   // Use bareTask length here too — enriched task is always > 30 chars due to
   // the persona prefix, which neutered this QA-skip optimisation entirely.
   const trivialTask = bareTask.trim().length < 30;
+  // Definitional explainers: "explain X" / "what is X" / "who is X" /
+  // "tell me about X" / "describe X" / "how does X work". When the plan
+  // is a SINGLE research.* step (no compare, no multi-source) the QA wave
+  // costs 60-90s for marginal value — research.deep already grounds against
+  // vault+web, and there's no compound claim to peer-review. Trades a tiny
+  // accuracy risk for substantial latency on every "explain X" query.
+  const looksDefinitionalExplainer =
+    /^(?:what(?:'?s|\s+is|\s+are|\s+does|\s+do)|who(?:'?s|\s+is|\s+are|\s+was)|tell\s+me\s+about|explain|describe|how\s+(?:do|does|can|should|would)|summari[sz]e|recap|brief\s+me\s+on|tldr)\s+/i.test(bareTask)
+    && bareTask.length <= 100;
+  const singleResearchStep = p.steps.length === 1 && /^research\./.test(p.steps[0].tool);
+  const skipQAForExplainer = looksDefinitionalExplainer && singleResearchStep && synth.answer.length >= MIN_REVIEW_CHARS;
   if (allWorkFailed) {
     push(`Skipping quality review — every step failed, so the response is just a summary of what went wrong (nothing to grade).`);
   }
@@ -796,7 +817,7 @@ export async function planAndExecute(
   // Passing the same numbered evidence the synth saw makes the score meaningful.
   const evidenceForQA = buildEvidenceCatalog(runs);
 
-  if (wantQA && !trivialTask) {
+  if (wantQA && !trivialTask && !skipQAForExplainer) {
     onProgress?.({ phase: "reviewing", runs });
     // ---- Phase A: quality + security (parallel) ----
     const phaseASteps: PlanStep[] = [
@@ -856,6 +877,8 @@ export async function planAndExecute(
         });
       }
     }
+  } else if (wantQA && skipQAForExplainer) {
+    push(`Skipping quality review — definitional explainer with a single research step (saves 60-90s; research.deep already grounds against vault + web).`);
   } else if (wantQA && trivialTask) {
     push(`Skipping quality review — short task, not worth a full QA pass.`);
   }
@@ -1156,6 +1179,44 @@ export function heuristicPlan(task: string): Plan | null {
     return {
       steps: [{ tool: "vault.read", args: { path }, rationale: "direct vault read — slashed path resolves inside the vault", label: humanStepLabel("vault.read", { path }) }],
       summary: `Read ${path} from your vault`,
+      waves: [[0]],
+    };
+  }
+
+  // Vault folder listing: "list 5 notes from my vault inbox folder" /
+  // "show me the files in my vault" / "list notes in inbox". Maps common
+  // folder words ("inbox", "knowledge", "neuroworks", "jobs", "archive")
+  // onto the real vault paths. Without this heuristic the planner falls
+  // back to research.deep, which never finds folder listings — round-2
+  // harness showed a refusal because research returned nothing relevant.
+  const vaultFolderAliases: Record<string, string> = {
+    inbox: "0-Inbox",
+    "0-inbox": "0-Inbox",
+    knowledge: "_knowledge",
+    neuroworks: "_neuroworks",
+    jobs: "_neuroworks/jobs",
+    archive: "_archive",
+    summaries: "_clawbot/summaries",
+    clawbot: "_clawbot",
+    decisions: "",
+    root: "",
+    vault: "",
+  };
+  const vaultListMatch = t.match(/^\s*(?:list|show(?:\s+me)?|what(?:'?s|\s+is|\s+are))\s+(?:\d+\s+|the\s+|all\s+|some\s+|a\s+few\s+|recent\s+|latest\s+)?(?:notes?|files?|items?|things?|entries?|docs?|markdown(?:\s+files?)?)\s+(?:in|from|under|inside)\s+(?:my\s+|the\s+|your\s+)?(?:vault(?:'s)?\s+)?(?:(?:in\s+the\s+|the\s+)?([\w/.-]+?)\s+folder|folder\s+([\w/.-]+)|([\w/.-]+?))\s*[.?!]?\s*$/i);
+  if (vaultListMatch) {
+    const raw = (vaultListMatch[1] ?? vaultListMatch[2] ?? vaultListMatch[3] ?? "").toLowerCase().trim().replace(/^my\s+|^the\s+|^your\s+/i, "");
+    const path = raw in vaultFolderAliases ? vaultFolderAliases[raw] : raw;
+    // Pull explicit count if present, so the synth knows how many to show.
+    const countMatch = t.match(/\b(\d+)\s+(?:notes?|files?|items?|things?|entries?|docs?)/i);
+    const limit = countMatch ? Math.min(50, Math.max(1, parseInt(countMatch[1], 10))) : undefined;
+    return {
+      steps: [{
+        tool: "vault.list",
+        args: { path },
+        rationale: `list ${limit ?? "all"} entries in vault folder "${path || "<root>"}"`,
+        label: humanStepLabel("vault.list", { path }),
+      }],
+      summary: `List entries in ${path || "vault root"}`,
       waves: [[0]],
     };
   }
@@ -1821,8 +1882,23 @@ function fallbackSynthesis(task: string, p: Plan, runs: StepRun[], synthError?: 
   const ok = runs.filter(r => r.ok);
   const failed = runs.filter(r => !r.ok);
   const parts: string[] = [];
+  // Use the bare user request in the headline — the enriched task is prefixed
+  // with persona framing + interpretation/deliverable blocks that look like
+  // garbage to the customer. parseUserRequestFromTask peels those off.
+  const headlineTask = parseUserRequestFromTask(task).slice(0, 200);
 
-  parts.push(`## Partial result\n\nThe synthesis step didn't complete cleanly${synthError ? ` (\`${synthError.slice(0, 100)}\`)` : ""}, so here is the raw evidence we gathered for: **${task.slice(0, 200)}**`);
+  // Single-step research success + synth failure is the most common shape:
+  // the search step already produced a usable answer, the LLM rendering on
+  // top failed (429, transport, etc.). Lift that answer directly instead of
+  // burying it under "Partial result / What worked / What failed" framing.
+  if (ok.length === 1 && failed.length === 0 && /^research\./.test(ok[0].step.tool)) {
+    const direct = compactStepSummary(ok[0]).trim();
+    if (direct.length >= 40) {
+      return `${direct}\n\n---\n_The synthesis step couldn't render this cleanly${synthError ? ` (${synthError.slice(0, 80)})` : ""}, so here's the research result directly. Ask again for a polished version._`;
+    }
+  }
+
+  parts.push(`## Partial result\n\nThe synthesis step didn't complete cleanly${synthError ? ` (\`${synthError.slice(0, 100)}\`)` : ""}, so here is the raw evidence we gathered for: **${headlineTask}**`);
 
   if (ok.length > 0) {
     parts.push(`### What worked`);

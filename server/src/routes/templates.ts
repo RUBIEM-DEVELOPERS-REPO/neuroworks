@@ -295,7 +295,24 @@ async function searchBrainRunner(inputs: Record<string, unknown>, push: (m: stri
   push(`searching vault for "${q}"`);
   const results = searchVault(q);
   push(`${results.length} match${results.length === 1 ? "" : "es"}`);
-  return { query: q, results };
+  // Build a human-readable `answer` so consumers (chat UI, harness, journal)
+  // get a real summary instead of just a raw results array. Without this,
+  // anything that read `result.answer` saw `undefined` and fell back to the
+  // "On it — running..." chat ack.
+  let answer: string;
+  if (results.length === 0) {
+    answer = `No notes in your vault match **${q}**. Try a broader term, check the spelling, or add a note on this topic and search again.`;
+  } else {
+    const top = results.slice(0, 8);
+    const list = top.map((r, i) => {
+      const preview = r.preview.replace(/\s+/g, " ").trim().slice(0, 160);
+      return `${i + 1}. **${r.path}**${r.line ? ` (line ${r.line})` : ""} — ${preview}`;
+    }).join("\n");
+    const remaining = results.length - top.length;
+    const more = remaining > 0 ? `\n\n_… and ${remaining} more match${remaining === 1 ? "" : "es"}._` : "";
+    answer = `Found **${results.length}** note${results.length === 1 ? "" : "s"} mentioning **${q}**:\n\n${list}${more}`;
+  }
+  return { query: q, results, answer };
 }
 
 async function addNoteRunner(inputs: Record<string, unknown>, push: (m: string) => void) {

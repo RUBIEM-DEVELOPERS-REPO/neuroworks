@@ -218,6 +218,35 @@ async function handleChat(req: any, res: any) {
     }
   }
 
+  // 2.7 DATE / TIME SHORT-CIRCUIT. "what's the date today", "what day is
+  // it", "what time is it", "what year is it" all have deterministic
+  // answers from the server clock. Routing them through the agent burned
+  // ~20s of research.deep + risked a synth 429 (round-2 harness showed a
+  // research.deep step that found the right date but the rescue summary
+  // bled into the answer). Sub-50ms direct response is what the customer
+  // actually wants here.
+  if (/^\s*(?:what(?:'s|\s+is|\s+'s)?\s+(?:the\s+)?(?:date|day|time|year|month)(?:\s+(?:today|now|currently|is\s+it))?|what(?:'s|\s+is)\s+today(?:'s\s+date)?|what\s+day\s+(?:of\s+the\s+week\s+)?is\s+(?:it|today)|today's\s+date)\s*\??\s*$/i.test(text)) {
+    const now = new Date();
+    const dayName = now.toLocaleDateString("en-US", { weekday: "long" });
+    const monthName = now.toLocaleDateString("en-US", { month: "long" });
+    const dayNum = now.getDate();
+    const year = now.getFullYear();
+    const lower = text.toLowerCase();
+    let answer: string;
+    if (/\btime\b/.test(lower)) {
+      const timeStr = now.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", hour12: true });
+      const tzShort = now.toLocaleTimeString("en-US", { timeZoneName: "short" }).split(" ").slice(-1)[0] ?? "";
+      answer = `It's ${timeStr}${tzShort ? ` ${tzShort}` : ""} on ${dayName}, ${monthName} ${dayNum}, ${year}.`;
+    } else if (/\byear\b/.test(lower)) {
+      answer = `${year}.`;
+    } else if (/\bmonth\b/.test(lower) && !/today/.test(lower)) {
+      answer = `${monthName} ${year}.`;
+    } else {
+      answer = `Today is ${dayName}, ${monthName} ${dayNum}, ${year}.`;
+    }
+    return res.json({ kind: "message", text: answer });
+  }
+
   // 3. No template matched — route to general-task agent. The agent plans + executes
   //    using primitives, optionally saves the plan as a custom template for next time.
   const tpl = templates.find(t => t.id === "general-task")!;
@@ -573,6 +602,21 @@ function extractIntent(text: string, hasThread: boolean): IntentDetection {
   const scopeMatch = lower.match(/\b(brief|detailed|short|long|one[\s-]?pager|tldr|in\s+\d+\s+(?:bullets?|sentences?|words?|paragraphs?))\b/);
   if (scopeMatch) scope = scopeMatch[1];
 
+  // Explicit-count requests — "give me 3 X" / "list 3 X" / "3 best Y" /
+  // "3 trade-offs each way". The customer wants a counted list, not a
+  // table or prose. Stash the count in scope (preempts the looser
+  // qualifier above) so buildFormatHint can emit a numbered-list shape.
+  // Number-word forms ("three", "five") are accepted to match how
+  // people actually phrase the ask.
+  const countMatch = lower.match(/\b(?:give\s+me|list|show\s+me|provide|share|name)\s+(\d+|two|three|four|five|six|seven|eight|nine|ten)\b|\b(\d+|two|three|four|five|six|seven|eight|nine|ten)\s+(?:best|worst|top|main|key|biggest|most|reasons?|trade[- ]?offs?|tips|points?|examples?|ways?|things?|pros?|cons?|benefits?|risks?|steps?|items?|principles?|practices?|patterns?|use[\s-]cases?|advantages?|disadvantages?)\b/);
+  if (countMatch) {
+    const raw = countMatch[1] ?? countMatch[2];
+    const word2num: Record<string, string> = { two: "2", three: "3", four: "4", five: "5", six: "6", seven: "7", eight: "8", nine: "9", ten: "10" };
+    const n = word2num[raw] ?? raw;
+    const eachWay = /\beach\s+(?:way|side|direction)|\bfor\s+and\s+against\b/i.test(lower);
+    scope = eachWay ? `count-${n}-each-way` : `count-${n}`;
+  }
+
   // 1. DRAFT family — "draft / write / compose / prepare / create" + artifact.
   //    Specific sub-intents based on the artifact word.
   const draftMatch = lower.match(/^\s*(?:draft|write|compose|prepare|create)\s+(?:a\s+|an\s+|the\s+|some\s+)?(.+)$/);
@@ -750,6 +794,27 @@ function buildFormatHint(intent: Intent, tone?: string, scope?: string): string 
   // ("one-page report"), so for any non-default intent we override with a
   // shape that matches what the customer asked for. No hint = synth keeps
   // its default.
+
+  // Explicit-count scope (count-3, count-5-each-way, etc.) overrides the
+  // per-intent shape entirely. The customer asked for a counted list — the
+  // synth's default (one-page prose with optional bullets) and table-heavy
+  // comparison shapes would both miss the ask. Emit a strict numbered-list
+  // shape that the synth can't accidentally reshape into a table.
+  if (scope && scope.startsWith("count-")) {
+    const parts = scope.split("-");
+    const n = parts[1];
+    const eachWay = scope.endsWith("-each-way");
+    let shape: string;
+    if (eachWay) {
+      shape = `TWO numbered lists, each containing EXACTLY ${n} items. Use bold subheadings to label the two sides (e.g. "**For local inference**" and "**For cloud APIs**"). Each item is ONE or TWO short sentences. NO tables. NO nested bullets. NO TL;DR paragraph. NO trailing summary. Just the two numbered lists, in order. Output starts with the first subheading.`;
+    } else {
+      shape = `ONE numbered list containing EXACTLY ${n} items. Each item is ONE or TWO short sentences. NO tables. NO nested bullets. NO preamble paragraph. NO trailing summary. Output starts with "1." on the first line.`;
+    }
+    const annotations: string[] = [];
+    if (tone) annotations.push(`Tone: ${tone}.`);
+    return `Deliverable shape: ${shape}${annotations.length ? "\n\n" + annotations.join(" ") : ""}`;
+  }
+
   let shape: string | undefined;
   switch (intent) {
     case "draft-email":
@@ -1013,8 +1078,13 @@ function inferInputs(templateId: string, text: string): Record<string, any> {
     const m = text.match(/(?:summari[sz]e(?:\s+the)?|summary of|summarise)\s+([^\s,.!?]+)/i);
     if (m) out.repo = m[1];
   } else if (templateId === "search-brain") {
-    // Strip the verb to get the query
-    const m = text.match(/(?:search(?:\s+(?:for|my\s+notes\s+for|the\s+vault\s+for|knowledge\s+base\s+for|brain\s+for))?|find(?:\s+in)?|look\s+up)\s+(.+?)[.!?]?$/i);
+    // Strip the verb AND any "my/the/your vault/notes/brain (for) notes (mentioning|about|on)"
+    // chrome so the actual topic ends up in the query. Previously the regex
+    // captured "my vault for notes mentioning typescript" verbatim, which
+    // searchVault then matched against literal file contents (zero hits).
+    const m = text.match(
+      /(?:search|find|look\s+up|look\s+for|hunt|grep)\s+(?:(?:my|the|your)\s+(?:notes?|vault|brain|knowledge|second\s+brain)\s+)?(?:for\s+)?(?:(?:notes?|info|stuff|things?|anything|something)\s+(?:about|on|mentioning|with|containing|regarding|that\s+mention)\s+)?(.+?)[.!?]?$/i,
+    );
     if (m) out.query = m[1].trim();
     else out.query = text;
   } else if (templateId === "run-digest") {
