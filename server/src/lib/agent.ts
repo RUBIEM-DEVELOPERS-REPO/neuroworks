@@ -660,9 +660,23 @@ export async function planAndExecute(
       const speculativeHeuristic = heuristicPlan(bareTask);
       const wantsResearch = speculativeHeuristic && speculativeHeuristic.steps.length > 0
         && speculativeHeuristic.steps.some(s => s.tool === "research.deep" || s.tool === "web.search" || s.tool === "vault.search");
-      if (wantsResearch) {
+      // Short-definitional override: when the query is a definitional
+      // explainer shape (looksLikeDirectAnswer already returned true) AND
+      // the bare task is short (≤ 80 chars) AND the vault filename scan
+      // surfaced no real hits, the model's training knowledge is the
+      // right tier. Routing through research.deep on free-tier OR often
+      // returns thin/irrelevant evidence and the small synth model then
+      // refuses despite Rule 0 — the TCP-vs-UDP regression hit this
+      // path. We trust direct-answer + POLISHED_DIRECT's anti-
+      // hallucination guard for short questions about likely-known
+      // concepts; longer / vault-rooted queries still route through
+      // research.
+      const isShortDefinitional = bareTask.length <= 80;
+      if (wantsResearch && !isShortDefinitional) {
         push(`Tier 2/3 — checking your second brain first, then the web if needed (instead of guessing from general knowledge).`);
         direct = false;
+      } else if (wantsResearch && isShortDefinitional) {
+        push(`Tier 4 — short definitional question with no relevant vault notes; answering from training knowledge.`);
       }
     }
     if (direct) {
@@ -705,23 +719,45 @@ export async function planAndExecute(
         //   trivial → 96 (one sentence is plenty)
         //   non-trivial → 384 (40-180 words of professional prose)
         const useFastDirect = process.env.CLAWBOT_FAST_DIRECT_ANSWER !== "0";
-        const [meta, lateVaultHits] = await Promise.all([
-          ollamaGenerateWithMeta(task, sys, {
-            profile: useFastDirect ? "triage" : "synthesis",
-            maxTokens: directMaxTokens,
-            onToken: (_chunk, accumulated) => onProgress?.({ partialAnswer: accumulated }),
-          }),
-          vaultContentRace,
-        ]);
+        // Inner helper so we can re-issue with a different backend when the
+        // first attempt hits OR 429 / transport hiccup. Keeps the late-vault
+        // race + return shape identical between primary and retry paths.
+        async function runDirect(profile: "triage" | "synthesis" | undefined) {
+          const [meta, lateVaultHits] = await Promise.all([
+            ollamaGenerateWithMeta(task, sys, {
+              profile,
+              maxTokens: directMaxTokens,
+              onToken: (_chunk, accumulated) => onProgress?.({ partialAnswer: accumulated }),
+            }),
+            vaultContentRace,
+          ]);
+          return { meta, lateVaultHits };
+        }
+        let attempt;
+        try {
+          attempt = await runDirect(useFastDirect ? "triage" : "synthesis");
+        } catch (e: any) {
+          // OR free-tier 429 / transport hiccup is the common failure here
+          // because triage routes to OR when OPENROUTER_TRIAGE_MODEL is
+          // pinned. Retry once with profile=undefined which forces local
+          // Ollama (shouldRouteToOpenRouter returns false when profile is
+          // missing) — slower (~15-25s) but always available. If THAT also
+          // fails we have no LLM and fall through to the planner.
+          const msg = String(e?.message ?? e);
+          const transientLLM = /429|rate[\s-]?limit|fetch\s+failed|terminated|ECONNRESET|HTTP\s+5\d\d|other\s+side\s+closed/i.test(msg);
+          if (!transientLLM) throw e;
+          push(`Direct answer hit a remote hiccup (${msg.slice(0, 80)}) — retrying once on local Ollama.`);
+          attempt = await runDirect(undefined);
+        }
         // If the late vault search found something AFTER the model already
         // answered (which usually means the answer is world-knowledge-only),
         // flag it for the customer so they know there's vault context they
         // could promote next time.
-        if (lateVaultHits.length > 0) {
-          push(`Note: your second brain has ${lateVaultHits.length} note${lateVaultHits.length === 1 ? "" : "s"} that mention this topic (e.g. ${lateVaultHits[0].path}) — re-ask if you want me to use those instead of general knowledge.`);
+        if (attempt.lateVaultHits.length > 0) {
+          push(`Note: your second brain has ${attempt.lateVaultHits.length} note${attempt.lateVaultHits.length === 1 ? "" : "s"} that mention this topic (e.g. ${attempt.lateVaultHits[0].path}) — re-ask if you want me to use those instead of general knowledge.`);
         }
         const direct: Plan = { steps: [], summary: "Direct answer (general knowledge — no vault notes, no web search).", waves: [] };
-        return { task, plan: direct, runs: [], answer: meta.text.trim(), hadWrites: false };
+        return { task, plan: direct, runs: [], answer: attempt.meta.text.trim(), hadWrites: false };
       } catch (e: any) {
         push(`Direct answer didn't land cleanly (${String(e?.message ?? e).slice(0, 80)}) — switching to the planner.`);
         // fall through
@@ -1374,6 +1410,39 @@ export function heuristicPlan(task: string): Plan | null {
           tool: "github.read_repo",
           args: { owner, name },
           rationale: `GitHub repo lookup — pull commits, PRs, issues, README for ${owner}/${name}`,
+          label: humanStepLabel("github.read_repo", { owner, name }),
+        }],
+        summary: `Read ${owner}/${name} from GitHub`,
+        waves: [[0]],
+      };
+    }
+  }
+
+  // GitHub README lookups: "fetch the README of <repo> on github" /
+  // "read the readme of <repo>" / "show me what <repo> does on github" /
+  // "what does <repo>'s README say". Routes to github.read_repo so the
+  // README + recent state come back in one call. Without this heuristic,
+  // the LLM planner often picks github.get_file with path="README.md"
+  // but forgets to resolve the owner from "the clawbot repo" → the
+  // call fails with "no such file" because owner defaults to empty.
+  const ghReadmeMatch =
+    t.match(/^\s*(?:please\s+|could\s+you\s+|can\s+you\s+)?(?:fetch|read|show(?:\s+me)?|get|grab|pull)\s+(?:the\s+)?(?:readme|read[\s-]?me)\s+(?:of\s+|for\s+|from\s+)?(?:the\s+)?([\w./-]+?)(?:\s+repo(?:sitory)?)?(?:\s+(?:on|from|in)\s+(?:github|gh))?(?:\s+and\s+.+)?\s*[.?!]?\s*$/i) ??
+    t.match(/^\s*(?:please\s+|could\s+you\s+|can\s+you\s+)?(?:what\s+(?:does|is\s+in)|tell\s+me\s+about)\s+(?:the\s+)?([\w./-]+?)(?:'s)?(?:\s+repo(?:sitory)?)?\s+(?:readme|read[\s-]?me)(?:\s+(?:say|cover|describe))?(?:\s+(?:on|from)\s+(?:github|gh))?(?:\s+and\s+.+)?\s*[.?!]?\s*$/i);
+  if (ghReadmeMatch) {
+    const target = ghReadmeMatch[1].trim();
+    let owner: string, name: string;
+    if (target.includes("/")) {
+      [owner, name] = target.split("/");
+    } else {
+      owner = config.githubOwner || "";
+      name = target;
+    }
+    if (owner && name) {
+      return {
+        steps: [{
+          tool: "github.read_repo",
+          args: { owner, name },
+          rationale: "GitHub README lookup — uses read_repo to return README + recent state",
           label: humanStepLabel("github.read_repo", { owner, name }),
         }],
         summary: `Read ${owner}/${name} from GitHub`,

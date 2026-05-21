@@ -107,8 +107,18 @@ async function handleChat(req: any, res: any) {
   // like "digest" or "search" can hijack a continuation message into a
   // one-shot template. Only run regex routing on FIRST turns (no thread
   // yet) or on explicit resets ("new task: run a digest").
+  //
+  // Multi-clause guard: queries like "search my vault for X and write a
+  // roll-up to 0-Inbox" need the multi-step planner, NOT a single-step
+  // template. We detect WRITE-action tails — "and write/save/capture/
+  // create/add/append/draft/file/store" — and let those fall through to
+  // general-task. Pure read-and-report tails ("and tell me what they
+  // say") stay with the template because search-brain already returns
+  // numbered matches with previews, which IS the user's report.
+  const hasWriteActionTail =
+    /\s+(?:and|then)\s+(?:write|save|capture|create|add|append|draft|file|store|put|drop|push|sync|commit|publish)\b/i.test(text);
   let templateId: string | null = null;
-  if (!useThreadContext) {
+  if (!useThreadContext && !hasWriteActionTail) {
     for (const p of ACTION_PATTERNS) {
       if (p.re.test(text)) { templateId = p.templateId; break; }
     }
@@ -1085,8 +1095,14 @@ function inferInputs(templateId: string, text: string): Record<string, any> {
     const m = text.match(
       /(?:search|find|look\s+up|look\s+for|hunt|grep)\s+(?:(?:my|the|your)\s+(?:notes?|vault|brain|knowledge|second\s+brain)\s+)?(?:for\s+)?(?:(?:notes?|info|stuff|things?|anything|something)\s+(?:about|on|mentioning|with|containing|regarding|that\s+mention)\s+)?(.+?)[.!?]?$/i,
     );
-    if (m) out.query = m[1].trim();
-    else out.query = text;
+    let q = m ? m[1].trim() : text;
+    // Strip "and tell me / and show me / and explain ..." tail so multi-
+    // clause queries ("search my vault for typescript and tell me what
+    // the top 3 say") search for just the topic ("typescript"). Without
+    // this strip the searchVault content-match looks for the whole tail
+    // verbatim and returns zero hits.
+    q = q.replace(/\s+(?:and|then)\s+(?:tell|show|explain|describe|summari[sz]e|find\s+out|let\s+me\s+know|see|hear|look\s+at)\s.+$/i, "").trim();
+    out.query = q;
   } else if (templateId === "run-digest") {
     const m = text.match(/(\d+)\s*days?/);
     out.lookbackDays = m ? Number(m[1]) : 7;

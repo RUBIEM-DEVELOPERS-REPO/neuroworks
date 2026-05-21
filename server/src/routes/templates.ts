@@ -173,16 +173,36 @@ templatesRouter.post("/intent", async (req, res) => {
   res.json({ source: "keyword", templateId: fallback?.id ?? null, inputs: {} });
 });
 
+// Lightweight stopword set so generic words ("the", "and", "is") don't
+// produce false-positive template matches. Without this, "compare X vs Y"
+// scored 1 hit against search-brain (because "the" is in "Search the
+// knowledge base") and got mis-routed to vault search.
+const KEYWORD_STOPWORDS = new Set([
+  "the", "and", "for", "with", "but", "not", "you", "this", "that", "from",
+  "into", "over", "under", "than", "then", "have", "has", "had", "was", "were",
+  "are", "all", "any", "some", "out", "off", "now", "new", "old", "one", "two",
+  "what", "when", "where", "why", "how", "who", "which", "let", "let's", "lets",
+  "can", "could", "would", "should", "will", "may", "might", "must", "shall",
+  "between", "without", "within", "about", "above", "below", "after", "before",
+]);
+
 function keywordMatch(text: string): Template | null {
   const q = text.toLowerCase();
   let best: { t: Template; s: number } | null = null;
   for (const t of templates) {
     const hay = (t.title + " " + t.description + " " + t.role).toLowerCase();
     let s = 0;
-    for (const w of q.split(/\s+/)) if (w.length > 2 && hay.includes(w)) s++;
+    for (const w of q.split(/\s+/)) {
+      if (w.length > 2 && !KEYWORD_STOPWORDS.has(w) && hay.includes(w)) s++;
+    }
     if (!best || s > best.s) best = { t, s };
   }
-  return best && best.s > 0 ? best.t : null;
+  // Require at least 2 substantive hits before claiming a match — single-word
+  // overlaps (e.g. just "files" hitting summarize-repo's description) are
+  // too weak to confidently route. The caller treats null as "let chat fall
+  // through to general-task", which is the correct behaviour for ad-hoc
+  // questions that don't fit a built-in template.
+  return best && best.s >= 2 ? best.t : null;
 }
 
 // Exported for chat router (avoids circular re-fetch)
