@@ -575,7 +575,7 @@ export async function planAndExecute(
   task: string,
   push: (msg: string) => void,
   onProgress?: (patch: Partial<AgentResult> & { phase?: string }) => void,
-  opts: { personaSystemSuffix?: string; autoReview?: boolean } = {},
+  opts: { personaSystemSuffix?: string; autoReview?: boolean; preplan?: Plan } = {},
 ): Promise<AgentResult> {
   // CRITICAL: every heuristic below MUST run against the bare user text, not
   // the enriched task (which is prefixed with persona framing + thread
@@ -589,6 +589,29 @@ export async function planAndExecute(
   // We compute bareTask once and thread it through every heuristic.
   const bareTask = parseUserRequestFromTask(task);
   const fromTemplate = taskWasTemplated(task);
+
+  // Pre-planned execution. Custom templates ship with a saved plan that was
+  // verified the first time it ran via the agent. When the caller supplies
+  // `opts.preplan`, skip all triage / heuristic / LLM planning and jump
+  // straight to executing that plan + synthesising an answer. Without this
+  // path, saved-plan customs returned raw {plan, runs, ...} JSON with no
+  // `answer` field — the customer saw machine output instead of a written
+  // reply.
+  if (opts.preplan && opts.preplan.steps.length > 0) {
+    push(`Replaying a saved plan — ${opts.preplan.steps.length} step${opts.preplan.steps.length === 1 ? "" : "s"}.`);
+    const p: Plan = opts.preplan;
+    onProgress?.({ plan: p, phase: "executing" });
+    const runsBuffer: StepRun[] = [];
+    const { runs, hadWrites } = await executePlan(p, push, (rs) => {
+      runsBuffer.splice(0, runsBuffer.length, ...rs);
+      onProgress?.({ runs: [...rs] });
+    });
+    onProgress?.({ phase: "synthesizing", runs });
+    const synth = await synthesize(task, p, runs, opts.personaSystemSuffix, (partial) => {
+      onProgress?.({ partialAnswer: partial });
+    }, { push });
+    return { task, plan: p, runs, answer: synth.answer, hadWrites };
+  }
 
   // Triage first — the cheapest possible path is skipping the planner entirely
   // for prompts that don't need tools. Total round-trip drops from ~3min to

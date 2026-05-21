@@ -122,9 +122,19 @@ templatesRouter.post("/run/:id", async (req, res) => {
       if (custom.plan.steps.length === 0 && custom.origin?.task) {
         return generalTaskRunner({ task: custom.origin.task, save_as_template: false }, push, progress);
       }
-      progress({ plan: custom.plan, runs: [], phase: "executing" });
-      const { runs } = await executePlan(custom.plan, push, (rs) => progress({ runs: [...rs] }));
-      return { fromCustom: custom.id, plan: custom.plan, runs, phase: "done" };
+      // Saved-plan customs go through planAndExecute with `preplan` so they
+      // get the same execute → synthesise → answer treatment as fresh
+      // ad-hoc tasks. Previously this branch returned raw {plan, runs, ...}
+      // JSON with no `answer` field, which surfaced to the customer as
+      // machine output.
+      const persona = getActivePersona();
+      const personaSuffix = personaSystemSuffix(persona);
+      const taskText = custom.origin?.task ?? `Replay saved plan: ${custom.title}`;
+      const r = await planAndExecute(taskText, push, (patch) => progress(patch as Record<string, unknown>), {
+        personaSystemSuffix: personaSuffix,
+        preplan: custom.plan,
+      });
+      return { ...r, fromCustom: custom.id };
     }
     return runner(tpl.id, inputs, push, progress);
   });
