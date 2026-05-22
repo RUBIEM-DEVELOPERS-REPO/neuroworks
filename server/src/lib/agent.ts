@@ -1280,6 +1280,36 @@ export function heuristicPlan(task: string): Plan | null {
     };
   }
 
+  // Vault folder scan (summarise multiple docs): "summarise the docs in
+  // 0-Inbox" / "what's in my knowledge folder" / "read all notes in
+  // _clawbot" / "scan my inbox docs". Routes to vault.scan_docs which
+  // reads MANY docs in parallel and returns extracted text. Without
+  // this heuristic the LLM planner often picks research.deep which
+  // misses the user's actual files.
+  const vaultScanMatch = t.match(
+    /^\s*(?:summari[sz]e|scan|read|skim|brief\s+me\s+on)\s+(?:all\s+)?(?:the\s+|my\s+|your\s+)?(?:docs?|documents?|notes?|files?|content|markdown(?:\s+files?)?|entries?)\s+(?:in|inside|under|from)\s+(?:my\s+|the\s+|your\s+)?(?:vault(?:'s)?\s+)?(?:([\w/.-]+?)\s+folder|folder\s+([\w/.-]+)|([\w/.-]+?))\s*[.?!]?\s*$/i,
+  );
+  if (vaultScanMatch) {
+    const raw = (vaultScanMatch[1] ?? vaultScanMatch[2] ?? vaultScanMatch[3] ?? "").toLowerCase().trim().replace(/^my\s+|^the\s+|^your\s+/i, "");
+    const folderAliases = {
+      inbox: "0-Inbox", "0-inbox": "0-Inbox",
+      knowledge: "_knowledge", neuroworks: "_neuroworks",
+      jobs: "_neuroworks/jobs", archive: "_archive",
+      summaries: "_clawbot/summaries", clawbot: "_clawbot",
+    };
+    const folder = (raw in folderAliases) ? folderAliases[raw] : raw;
+    return {
+      steps: [{
+        tool: "vault.scan_docs",
+        args: { folder, limit: 12 },
+        rationale: "scan multiple docs in the named vault folder and return extracted text for synthesis",
+        label: humanStepLabel("vault.scan_docs", { folder }),
+      }],
+      summary: `Scan docs in vault folder "${folder || "<root>"}"`,
+      waves: [[0]],
+    };
+  }
+
   // Local-doc lookup WITHOUT a folder hint: "what's in this doc X" /
   // "summarise this pdf X" / "read this file X" / "open X.pdf". The customer
   // hasn't told us which folder — we sweep Downloads + Desktop + Documents +
@@ -1335,12 +1365,35 @@ export function heuristicPlan(task: string): Plan | null {
   // CRITICAL: matches BEFORE the URL/research patterns so the LLM planner
   // never sees this shape (the previous behaviour was a 3-minute web research
   // run for "check my downloads for AIIA Reference Letter").
+  // TWO shapes supported:
+  //   (A) folder-first: "find in my downloads for X" / "look in my desktop X"
+  //   (B) name-first:   "find X in my downloads" / "look for X in my desktop"
+  // Both extract folder + name and route through fs.find_in. (B) is the
+  // natural shape most people type; (A) was the only one this heuristic
+  // handled before, which left "find resume.pdf in my downloads" falling
+  // through to the LLM planner → research.deep on the bare phrase.
   const localFileMatch = t.match(
     /^\s*(?:(?:please\s+|could\s+you\s+|can\s+you\s+)?(?:check|look|find|search|browse|see|grab|open|read)\s+(?:in\s+)?)?my\s+(downloads?|desktop|documents?|docs|inbox|vault|home(?:\s+folder)?)\s+(?:folder\s+)?(?:for\s+|to\s+find\s+|to\s+see\s+|to\s+look\s+up\s+)?(.+?)(?:\s+(?:and|then|to)\s+(?:tell|show|read|summari[sz]e|explain).*)?\s*[.?!]?\s*$/i,
+  ) ?? t.match(
+    /^\s*(?:please\s+|could\s+you\s+|can\s+you\s+)?(?:check|look|find|search|browse|locate|grab)\s+(?:for\s+|up\s+)?(.+?)\s+(?:in|inside|under|on)\s+(?:my\s+|the\s+|your\s+)?(downloads?|desktop|documents?|docs|inbox|vault|home(?:\s+folder)?)\s*(?:\s+(?:and|then|to)\s+(?:tell|show|read|summari[sz]e|explain).*)?\s*[.?!]?\s*$/i,
   );
   if (localFileMatch) {
-    const folderRaw = localFileMatch[1].toLowerCase().replace(/\s+folder/, "");
-    const name = localFileMatch[2].trim().replace(/[.?!]+$/, "");
+    // Disambiguate which group is folder vs name. Shape (A) captures folder
+    // first; shape (B) captures name first. The alternation order above
+    // means shape (A) returns groups [folder, name] and shape (B) returns
+    // [name, folder]. Detect by checking which group looks like a known
+    // folder word.
+    const KNOWN_FOLDERS = /^(?:downloads?|desktop|documents?|docs|inbox|vault|home(?:\s+folder)?)$/i;
+    const g1 = localFileMatch[1] ?? "";
+    const g2 = localFileMatch[2] ?? "";
+    let folderRaw: string, name: string;
+    if (KNOWN_FOLDERS.test(g1.trim())) {
+      folderRaw = g1.toLowerCase().replace(/\s+folder/, "");
+      name = g2.trim().replace(/[.?!]+$/, "");
+    } else {
+      folderRaw = g2.toLowerCase().replace(/\s+folder/, "");
+      name = g1.trim().replace(/[.?!]+$/, "");
+    }
     // Map "docs" → "documents", "home folder" → "home", strip trailing 's'
     // for downloads/documents so both forms match.
     const folder = folderRaw === "docs" ? "documents"
