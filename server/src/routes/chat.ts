@@ -257,6 +257,99 @@ async function handleChat(req: any, res: any) {
     return res.json({ kind: "message", text: answer });
   }
 
+  // 2.8 FOLLOW-UP SHORT-CIRCUIT. When the current message is a pronoun-
+  // anchored edit ("shorten it", "make it shorter"), a summary-of-prior
+  // ("summarise it", "tldr it"), a count-extraction from prior ("give me
+  // 3 key components"), or a topic-shift continuation ("what about X"),
+  // the agent's planner kept searching for the LITERAL pronoun phrase
+  // and got junk evidence (multi-turn harness showed "shorten it" →
+  // research.deep on "it" → refuse). Far better path: call the LLM
+  // directly with the prior assistant content as input plus a clear
+  // edit instruction. Sub-30s and reliable.
+  //
+  // Only fires when useThreadContext = true AND there's an actual prior
+  // assistant turn to operate on. Falls through to the agent if the LLM
+  // call throws so we don't trade a planner error for an LLM error.
+  if (useThreadContext && lastAssistantTurn) {
+    const editVerbMatch = text.match(/^\s*(shorten|expand|rewrite|polish|tighten|simplify|elaborate(?:\s+on)?|edit|revise|improve|condense|reformat|format|trim|clean\s+up)\s+(?:it|that|this|them|the\s+(?:above|prior|previous|response|reply|answer|content|text|draft))\s*[.?!]?\s*$/i);
+    const makeItMatch = text.match(/^\s*make\s+(?:it|that|this|them|the\s+(?:above|response|reply|answer))\s+(shorter|longer|simpler|clearer|punchier|brief|terse|verbose|tighter|crisper|more\s+\S+|less\s+\S+)\s*[.?!]?\s*$/i);
+    const summariseMatch = text.match(/^\s*(summari[sz]e|recap|tldr|brief\s+me\s+on|give\s+me\s+the\s+gist\s+of)\s+(?:it|that|this|them|the\s+(?:above|prior|previous|response|reply|answer))(\s+in\s+[^.?!]+)?\s*[.?!]?\s*$/i);
+    const countMatch = text.match(/^\s*(?:give\s+me|list|show\s+me|name|tell\s+me)\s+(\d+|two|three|four|five|six|seven|eight|nine|ten)\s+(.+?)\s*[.?!]?\s*$/i);
+    const whatAboutMatch = text.match(/^\s*(?:what\s+about|how\s+about|and\s+what\s+about)\s+(.+?)\s*[.?!]?\s*$/i);
+
+    // Map edit verbs to their grammatical adjective form. Naive
+    // ${verb}+"er" produced "shortener" / "rewriteer" / "elaborateer" —
+    // confusing for the LLM. A small map keeps the instruction clean.
+    const VERB_TO_DIRECTION: Record<string, string> = {
+      shorten: "shorter and more concise",
+      expand: "longer and more detailed",
+      rewrite: "in a clearer, more polished form",
+      polish: "more polished",
+      tighten: "tighter and more concise",
+      simplify: "simpler and easier to read",
+      elaborate: "more detailed",
+      "elaborate on": "more detailed",
+      edit: "with better clarity and flow",
+      revise: "with better clarity and flow",
+      improve: "with better clarity, structure, and accuracy",
+      condense: "more concise",
+      reformat: "with cleaner formatting",
+      format: "with cleaner formatting",
+      trim: "shorter and trimmed",
+      "clean up": "cleaner",
+    };
+
+    let followUpInstruction: string | null = null;
+    let followUpKind = "edit";
+    if (editVerbMatch) {
+      const verb = editVerbMatch[1].toLowerCase();
+      const direction = VERB_TO_DIRECTION[verb] ?? verb;
+      followUpInstruction = `Rewrite the prior assistant response to be ${direction}. Keep the meaning and key points intact; adjust style/length as requested. Output the edited version directly with no preamble.`;
+    } else if (makeItMatch) {
+      followUpInstruction = `Rewrite the prior assistant response to make it ${makeItMatch[1].toLowerCase()}. Keep the meaning intact; adjust as requested. Output the edited version directly with no preamble.`;
+    } else if (summariseMatch) {
+      const scope = (summariseMatch[2] ?? " in one or two sentences").trim();
+      followUpInstruction = `Summarise the prior assistant response ${scope}. Keep the most important points; drop the rest. Output the summary directly with no preamble.`;
+      followUpKind = "summarise";
+    } else if (countMatch) {
+      const n = countMatch[1];
+      const what = countMatch[2];
+      followUpInstruction = `From the prior assistant response, give me a numbered list of EXACTLY ${n} ${what}. Each item one or two short sentences. Output starts with "1." on the first line. No preamble, no trailing summary.`;
+      followUpKind = "count-extract";
+    } else if (whatAboutMatch) {
+      const entity = whatAboutMatch[1];
+      const lastUserQuestion = recentUserTurns[recentUserTurns.length - 1] ?? "";
+      followUpInstruction = `The user just asked about "${entity}" as a follow-up. Their previous question was: "${lastUserQuestion}". Apply the SAME question shape to "${entity}" and answer concisely (one or two sentences). For example: previous "what is the capital of France" + follow-up "what about Germany" → answer "The capital of Germany is Berlin."`;
+      followUpKind = "topic-shift";
+    }
+
+    if (followUpInstruction) {
+      // Bound prior content so the prompt stays small. 1200 chars is
+      // ~300 tokens of content + ~150 tokens of instruction — well under
+      // any model's context window.
+      const priorContent = lastAssistantTurn.slice(0, 1200);
+      const prompt = `${followUpInstruction}\n\nPrior assistant response (the content to work from):\n\n${priorContent}`;
+      const sys = "You are continuing a conversation. The user's most recent message is a follow-up that depends on the prior assistant response (shown below). Apply the requested transformation directly to that content. Do NOT search for new information; use only what's provided. Output the result with no preamble.";
+      // Force LOCAL Ollama (profile=undefined) so OR free-tier rate-limits
+      // don't take this fast path down. Local takes ~15-25s vs OR's ~5s
+      // when available, but is reliable. A previous run had this routing
+      // through synthesis profile → OR 429 → handler threw → agent ran
+      // and produced a 5-minute timeout answer about Robert Wyatt's "Sea
+      // Song" for a "shorten the RAG explanation" follow-up.
+      try {
+        const out = await ollamaGenerate(prompt, sys, { profile: undefined, maxTokens: 384 });
+        const cleaned = out.trim();
+        if (cleaned.length >= 5) {
+          return res.json({ kind: "message", text: cleaned, followUpKind });
+        }
+        // Fall through if the LLM returned nothing usable.
+      } catch (e: any) {
+        // Fall through to the agent — the planner can try.
+        console.warn(`[chat] follow-up direct-LLM failed: ${String(e?.message ?? e).slice(0, 100)}`);
+      }
+    }
+  }
+
   // 3. No template matched — route to general-task agent. The agent plans + executes
   //    using primitives, optionally saves the plan as a custom template for next time.
   const tpl = templates.find(t => t.id === "general-task")!;
