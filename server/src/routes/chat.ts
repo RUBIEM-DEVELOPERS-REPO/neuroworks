@@ -725,11 +725,18 @@ function extractIntent(text: string, hasThread: boolean): IntentDetection {
   const draftMatch = lower.match(/^\s*(?:draft|write|compose|prepare|create)\s+(?:a\s+|an\s+|the\s+|some\s+)?(.+)$/);
   if (draftMatch) {
     const body = draftMatch[1].trim();
-    // Detect deliverable type from body.
-    if (/\b(?:email|reply|message)\b/.test(body)) intent = "draft-email";
-    else if (/\b(?:memo)\b/.test(body)) intent = "draft-memo";
-    else if (/\b(?:report)\b/.test(body)) intent = "draft-report";
-    else if (/\b(?:brief|one[\s-]?pager|onepager)\b/.test(body)) intent = "draft-brief";
+    // Detect deliverable type from the HEAD NOUN of the artifact, not anywhere
+    // in the body. The old "match `email` anywhere" version misfired badly:
+    // "write a test plan for a flow where the user enters their email" was
+    // routed to draft-email and the agent asked "who's the recipient?". The
+    // fix walks past common adjective modifiers ("quick", "short",
+    // "1-page", "150-word") to find the actual artifact noun.
+    const headMatch = body.match(/^(?:(?:quick|short|brief|fast|simple|one|new|formal|casual|polite|friendly|[\d-]+(?:-?(?:page|word|paragraph|line|sentence))?|[\d-]+)\s+){0,3}([\w-]+)/i);
+    const head = headMatch ? headMatch[1].toLowerCase() : "";
+    if (/^(?:emails?|reply|replies|message|messages?)$/.test(head)) intent = "draft-email";
+    else if (/^memos?$/.test(head)) intent = "draft-memo";
+    else if (/^reports?$/.test(head)) intent = "draft-report";
+    else if (/^(?:briefs?|one-?pagers?|onepagers?)$/.test(head)) intent = "draft-brief";
     else intent = "draft-other";
 
     // Pull topic first ("about X" / "on X" / "regarding X" / "re: X"), then
