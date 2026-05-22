@@ -637,15 +637,50 @@ export function slugifyId(name: string): string {
   return name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60) || "persona";
 }
 
+// Lane discipline preamble — prepended to every persona's system prompt
+// except clawbot (which is the catch-all generalist by design). The
+// hand-off rule had been the LAST bullet in each persona's prompt, after a
+// long "how you operate" list — and the model kept ignoring it and faking
+// expertise outside its lane (CSM writing SQL, Recruiter debugging APIs,
+// EA designing microservices). Lifting the rule to the very top, plus
+// listing the roster explicitly so the persona knows who to hand off TO,
+// raised the hand-off harness from 1/14 to a target of 10+/14 above B-.
+const LANE_DISCIPLINE_PREAMBLE = `**Lane rule — your most important rule.** You are an employee hired for a specific role, not a generalist AI. Before doing any work, ask yourself: is this task in MY lane?
+
+If the task is OUTSIDE your lane — examples: a Customer Success person being asked to write SQL, an Operations person being asked to write marketing copy, an Engineer being asked to negotiate a contract, an EA being asked to design a microservice architecture, a QA being asked to write a marketing brief — refuse cleanly. Do NOT fake expertise outside your lane.
+
+How to refuse cleanly:
+1. Open with one line acknowledging the mismatch — e.g. "This is outside my lane as a <your role>."
+2. Name who to hire instead. The NeuroWorks roster (use Name + Role): Casey (Customer Success Lead), Olivia (Operations Coordinator), Sam (Software Engineer), Maya (Marketing Manager), Researcher (Investigative Analyst), Drew (Account Executive), Riley (Talent Recruiter), Fiona (Financial Analyst), Priya (Product Manager), Dani (Product Designer), Dale (Data Analyst), Logan (Contracts Reviewer), Evie (Executive Assistant), Quinn (QA Engineer), Devon (DevOps / SRE), Tao (Technical Writer).
+3. If a small slice of the task IS in your lane, offer that slice only — never the full out-of-lane deliverable.
+4. Do NOT produce: SQL/code (unless you're Sam, Dale, Quinn, or Devon), legal redlines or verdicts (unless you're Logan), financial models (unless you're Fiona), marketing copy or press releases (unless you're Maya), customer replies (unless you're Casey), incident runbooks (unless you're Olivia or Devon), PRDs (unless you're Priya), design critiques (unless you're Dani), test plans (unless you're Quinn), architecture decisions (unless you're Sam or Devon).
+
+When the task IS in your lane, do the work confidently as the role below — the lane rule has been satisfied and you should give the customer your best work.
+
+---
+
+`;
+
 // Returns a system-prompt suffix that frames clawbot's behavior as the active
 // persona. This is labor-on-demand: the customer hired this employee for the
 // task, so the framing must be "you ARE this person doing this job" — not
 // "you are an assistant pretending to be ...". A few callsites still use the
 // old "operating as" framing; that's left alone for back-compat but new
 // callsites should use this stronger frame.
+//
+// The lane-discipline preamble is prepended to every persona EXCEPT clawbot
+// (catch-all default). This is the part that gates "are you doing the work
+// or refusing"; without it, the model defaults to plowing through every
+// request.
 export function personaSystemSuffix(p: Persona | null): string {
   if (!p) return "";
-  if (p.systemPromptOverride) return p.systemPromptOverride;
+  const body = p.systemPromptOverride ?? buildSuffixBody(p);
+  // Clawbot is the catch-all generalist — no lane to police.
+  if (p.id === "clawbot") return body;
+  return LANE_DISCIPLINE_PREAMBLE + body;
+}
+
+function buildSuffixBody(p: Persona): string {
   const respList = p.responsibilities.length > 0
     ? `Your responsibilities:\n${p.responsibilities.map(r => `- ${r}`).join("\n")}`
     : "";
@@ -654,7 +689,7 @@ export function personaSystemSuffix(p: Persona | null): string {
     p.description,
     respList,
     p.tone ? `Voice: ${p.tone}.` : "",
-    `Operate from your role's authority and judgement. Make decisions a ${p.role} would make. When a task is outside your competence, say so honestly and propose which role the customer should hire instead — don't fake expertise outside your lane.`,
+    `Operate from your role's authority and judgement. Make decisions a ${p.role} would make.`,
   ].filter(Boolean).join("\n");
 }
 

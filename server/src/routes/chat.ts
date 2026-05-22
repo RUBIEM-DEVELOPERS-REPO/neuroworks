@@ -5,6 +5,7 @@ import { newJob, runJob } from "../lib/jobs.js";
 import { config } from "../config.js";
 import { searchVault } from "../lib/vault.js";
 import { getActivePersona, personaSystemSuffix } from "../lib/personas.js";
+import { checkLaneFit, buildOutOfLaneRefusal } from "../lib/lane.js";
 import { localInflightCount, pickLightestIdlePeer, pickPeerByRole, pickExecutor, delegateToPeer, type PeerInfo, type RoutingDecision } from "../lib/peers.js";
 import { curatePeerOutput } from "../lib/curation.js";
 import { ensureWorker, ensureExtraWorker } from "../lib/worker-manager.js";
@@ -354,6 +355,42 @@ async function handleChat(req: any, res: any) {
   //    using primitives, optionally saves the plan as a custom template for next time.
   const tpl = templates.find(t => t.id === "general-task")!;
   const persona = getActivePersona();
+
+  // ─── Lane gate ───
+  // BEFORE invoking the planner, check whether the active persona is the
+  // right hire for this task. If a non-clawbot persona is on the clock and
+  // the task is clearly outside their lane, return an inline refusal + hand-
+  // off recommendation. This is the gate the ho1 + ho2 hand-off harnesses
+  // exposed as missing: prompt-level lane rules get ignored once the planner
+  // has run tools, so the model writes fake SQL "with apologies" instead of
+  // refusing. The gate runs ~1-2s LLM check and short-circuits the entire
+  // plan-execute-synth pipeline when it fires.
+  //
+  // Skipped for:
+  //   • Clawbot (catch-all generalist by design — no lane to police)
+  //   • Very short queries (< 25 chars) that are usually pleasantries or
+  //     date/time questions handled upstream
+  //   • Continuation turns (useThreadContext + lastAssistantTurn set) — the
+  //     prior turn already committed the lane; switching mid-thread is the
+  //     customer's job, not ours.
+  if (persona && persona.id !== "clawbot" && text.length >= 25 && !(useThreadContext && lastAssistantTurn.length > 0)) {
+    try {
+      const lane = await checkLaneFit(persona, text);
+      if (!lane.inLane) {
+        const refusal = buildOutOfLaneRefusal(persona, lane);
+        return res.json({
+          kind: "message",
+          text: refusal,
+          activePersona: { id: persona.id, name: persona.name, role: persona.role },
+          laneRefusal: { reason: lane.reason, suggestedHire: lane.suggestedHire ?? null },
+        });
+      }
+    } catch (e: any) {
+      // Lane gate failures are non-fatal — fall through to the normal path
+      // and rely on the persona's prompt-level rule as the second line.
+      console.warn(`[chat] lane gate error: ${String(e?.message ?? e).slice(0, 100)}`);
+    }
+  }
 
   // Routing rules (in order):
   //   1. Default (CLAWBOT_DELEGATE_ALL=1): the primary delegates EVERY ad-hoc
