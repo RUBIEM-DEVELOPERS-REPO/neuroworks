@@ -179,6 +179,16 @@ const SKILL_KEYWORDS: { skill: string; patterns: RegExp[] }[] = [
   { skill: "vault-organization",     patterns: [/\bvault\b/i, /\bsecond\s+brain\b/i, /\bobsidian\b/i] },
   { skill: "list-making",            patterns: [/\b(?:make|give|write)\s+(?:me\s+)?(?:a\s+)?(?:bulleted?\s+|numbered\s+|checklist|to[\s-]?do)\b/i] },
   { skill: "table-making",           patterns: [/\b(?:make|build|create|give)\s+(?:me\s+)?(?:a\s+)?(?:comparison\s+)?table\b/i, /\b(?:as|in)\s+a\s+table\b/i] },
+  // ─── 2026-05-23: role-specific deliverable skills ───
+  { skill: "runbook-writing",        patterns: [/\brunbook\b/i, /\bincident\s+(?:response|triage|playbook)\b/i, /\bon[- ]?call\s+(?:procedure|playbook)\b/i] },
+  { skill: "meddic-qualification",   patterns: [/\bMEDDIC\b/i, /\bdiscovery\s+(?:call|notes?|questions?)\b/i, /\bdeal\s+(?:qualification|review|forecast)\b/i, /\benterprise\s+(?:sales|deal)\b/i, /\bsales\s+(?:position|qualification|pipeline)\b/i] },
+  { skill: "jd-writing",             patterns: [/\bjob\s+description\b/i, /\bJD\b(?!\s+for\s+sale)/i, /\bwrite\s+(?:a\s+|the\s+)?(?:job\s+post|JD|role\s+description)\b/i] },
+  { skill: "launch-positioning",     patterns: [/\blaunch\s+(?:blurb|copy|positioning|brief)\b/i, /\bchangelog\s+(?:entry|copy|blurb)\b/i, /\b(?:product|feature)\s+positioning\b/i] },
+  { skill: "ux-critique",            patterns: [/\bUX\s+(?:critique|review|audit|flow)\b/i, /\b(?:design|user\s+experience)\s+critique\b/i, /\bcritique\s+(?:this|the|our)\s+(?:UX|flow|design|UI)\b/i] },
+  { skill: "trade-off-memo",         patterns: [/\btrade[- ]?off\s+(?:memo|doc|analysis|review)\b/i, /\boption\s+comparison\s+memo\b/i, /\bA\s+vs\s+B\s+(?:memo|comparison)\b/i] },
+  { skill: "unit-economics",         patterns: [/\bunit\s+economics?\b/i, /\bLTV\s*(?:\/|to|vs|over)\s*CAC\b/i, /\bCAC\s+payback\b/i, /\bSaaS\s+benchmark\b/i, /\bnet\s+dollar\s+retention\b/i, /\bNDR\b/] },
+  { skill: "ab-test-read",           patterns: [/\bA\/?B\s+test\b/i, /\bsplit\s+test\b/i, /\bexperiment\s+result\b/i, /\bvariant\s+vs\s+control\b/i] },
+  { skill: "retry-different-approach", patterns: [/\b(?:try (?:again |a |another )(?:approach|angle|take|way|differently|different)|different (?:approach|angle|take))\b/i, /\b(?:that('?| i)s not (?:quite |what )?(?:it|right|what i wanted)|missed (?:the )?(?:point|mark)|wrong (?:approach|angle|tack))\b/i, /\b(?:redo (?:this|it|that)|do (?:it |this )?(?:again|over) (?:but )?differently|rethink (?:this|it)|another (?:take|go|attempt))\b/i] },
 ];
 
 // Combined picker: matches BOTH on intent AND on doc-type keywords in the

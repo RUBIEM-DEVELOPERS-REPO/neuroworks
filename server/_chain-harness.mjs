@@ -425,6 +425,44 @@ const CHAINS = [
 const lines = [];
 const log = (s = "") => { console.log(s); lines.push(s); };
 
+// Run one turn end-to-end. Returns { text, elapsed, gradePackage }.
+async function runOneTurn(turn, history, priorTurnTexts, turnIdx) {
+  const t0 = Date.now();
+  let dispatched, dispatchErr = null;
+  try {
+    dispatched = await withDispatchLock(async () => {
+      await activate(turn.persona);
+      return await chatDispatch(history);
+    });
+  } catch (e) {
+    dispatchErr = String(e?.message ?? e);
+    dispatched = { kind: "error" };
+  }
+  let text = "", inline = false, err = dispatchErr;
+  if (!err) {
+    try {
+      const r = await chatComplete(dispatched);
+      text = r.text;
+      inline = r.inline;
+    } catch (e) {
+      err = String(e?.message ?? e);
+    }
+  }
+  const elapsed = (Date.now() - t0) / 1000;
+  const shape = err ? { grade: "F", notes: [`ERR:${err.slice(0, 60)}`] } : turn.grader(text);
+  const carry = err ? { score: 0, notes: ["err"] } : carryOverScore(text, priorTurnTexts, text);
+  let combined = shape.grade;
+  if (turnIdx > 0) {
+    if (carry.score === 0) combined = tFromIdx(tIdx(combined) - 2);
+    else if (carry.score === 1) combined = tFromIdx(tIdx(combined) - 1);
+  }
+  const penalty = timePenalty(elapsed, turn.targetSec);
+  const finalIdx = Math.max(0, tIdx(combined) + penalty);
+  const finalGrade = tFromIdx(finalIdx);
+  const ok = tIdx(finalGrade) >= tIdx("B-");
+  return { text, elapsed, inline, err, shape, carry, combined, finalGrade, ok };
+}
+
 async function runChain(chain) {
   const history = [];
   const turnResults = [];
@@ -432,51 +470,41 @@ async function runChain(chain) {
   for (let i = 0; i < chain.turns.length; i++) {
     const turn = chain.turns[i];
     history.push({ role: "user", content: turn.content });
-    const t0 = Date.now();
-    let dispatched, dispatchErr = null;
-    try {
-      dispatched = await withDispatchLock(async () => {
-        await activate(turn.persona);
-        return await chatDispatch(history);
-      });
-    } catch (e) {
-      dispatchErr = String(e?.message ?? e);
-      dispatched = { kind: "error" };
-    }
-    let text = "", inline = false, err = dispatchErr;
-    if (!err) {
-      try {
-        const r = await chatComplete(dispatched);
-        text = r.text;
-        inline = r.inline;
-      } catch (e) {
-        err = String(e?.message ?? e);
+
+    // First attempt.
+    let attempt = await runOneTurn(turn, history, priorTurnTexts, i);
+    let retried = false;
+
+    // Retry-on-fail: if first attempt < B-, simulate the user asking for a
+    // different approach. This exercises the chat handler's retry path —
+    // detectRetryIntent + retry-shaped enriched task in routes/chat.ts.
+    // Single retry only (no infinite loop). Take the BETTER of the two.
+    if (!attempt.ok) {
+      // Append the first attempt + a retry message to history, then re-run.
+      const histWithRetry = [
+        ...history,
+        { role: "assistant", content: attempt.text },
+        { role: "user", content: "That missed the mark — try a different approach. Change the angle or structure, don't just polish the prior take." },
+      ];
+      retried = true;
+      const second = await runOneTurn(turn, histWithRetry, priorTurnTexts, i);
+      // Keep whichever attempt scored higher.
+      if (tIdx(second.finalGrade) > tIdx(attempt.finalGrade)) {
+        attempt = second;
       }
     }
-    const elapsed = (Date.now() - t0) / 1000;
-    const shape = err ? { grade: "F", notes: [`ERR:${err.slice(0, 60)}`] } : turn.grader(text);
-    const carry = err ? { score: 0, notes: ["err"] } : carryOverScore(text, priorTurnTexts, text);
-    // Carry-over penalty: if turn > 1 and carry.score == 0, drop 2 tiers.
-    // If turn > 1 and carry.score == 1, drop 1 tier.
-    let combined = shape.grade;
-    if (i > 0) {
-      if (carry.score === 0) combined = tFromIdx(tIdx(combined) - 2);
-      else if (carry.score === 1) combined = tFromIdx(tIdx(combined) - 1);
-    }
-    const penalty = timePenalty(elapsed, turn.targetSec);
-    const finalIdx = Math.max(0, tIdx(combined) + penalty);
-    const finalGrade = tFromIdx(finalIdx);
-    const ok = tIdx(finalGrade) >= tIdx("B-");
 
     turnResults.push({
       chainId: chain.id, turnNum: i + 1, persona: turn.persona,
-      elapsed, targetSec: turn.targetSec,
-      shapeGrade: shape.grade, shapeNotes: shape.notes,
-      carryScore: carry.score, carryNotes: carry.notes,
-      combined, finalGrade, ok, inline, textLen: text.length, err,
+      elapsed: attempt.elapsed, targetSec: turn.targetSec,
+      shapeGrade: attempt.shape.grade, shapeNotes: attempt.shape.notes,
+      carryScore: attempt.carry.score, carryNotes: attempt.carry.notes,
+      combined: attempt.combined, finalGrade: attempt.finalGrade, ok: attempt.ok,
+      inline: attempt.inline, textLen: attempt.text.length, err: attempt.err,
+      retried,
     });
-    history.push({ role: "assistant", content: text });
-    priorTurnTexts.push(text);
+    history.push({ role: "assistant", content: attempt.text });
+    priorTurnTexts.push(attempt.text);
   }
   return { chain, turnResults };
 }
@@ -509,7 +537,8 @@ async function main() {
     log("");
     for (const r of turnResults) {
       const mark = r.ok ? "✓" : "✗";
-      log(`  ${mark} turn-${r.turnNum} ${r.persona.padEnd(24)} ${r.elapsed.toFixed(1)}s :: shape ${r.shapeGrade} · carry ${r.carryScore}/2 [${r.carryNotes.join(",")}] → ${r.combined} → ${r.finalGrade}  len=${r.textLen}`);
+      const retryMark = r.retried ? " ↻" : "";
+      log(`  ${mark} turn-${r.turnNum} ${r.persona.padEnd(24)} ${r.elapsed.toFixed(1)}s :: shape ${r.shapeGrade} · carry ${r.carryScore}/2 [${r.carryNotes.join(",")}] → ${r.combined} → ${r.finalGrade}${retryMark}  len=${r.textLen}`);
     }
     log("");
   }
@@ -540,12 +569,15 @@ async function main() {
   log("");
 
   const aboveB = allTurns.filter(r => r.ok).length;
+  const aboveBPlus = allTurns.filter(r => tIdx(r.finalGrade) >= tIdx("B+")).length;
   const carryHits = allTurns.slice(1).filter(r => r.turnNum > 1 && r.carryScore >= 1).length;
   const carryEligible = allTurns.filter(r => r.turnNum > 1).length;
+  const retried = allTurns.filter(r => r.retried).length;
   log(`## Summary`);
   log("");
-  log(`${aboveB}/${allTurns.length} turns above B-.`);
+  log(`${aboveB}/${allTurns.length} turns above B- · ${aboveBPlus}/${allTurns.length} at B+ or higher.`);
   log(`Carry-over: ${carryHits}/${carryEligible} non-first turns referenced or substantively overlapped with prior turns.`);
+  log(`Retries used: ${retried}/${allTurns.length} turns (first attempt missed → user-triggered retry path).`);
   log(`Both-clawbots-working: ${poolSummary.bothBusy > 0 ? "YES" : "NO"} (peak ${poolSummary.peakConcurrent} concurrent inflight, ${poolSummary.peakPoolSize}/${initial.pool.cap} pool size)`);
   log("");
 

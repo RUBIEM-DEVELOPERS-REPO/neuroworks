@@ -1164,6 +1164,23 @@ function renderSessionBody(messages: { role: string; content: string; jobId?: st
 // dominate the prompt. The last assistant turn is capped at 400 chars (a
 // little richer because it usually contains the content the user is now
 // pointing at).
+// Retry-intent detection. When the user's current message asks us to TRY
+// AGAIN with a different approach (and a prior assistant turn exists), we
+// build the planner task with explicit "don't repeat the prior approach"
+// framing. The synth then loads the retry-different-approach skill and is
+// pushed toward a fundamentally different angle.
+//
+// Patterns are deliberately tight — false-positives here would derail
+// normal follow-ups ("shorten it", "elaborate on X") that are NOT retries
+// but refinements. A retry says "that's wrong / didn't work / try
+// differently". A refinement says "build on what you had".
+const RETRY_PATTERN = /\b(?:try (?:again |a |another )(?:approach|angle|take|way|differently|different)|different (?:approach|angle|take)|(?:that('?| i)s|this is)\s+not\s+(?:quite |what )?(?:it|right|what i wanted|the right (?:angle|approach))|(?:that|this)\s+(?:missed|isn't right|doesn't work)|missed (?:the )?(?:point|mark)|wrong (?:approach|angle|tack)|redo (?:this|it|that)|do (?:it |this )?(?:again|over) (?:but )?differently|rethink (?:this|it)|another (?:take|go|attempt)|start over|scrap (?:that|this) and)\b/i;
+
+function detectRetryIntent(text: string, hasLastAssistant: boolean): boolean {
+  if (!hasLastAssistant) return false;
+  return RETRY_PATTERN.test(text);
+}
+
 function buildEnrichedTask(
   text: string,
   useThreadContext: boolean,
@@ -1176,6 +1193,33 @@ function buildEnrichedTask(
   if (persona) {
     parts.push(`(You are operating as ${persona.name}, the ${persona.role}. Bias tool choices, output shape, and depth toward this role's conventions.)`);
   }
+
+  // ─── Retry path ───
+  // If the customer said "try again differently" (or similar) AND we have a
+  // prior assistant turn, build a retry-shaped task that gives the planner
+  // explicit "avoid the prior approach" context. The PRIOR USER TASK becomes
+  // the actual task to plan against — the retry signal itself isn't the work.
+  if (useThreadContext && lastAssistantTurn && detectRetryIntent(text, true)) {
+    // Use the most recent prior user turn as the original task. If there's
+    // no prior user turn (rare — retry on first turn would be impossible),
+    // fall back to treating the retry text itself as the task.
+    const originalTask = priorUserTurns.length > 0 ? priorUserTurns[priorUserTurns.length - 1] : text;
+    const flatPrior = lastAssistantTurn.replace(/```[\s\S]*?```/g, "[code]").replace(/\s+/g, " ").trim().slice(0, 600);
+    parts.push(
+      `**RETRY — different approach required.**\n` +
+      `Original task: ${originalTask}\n\n` +
+      `The previous attempt produced:\n"${flatPrior}${lastAssistantTurn.length > 600 ? "…" : ""}"\n\n` +
+      `The customer said: "${text}"\n\n` +
+      `Instructions for THIS attempt:\n` +
+      `- Do NOT repeat the prior approach's structure, angle, or framing.\n` +
+      `- Pick ONE axis to change: structure (memo→table→checklist), angle (engineering→user→business), scope (zoom in or zoom out), first move (problem→solution swap), or deliverable shape (long→short, dense→scannable).\n` +
+      `- Open with one acknowledgment line that names the new angle (e.g. "Take 2 — leading with the user view this time").\n` +
+      `- Then deliver the new answer. Do NOT polish the prior; produce something that looks fundamentally different.\n` +
+      `- If the persona's lane discipline applies, still honour it — the new angle has to stay in lane.`,
+    );
+    return parts.join("\n\n");
+  }
+
   if (useThreadContext && (priorUserTurns.length > 0 || lastAssistantTurn)) {
     const lines: string[] = ["Recent conversation (chronological):"];
     // Interleave so the planner sees the actual back-and-forth, not just
