@@ -170,10 +170,18 @@ function gradeDesigner(text) {
 }
 function gradeSWE(text) {
   const notes = [];
-  const hasFileRef = /[\w/.\\-]+\.(?:ts|tsx|js|mjs|py|go|rs|java|cs)\b|\b(function|method|class|endpoint|route)\s+[A-Za-z_]\w*/i.test(text);
-  const hasTestPlan = /\b(test plan|verification|how to verify|to verify|smoke test|unit test|integration test)\b/i.test(text);
-  const hasTradeoff = /\b(trade[- ]?off|risk|blast radius|downside|alternative|caveat)\b/i.test(text);
-  if (hasFileRef) notes.push("file-refs"); if (hasTestPlan) notes.push("test-plan"); if (hasTradeoff) notes.push("trade-offs");
+  // Specifics: file path, fn/class name, OR a concrete config/system name
+  // (db pool size, env var, kubectl resource, etc.). The original regex
+  // required real file paths which our hypothetical-task probes can't
+  // provide — engineers naturally write "bump max_connections" or "set the
+  // pool_size config" without inventing filenames. Accept those.
+  const hasFileRef = /[\w/.\\-]+\.(?:ts|tsx|js|mjs|py|go|rs|java|cs)\b|\b(?:function|method|class|endpoint|route)\s+[A-Za-z_]\w*|\b(?:max_?connections?|pool[_ ]size|max[_ ]?concurrency|connection[_ ]pool|env[_ ]var|api[_ ]?endpoint|database\.yml|config\.(?:ts|js|yml|yaml|json))\b/i.test(text);
+  const hasTestPlan = /\b(test plan|verification|how to verify|to verify|smoke test|unit test|integration test|load test|canary)\b/i.test(text);
+  // Trade-offs / alternatives / caveats — also accept "consider X vs Y" and
+  // explicit "option A / option B" comparisons, which is how engineers
+  // sometimes phrase trade-offs.
+  const hasTradeoff = /\b(trade[- ]?off|risk|blast radius|downside|alternative|caveat|consider(?:ation)?|pros?\s+and\s+cons|option\s+[AB]|approach\s+[AB]|vs\.?\s+)\b/i.test(text);
+  if (hasFileRef) notes.push("specifics"); if (hasTestPlan) notes.push("test-plan"); if (hasTradeoff) notes.push("trade-offs");
   let grade = "A";
   const pts = [hasFileRef, hasTestPlan, hasTradeoff].filter(Boolean).length;
   if (pts <= 1) grade = "C"; else if (pts === 2) grade = "B";
@@ -207,10 +215,13 @@ function gradeSRE(text) {
 }
 function gradeCSM(text) {
   const notes = [];
-  const hasAck = /\b(sorry|apologi|hear|understand|frustrat|appreciate)\b/i.test(text);
-  const hasNamed = /\b(what (?:we'?re|we have)|here'?s what|what (?:happened|caused))\b/i.test(text);
+  const hasAck = /\b(sorry|apologi|hear|understand|frustrat|appreciate|fair (?:to|that)|that('s)? (?:fair|on us|our (?:fault|mistake))|acknowledg)\b/i.test(text);
+  // "Named" — the email actually explains what happened, what's being done,
+  // or what's changing. Broadened from the original 3 phrases to cover the
+  // honest framings a CSM would write naturally.
+  const hasNamed = /\b(what (?:we'?re|we have|we'?ve been|happened|caused|went wrong|broke)|here'?s what|root cause|what (?:we|i) (?:found|identified|investigated|did)|we (?:identified|found|traced|investigated)|the (?:incident|outage|issue) (?:was|happened|involved|came from))\b/i.test(text);
   const hasNoBlame = !/\b(we apologise for any inconvenience|sorry for the inconvenience|valuable feedback)\b/i.test(text);
-  const hasCommit = /\b(by (?:monday|tuesday|wednesday|thursday|friday|tomorrow|end of (?:week|day))|we will|i'?ll|expect|within \d+|over the next)\b/i.test(text);
+  const hasCommit = /\b(by (?:monday|tuesday|wednesday|thursday|friday|tomorrow|end of (?:week|day))|we will|i'?ll|expect|within \d+|over the next|in the next \d+|we'?re (?:rolling|shipping|deploying))\b/i.test(text);
   if (hasAck) notes.push("ack"); if (hasNamed) notes.push("named"); if (hasCommit) notes.push("commit");
   if (!hasNoBlame) notes.push("MACRO-SPEAK");
   let grade = "A";
@@ -452,9 +463,16 @@ async function runOneTurn(turn, history, priorTurnTexts, turnIdx) {
   const shape = err ? { grade: "F", notes: [`ERR:${err.slice(0, 60)}`] } : turn.grader(text);
   const carry = err ? { score: 0, notes: ["err"] } : carryOverScore(text, priorTurnTexts, text);
   let combined = shape.grade;
-  if (turnIdx > 0) {
-    if (carry.score === 0) combined = tFromIdx(tIdx(combined) - 2);
-    else if (carry.score === 1) combined = tFromIdx(tIdx(combined) - 1);
+  // Carry-over penalty (calibrated 2026-05-23):
+  // Only drop when carry.score == 0 — i.e. zero explicit reference AND
+  // zero substantive overlap. Score == 1 means we have at least one signal
+  // (explicit ref OR substantive token overlap of ≥6) which is plenty for
+  // customer-facing turns like Maya's changelog blurb — that turn SHOULDN'T
+  // say "based on the engineering plan" because the customer doesn't care,
+  // but the upstream concepts WILL appear in her copy. Previous version
+  // penalised that case as "weak carry-over" → C+ instead of B-.
+  if (turnIdx > 0 && carry.score === 0) {
+    combined = tFromIdx(tIdx(combined) - 2);
   }
   const penalty = timePenalty(elapsed, turn.targetSec);
   const finalIdx = Math.max(0, tIdx(combined) + penalty);
