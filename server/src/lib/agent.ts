@@ -113,6 +113,46 @@ export type AgentResult = {
 // PLAN_SYSTEM, POLISHED_DIRECT, POLISHED_SYNTH moved to agent-prompts.ts
 // — see that file for the prompt bodies. Imported above; usages below.
 
+// Phrases that signal "the customer wants real external sources, not your
+// training-data memory". When any of these appear in the task we add a
+// research-required hint to the planner prompt — without it the LLM
+// planner sometimes shortcuts long persona tasks ("I have a discovery call
+// Friday — research Anthropic's enterprise pricing as of 2026 then prep
+// MEDDIC notes") to a direct ollama.generate from memory, producing
+// confident but untethered output. Patterns are matched case-insensitive
+// against the full enriched task body. Returns the matched phrase for
+// audit (so the planner prompt can name it back), or null when no signal.
+const RESEARCH_SIGNAL_PATTERNS: RegExp[] = [
+  // Look-up verbs anywhere in the body
+  /\b(?:look\s+(?:it\s+|them\s+|this\s+)?up|research\s+(?:it|them|this|how|what|who|the|on|whether|if)|find\s+(?:out|me\s+)\s*(?:what|how|who|whether|if)|investigate|dig\s+into|look\s+into)\b/i,
+  // "Look up <noun> (on the web|online)" — most common research framing
+  /\blook\s+up\s+(?:the\s+|a\s+|an\s+|some\s+)?\w+/i,
+  // Recency markers — claims that depend on fresh facts
+  /\b(?:latest|most\s+recent|currently|as\s+of\s+20\d{2}|in\s+20(?:2[5-9]|3\d)|this\s+(?:year|quarter|month))\b/i,
+  /\b(?:the\s+current\s+(?:state|landscape|consensus|best\s+practices?|status)|what(?:'?s|\s+is)\s+(?:the\s+)?(?:current|latest|most\s+recent|trending))\b/i,
+  // Benchmark / industry-typical asks
+  /\b(?:industry[- ]?(?:standard|typical|average|median|benchmark)|best[- ]in[- ]class\s+(?:companies|teams|orgs|saas)|what\s+(?:do|does)\s+(?:typical|good|great|leading)\s+(?:companies|teams|saas|firms|orgs|engineers))\b/i,
+  /\b(?:benchmark(?:s|ed|ing)?|comparable\s+(?:company|companies|saas|firm)|what\s+(?:are\s+the\s+|what\s+are\s+)?typical\s+(?:ranges?|numbers?|values?|figures?|rates?))\b/i,
+  // "According to" / cite-a-source phrasing
+  /\b(?:according\s+to\s+(?:a\s+|the\s+|recent\s+)?(?:report|study|article|analyst|industry|survey|benchmark)|cite\s+(?:your\s+|the\s+)?sources?|with\s+citations?|with\s+sources?|grounded\s+in\s+(?:a\s+|the\s+)?source)\b/i,
+  // Named-report or report-class lookups
+  /\b(?:OpenView|SaaStr|KeyBanc|Bessemer|Gartner|Forrester|McKinsey|Bain|Goldman|Deloitte|Stack\s+Overflow\s+Developer\s+Survey|DORA\s+State\s+of\s+DevOps|JetBrains)\b/i,
+  // Verbs that require real-world data
+  /\b(?:price\s+check|pricing\s+(?:page|structure|tiers|model)|recent\s+(?:funding|launch|product|release|hire)|changelog|release\s+notes|roadmap\s+for\s+\w+)\b/i,
+  // Multi-company / market-scan phrasings
+  /\b(?:who(?:'?s|\s+is)\s+(?:playing|competing|in)\s+(?:this|the)\s+(?:market|space|category)|landscape\s+(?:for|of|on)|map\s+(?:the\s+|out\s+the\s+)?(?:market|landscape|competitive\s+set))\b/i,
+];
+
+export function detectResearchSignals(text: string): string | null {
+  if (!text || text.length < 10) return null;
+  const cap = text.slice(0, 4000);
+  for (const re of RESEARCH_SIGNAL_PATTERNS) {
+    const m = cap.match(re);
+    if (m) return m[0].slice(0, 60);
+  }
+  return null;
+}
+
 // Hard cap on the planner LLM call. Slow local models occasionally take 2+
 // minutes JUST to plan — by which point the customer has given up. After
 // PLAN_TIMEOUT_MS we abandon the LLM plan and fall back to defaultVaultPlan,
@@ -145,8 +185,21 @@ export async function plan(task: string, _personaSystemSuffix?: string, push?: (
       }
     } catch { /* tolerate — vault search failure shouldn't block planning */ }
   }
+  // Research-trigger hint: when the task TEXT itself implies the customer
+  // wants real external sources (look-up verbs, recency markers, benchmark
+  // asks, "according to a recent report" phrasing), explicitly tell the
+  // planner: do NOT short-circuit to ollama.generate / direct answer —
+  // fetch web sources first. This catches the failure mode where the LLM
+  // planner reads a long persona task ("I have a discovery call... research
+  // Anthropic's pricing... then prep MEDDIC") and picks a single
+  // ollama.generate from training memory because the surface verb wasn't
+  // a bare "research X".
+  const researchHint = detectResearchSignals(task);
+  const researchContext = researchHint
+    ? `\n\nResearch required: the task contains "${researchHint}" — the customer expects you to FETCH external sources, not answer from memory. Your plan MUST include at least one of: research.deep, research.multiperspective, web.search + smartFetch chain, or web.scrape. If you also need to synthesise persona-flavored output afterward, chain a final ollama.generate that takes the research result as evidence. Do NOT skip the fetch step.\n`
+    : "";
   // Compact catalog: ~40% smaller prompt → faster planning on small models.
-  const sys = PLAN_SYSTEM + primitivesPromptCatalog({ compact: true }) + vaultContext;
+  const sys = PLAN_SYSTEM + primitivesPromptCatalog({ compact: true }) + vaultContext + researchContext;
 
   // Race the planner LLM call against PLAN_TIMEOUT_MS. If the LLM stalls,
   // we fall back to an empty plan; the caller then uses defaultVaultPlan
@@ -1580,6 +1633,64 @@ export function heuristicPlan(task: string): Plan | null {
     }
   }
 
+  // Research-signal heuristic. When the task TEXT contains strong cues
+  // that the customer expects fresh external sources ("look up X",
+  // "research Y", "as of 2026", "industry benchmark", "according to a
+  // recent report"), force a research.deep step BEFORE the LLM planner
+  // gets a chance to short-circuit to a memory-only ollama.generate.
+  //
+  // Why this exists: rs1 harness showed 1/6 above B- because the LLM
+  // planner kept answering long persona tasks ("I have a discovery call
+  // Friday — research Anthropic's pricing as of 2026, then prep MEDDIC")
+  // from training memory. The planner-side hint we added in plan()
+  // wasn't enough — the LLM still chose the cheaper path.
+  //
+  // Bypass conditions:
+  //   • detectResearchSignals fires (look-up verbs, recency markers,
+  //     benchmark / industry-typical asks, named research firms, etc.)
+  //   • Task is non-trivial (>= 60 chars) — short asks already get
+  //     caught by aboutMatch / webSearchMatch above.
+  //   • No URL in the task (URLs go to web.scrape via the earlier
+  //     heuristic).
+  const researchTrigger = detectResearchSignals(t);
+  if (researchTrigger && t.length >= 60 && !/https?:\/\/\S+/.test(t)) {
+    // Extract a focused research query. Try in order:
+    //   1. "look up X" / "research X" / "investigate X" anywhere in body
+    //   2. "benchmarks for X" / "the current state of X"
+    //   3. Fall back to extractTopic over the whole task
+    let query: string | undefined;
+    const lookupMatch = t.match(/\b(?:look\s+up|research|investigate|dig\s+into|look\s+into|find\s+out\s+(?:about|what|how))\s+(?:the\s+|a\s+|an\s+|some\s+|how\s+|what\s+|whether\s+)?(.{8,140}?)(?:[.,;:!?\n]|\s+then\b|\s+and\s+(?:then\s+)?(?:prep|draft|write|build|create|compose)\b|$)/i);
+    if (lookupMatch) query = lookupMatch[1].trim();
+    if (!query) {
+      const benchmarkMatch = t.match(/\b(?:benchmarks?|industry[- ]?(?:standard|typical|average|median)|current\s+(?:state|landscape|consensus|best\s+practices?))\s+(?:for|of|on|about|in)\s+(.{6,120}?)(?:[.,;:!?\n]|$)/i);
+      if (benchmarkMatch) query = benchmarkMatch[1].trim();
+    }
+    if (!query) {
+      // Final fallback: just compress the first 140 chars of the task as
+      // the search query. Imperfect but keeps the heuristic robust.
+      query = extractTopic(t).slice(0, 140);
+    }
+    // Strip persona-prefix wrappers that might've slipped in via enriched
+    // task (research.deep's query is user-facing in the captured note —
+    // we want it clean, not "You are Drew operating as ...").
+    query = query
+      .replace(/^[\s.,;:()]+|[\s.,;:()]+$/g, "")
+      .replace(/\s{2,}/g, " ")
+      .slice(0, 140);
+    if (query.length >= 6) {
+      return {
+        steps: [{
+          tool: "research.deep",
+          args: { query, depth: 3, capture: true },
+          rationale: `research signal detected ("${researchTrigger}") — fetching external sources before synth so the persona answer is grounded, not memory-only`,
+          label: humanStepLabel("research.deep", { query }),
+        }],
+        summary: `Research: ${query}`,
+        waves: [[0]],
+      };
+    }
+  }
+
   // "draft / write / compose / create a [doc type] for/about X" — grounded
   // synthesis. Was previously a bare ollama.generate which let the model
   // fabricate meanings for proper nouns / acronyms (e.g. "draft an AIIA
@@ -1685,7 +1796,18 @@ async function synthesize(
   // already returned a complete answer, skip the synthesis LLM call entirely.
   // Saves 30-60s on the most common ad-hoc shape — the primitive did the work,
   // re-LLMing it would just paraphrase what we already have.
-  if (succeeded.length === 1 || (succeeded.length > 0 && hasOnlyOneSemanticStep(succeeded))) {
+  //
+  // EXCEPTION: when an active persona is set AND the customer's task is
+  // long-form (>= 200 chars — implying a persona-specific deliverable like
+  // MEDDIC notes / fact-check verdict / competitive brief), DON'T pass
+  // through. We need to reshape the research result into the persona's
+  // signature output format. Without this carve-out, the rs1 harness saw
+  // raw research notes returned instead of MEDDIC / brief / verdict shapes,
+  // and the graders dinged the shape even though the citations were there.
+  const taskIsLongForm = task.length >= 200;
+  const hasPersona = !!personaSystemSuffix && personaSystemSuffix.trim().length > 50;
+  const skipPassthroughForPersona = hasPersona && taskIsLongForm;
+  if (!skipPassthroughForPersona && (succeeded.length === 1 || (succeeded.length > 0 && hasOnlyOneSemanticStep(succeeded)))) {
     const candidate = succeeded[0]?.result;
     if (candidate && typeof candidate === "object" && typeof candidate.answer === "string" && candidate.answer.trim().length >= 60) {
       onPartial?.(candidate.answer.trim());

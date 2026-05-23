@@ -189,6 +189,12 @@ const SKILL_KEYWORDS: { skill: string; patterns: RegExp[] }[] = [
   { skill: "unit-economics",         patterns: [/\bunit\s+economics?\b/i, /\bLTV\s*(?:\/|to|vs|over)\s*CAC\b/i, /\bCAC\s+payback\b/i, /\bSaaS\s+benchmark\b/i, /\bnet\s+dollar\s+retention\b/i, /\bNDR\b/] },
   { skill: "ab-test-read",           patterns: [/\bA\/?B\s+test\b/i, /\bsplit\s+test\b/i, /\bexperiment\s+result\b/i, /\bvariant\s+vs\s+control\b/i] },
   { skill: "retry-different-approach", patterns: [/\b(?:try (?:again |a |another )(?:approach|angle|take|way|differently|different)|different (?:approach|angle|take))\b/i, /\b(?:that('?| i)s not (?:quite |what )?(?:it|right|what i wanted)|missed (?:the )?(?:point|mark)|wrong (?:approach|angle|tack))\b/i, /\b(?:redo (?:this|it|that)|do (?:it |this )?(?:again|over) (?:but )?differently|rethink (?:this|it)|another (?:take|go|attempt))\b/i] },
+  // ─── 2026-05-23: research/analysis skills — bias the synth toward
+  // properly grounded answers when the task implies external sourcing ───
+  { skill: "benchmark-lookup",       patterns: [/\b(?:benchmark|industry[- ]?(?:standard|typical|average|median)|best[- ]in[- ]class|where\s+should\s+(?:our|my|we)\s+\S+\s+sit|what\s+(?:do|does)\s+(?:typical|standard|best)\s+companies)\b/i, /\b(?:what(?:'?s|\s+is)\s+(?:a\s+)?(?:typical|standard|industry|good|healthy)\s+(?:range|number|value|figure)\s+for)\b/i, /\b(?:NDR|GRR|CAC\s+payback|LTV[\/: ]?CAC|gross\s+margin|net\s+revenue\s+retention)\s+benchmark/i] },
+  { skill: "source-triangulation",   patterns: [/\b(?:triangulat|cross[- ]?(?:check|verify|reference)|verify\s+across|multiple\s+sources|three\s+sources|independent\s+sources)\b/i, /\b(?:confirm(?:ed)?\s+(?:by|with|across)|corroborat)\b/i] },
+  { skill: "primary-source-check",   patterns: [/\b(?:primary\s+source|official\s+(?:source|page|filing|docs?|documentation)|go\s+to\s+the\s+(?:source|filing|docs?|primary)|filing|10[- ]K|SEC\s+filing|press\s+release)\b/i, /\b(?:from\s+(?:their|the\s+company['']?s?)\s+(?:own\s+)?(?:site|page|docs?|documentation|pricing))\b/i] },
+  { skill: "landscape-scan",         patterns: [/\b(?:landscape|market\s+(?:landscape|map|overview|scan)|who(?:'?s|\s+is)\s+(?:playing|in)\s+(?:this|the)\s+(?:market|category|space)|map\s+(?:the\s+|out\s+the\s+)?market|category\s+overview|state\s+of\s+the\s+(?:market|category|industry))\b/i] },
 ];
 
 // Combined picker: matches BOTH on intent AND on doc-type keywords in the
