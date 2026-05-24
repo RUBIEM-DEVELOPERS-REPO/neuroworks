@@ -1,0 +1,127 @@
+# Test harness v2 run :: v2-r2 :: 2026-05-20T16:17:56.072Z
+Server:        http://127.0.0.1:7471
+Model:         qwen2.5:3b
+OpenRouter:    enabled (openai/gpt-oss-20b:free)
+
+> date (what's the date today...)
+  0s :: A  -> A
+> bigmath (what is 137 * 24...)
+  0s :: A  -> A
+> rag (explain RAG retrieval augmented generation...)
+  50.9s :: A  -> A
+> who-dario (who is dario amodei...)
+  28.6s :: B  -> B
+> vault-list5 (list 5 notes from my vault inbox folder...)
+  67s :: C  -> C
+> vault-ts (search my vault for notes mentioning typescript...)
+  0.2s :: B+  -> B+
+> rag-best (research how RAG systems handle citation grounding...)
+  101.9s :: A-  -> A-
+> llm-compare (compare local LLM inference with cloud APIs and gi...)
+  89.8s :: A  -> A
+| id | tier | target | elapsed | content | time | FINAL |
+|---|---|---|---|---|---|---|
+| date | trivial | 5s | 0s | A | 0 | **A** |
+| bigmath | trivial | 5s | 0s | A | 0 | **A** |
+| rag | research-light | 60s | 50.9s | A | 0 | **A** |
+| who-dario | research-light | 60s | 28.6s | B | 0 | **B** |
+| vault-list5 | multi-step | 120s | 67s | C | 0 | **C** |
+| vault-ts | multi-step | 90s | 0.2s | B+ | 0 | **B+** |
+| rag-best | heavy | 200s | 101.9s | A- | 0 | **A-** |
+| llm-compare | heavy | 200s | 89.8s | A | 0 | **A** |
+
+Summary: 6 strictly above B - 1 at B - 1 below B / total 8
+
+## Outputs
+
+### date - what's the date today
+grade: **A** (content A, time penalty 0) - 0s vs 5s target
+
+```
+Today is Wednesday, May 20, 2026.
+```
+
+### bigmath - what is 137 * 24
+grade: **A** (content A, time penalty 0) - 0s vs 5s target
+
+```
+137 * 24 = 3288
+```
+
+### rag - explain RAG retrieval augmented generation
+grade: **A** (content A, time penalty 0) - 50.9s vs 60s target
+plan: 1 step(s) - research.deep=ok/38941ms
+
+```
+**Retrieval‑Augmented Generation (RAG)** is a two‑stage architecture that makes large‑language‑model (LLM) answers more factual and up‑to‑date by first pulling relevant external information and then using that information to guide generation.
+
+| Stage | What happens | Key components |
+|-------|--------------|----------------|
+| **Retrieval** | The user query is encoded into a vector and matched against a **vector database** of pre‑computed embeddings of documents (or API results, knowledge‑base entries, etc.). The top‑k most similar chunks are returned. | • External knowledge source (documents, APIs)  <br>• Text chunking & preprocessing  <br>• Embedding model  <br>• Vector DB  <br>• Query en
+```
+
+### who-dario - who is dario amodei
+grade: **B** (content B, time penalty 0) - 28.6s vs 60s target
+plan: 1 step(s) - research.deep=ok/23672ms
+
+```
+The available evidence does not contain any substantive information about Dario Amodei. The only references are internal file titles (“Research: who is dario amodei” and “Ad‑hoc: who is dario amodei”) without any content, and the web sources are generic Google login pages that do not mention him. Consequently, I cannot provide a evidence‑grounded answer about who Dario Amodei is.
+```
+
+### vault-list5 - list 5 notes from my vault inbox folder
+grade: **C** (content C, time penalty 0) - 67s vs 120s target
+plan: 4 step(s) - research.deep=ok/10986ms, quality.check=ok/18070ms, security.scan=ok/0ms, peer.review=fail/8745ms
+
+```
+I couldn’t locate any notes in your **Inbox** folder, so I’m unable to list five items.
+
+**What I need to proceed**
+- Confirmation that the “Inbox” folder is the correct source for the notes you want.
+- Whether the notes might be stored under a different sub‑folder or tag.
+- If you have recently added notes, a brief description of their titles or timestamps.
+```
+
+### vault-ts - search my vault for notes mentioning typescript
+grade: **B+** (content B+, time penalty 0) - 0.2s vs 90s target
+
+```
+Found **4** notes mentioning **typescript**:
+
+1. **decisions.md** (line 23) — **Decision:** The cloud-side `clawbot` is built as a small standalone TypeScript repo that runs in GitHub Actions, not as an openclaw plugin. Openclaw stays in 
+2. **_knowledge/downloads/files/Documents/dpa_system_testing_strategy_for_claude.md** (line 502) — If using **Node.js / TypeScript**:
+3. **_neuroworks/jobs/2026-05-20-search-the-knowledge-base-09a9293a.md** (line 26) — "query": "typescript"
+4. **_neuroworks/jobs/2026-05-20-search-the-knowledge-base-b847b95a.md** (line 26) — "query": "my vault for notes mentioning typescript"
+```
+
+### rag-best - research how RAG systems handle citation grounding and give me 3 best practices
+grade: **A-** (content A-, time penalty 0) - 101.9s vs 200s target
+skill: research-deep (score 41)
+plan: 4 step(s) - research.deep=ok/43525ms, quality.check=ok/17197ms, security.scan=ok/0ms, peer.review=fail/9847ms
+
+```
+1. Attach a persistent identifier (e.g., document ID, URL, or DOI) to each retrieved passage and propagate that identifier through the generation step so the model can emit a citation token alongside any reused content [1].
+
+2. Fine‑tune or instruction‑tune the generator on datasets where source attributions are explicitly marked, enabling it to learn when and how to place citation tokens for factual statements [1].
+
+3. After generation, post‑process the output to render inline links or footnotes and optionally verify that each cited identifier resolves to an accessible source, ensuring transparent grounding of every claim [1].
+```
+
+### llm-compare - compare local LLM inference with cloud APIs and give me 3 trade-offs each way
+grade: **A** (content A, time penalty 0) - 89.8s vs 200s target
+plan: 4 step(s) - research.multiperspective=ok/31821ms, quality.check=ok/31418ms, security.scan=ok/0ms, peer.review=fail/9985ms
+
+```
+**For local inference**
+
+1. Requires upfront hardware investment and ongoing maintenance, which can be costly for small teams.  
+2. Keeps data on‑premises, offering stronger privacy and compliance control.  
+3. Provides consistent latency without reliance on internet connectivity or external service availability.  
+
+**For cloud APIs**
+
+1. Operates on a pay‑per‑use model, eliminating capital expense but potentially leading to higher long‑term costs at scale.  
+2. Shifts maintenance and scaling responsibilities to the provider, reducing operational overhead.  
+3. Enables rapid access to the latest model updates and larger model sizes without local hardware constraints.  
+
+*From general knowled
+```

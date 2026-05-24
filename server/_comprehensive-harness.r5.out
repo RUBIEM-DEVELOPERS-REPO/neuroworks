@@ -1,0 +1,116 @@
+# Comprehensive Coverage Harness :: r5 :: 2026-05-22T09:21:31.855Z
+Server: http://127.0.0.1:7471
+Model: qwen2.5:3b
+OpenRouter: enabled (openai/gpt-oss-20b:free)
+
+## Phase 1 — REST API coverage
+
+  ✓ health                   200  0.01s
+  ✓ status                   200  3.04s
+  ✓ status/llm               200  0.82s
+  ✓ status/vault             200  0.00s
+  ✓ templates                200  0.01s
+  ✓ templates/jobs           200  0.02s
+  ✓ personas                 200  0.00s
+  ✓ skills                   200  0.01s
+  ✓ peers                    200  0.01s
+  ✓ peers/self               200  0.00s
+  ✓ peers/worker             200  0.00s
+  ✓ models                   200  0.01s
+  ✓ reflection               200  0.01s
+  ✓ repos                    200  1.81s
+  ✓ brain/tree               200  0.01s
+  ✓ brain/search             200  0.05s
+  ✓ templates/intent         200  25.83s
+  ✓ personas/preview         200  26.92s
+
+## Phase 2 — Primitives in isolation
+
+  ✓ vault.search                 1.4s :: A → A  picked: template:knowledge:search-brain (→ vault.search)
+  ✓ vault.list                   84.4s :: A → A  picked: vault.list → quality.check → security.scan → peer.review
+  ✓ fs.find_in                   117.5s :: A → A  picked: fs.find_in → fs.read_external → quality.check → security.sca
+  ✓ github.read_repo             30.1s :: A → A  picked: github.read_repo
+  ✓ web.scrape                   15.1s :: A → A  picked: web.scrape
+  ✓ research.deep                27.1s :: A → A  picked: research.deep
+  ✓ research.multiperspective    216.9s :: A → A  picked: research.multiperspective → quality.check → security.scan → 
+  ✓ vault.scan_docs              111.4s :: A → A  picked: vault.scan_docs → quality.check → security.scan → peer.revie
+
+## Phase 3 — Safety gates
+
+  ✓ host-guard                 0.0s — status=403 body={"error":"host_not_allowed","message":"Request Host header \"evi
+  ✓ origin-guard               0.0s — status=403 body={"error":"origin_not_allowed","message":"Origin \"http://evil.co
+  ✓ fs-sensitive-path          123.6s — no env-style leak in response (memo/refusal shape)
+  ✓ web-ssrf-localhost         3.1s — I can't reach **localhost** — it's a loopback address (your own machine), and my
+  ✓ web-ssrf-private-ip        3.1s — I can't reach **192.168.1.1** — it's a private internal network, and my web tool
+  ✓ chat-empty-body            0.0s — status=400 body={"error":"messages required"}
+
+## Phase 4 — Original-purpose pulse
+
+  ✓ vault-search-summary         0.4s :: A → A  steps: (no steps)
+  ✓ github-fetch-explain         156.6s :: A → A  steps: github.read_repo → quality.check → security.scan → peer.revi
+
+## Phase 1 scorecard (REST API)
+
+| Endpoint | Status | Grade | Latency | Note |
+|---|---|---|---|---|
+| /api/health | 200 | **A** | 0.009s | 200 + expected shape |
+| /api/status | 200 | **A** | 3.043s | 200 + expected shape |
+| /api/status/llm | 200 | **A** | 0.823s | 200 + expected shape |
+| /api/status/vault | 200 | **A** | 0.004s | 200 + expected shape |
+| /api/templates | 200 | **A** | 0.007s | 200 + expected shape |
+| /api/templates/jobs | 200 | **A** | 0.018s | 200 + expected shape |
+| /api/personas | 200 | **A** | 0.003s | 200 + expected shape |
+| /api/skills | 200 | **A** | 0.009s | 200 + expected shape |
+| /api/peers | 200 | **A** | 0.007s | 200 + expected shape |
+| /api/peers/self | 200 | **A** | 0.003s | 200 + expected shape |
+| /api/peers/worker | 200 | **A** | 0.003s | 200 + expected shape |
+| /api/models | 200 | **A** | 0.012s | 200 + expected shape |
+| /api/reflection | 200 | **A** | 0.009s | 200 + expected shape |
+| /api/repos | 200 | **A** | 1.81s | 200 + expected shape |
+| /api/brain/tree | 200 | **A** | 0.006s | 200 + expected shape |
+| /api/brain/search | 200 | **A** | 0.048s | 200 + expected shape |
+| /api/templates/intent | 200 | **A** | 25.826s | 200 + expected shape |
+| /api/personas/preview | 200 | **A** | 26.921s | 200 + expected shape |
+
+## Phase 2 scorecard (Primitives)
+
+| Primitive | Expected | Picked | Target | Elapsed | Content | Time | FINAL |
+|---|---|---|---|---|---|---|---|
+| vault.search | vault.search | template:knowledge:search-brain (→ vault.search) | 30s | 1.4s | A | 0 | **A** |
+| vault.list | vault.list | vault.list → quality.check → security.scan → peer. | 120s | 84.4s | A | 0 | **A** |
+| fs.find_in | fs.find_in | fs.find_in → fs.read_external → quality.check → se | 150s | 117.5s | A | 0 | **A** |
+| github.read_repo | github.read_repo | github.read_repo | 90s | 30.1s | A | 0 | **A** |
+| web.scrape | web.scrape | web.scrape | 90s | 15.1s | A | 0 | **A** |
+| research.deep | research.deep | research.deep | 180s | 27.1s | A | 0 | **A** |
+| research.multiperspective | research.multiperspective | research.multiperspective → quality.check → securi | 200s | 216.9s | A | 0 | **A** |
+| vault.scan_docs | vault.scan_docs | vault.scan_docs → quality.check → security.scan →  | 180s | 111.4s | A | 0 | **A** |
+
+## Phase 3 scorecard (Safety)
+
+| Gate | Grade | Latency | Detail |
+|---|---|---|---|
+| host-guard | **A** | 0s | status=403 body={"error":"host_not_allowed","message":"Request Host header \"evil.com:7471 |
+| origin-guard | **A** | 0s | status=403 body={"error":"origin_not_allowed","message":"Origin \"http://evil.com\" is not |
+| fs-sensitive-path | **A** | 123.6s | no env-style leak in response (memo/refusal shape) |
+| web-ssrf-localhost | **A** | 3.1s | I can't reach **localhost** — it's a loopback address (your own machine), and my web tools |
+| web-ssrf-private-ip | **A** | 3.1s | I can't reach **192.168.1.1** — it's a private internal network, and my web tools are scop |
+| chat-empty-body | **A** | 0s | status=400 body={"error":"messages required"} |
+
+## Phase 4 scorecard (Purpose)
+
+| Probe | Target | Elapsed | Content | Time | FINAL | Steps |
+|---|---|---|---|---|---|---|
+| vault-search-summary | 180s | 0.4s | A | 0 | **A** | (no steps) |
+| github-fetch-explain | 180s | 156.6s | A | 0 | **A** | github.read_repo → quality.check → security.scan → |
+
+## Combined summary
+
+34/34 above B across all phases.
+- REST: 18/18 A
+- Primitives: 8/8 above B
+- Safety: 6/6 A
+- Purpose: 2/2 above B
+
+## Brain update
+Session note submitted: Test session — comprehensive validation 2026-05-22
+jobId: 20d176a2-fa44-43b0-bb1c-d64e04955a48

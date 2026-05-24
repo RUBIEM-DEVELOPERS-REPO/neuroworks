@@ -1,0 +1,331 @@
+# All-Templates Harness :: r4 :: 2026-05-21T11:17:31.723Z
+Server: http://127.0.0.1:7471
+Model: qwen2.5:3b
+OpenRouter: enabled (openai/gpt-oss-20b:free)
+
+Total templates: 74
+By role: {"Engineering":3,"Knowledge":4,"Insights":1,"Custom":66}
+
+## Phase A — Addressability + invocation safety (74 templates)
+
+  A.1 list-inclusion: 74 ✓
+
+### A.2 — Input validation (built-in with required inputs)
+  ✓ summarize-repo       validation: 400 missing
+  ✓ publish-folder       validation: 400 missing
+  ✓ search-brain         validation: 400 missing
+  ✓ add-note             validation: 400 missing
+  ✓ general-task         validation: 400 missing
+
+### A.3 — Invocation safety (custom sample, drain before Phase B)
+  ✓ custom-give-me-a-report-on-the-r-d-ai-research-pro   dispatch: 200 queued
+  ✓ custom-what-is-in-the-readme-of-the-clawbot-repo-o   dispatch: 200 queued
+  ✓ custom-compare-what-my-vault-says-about-neuroworks   dispatch: 200 queued
+  ✓ custom-insurance-sales-agent-sell-auto-home-life-h   dispatch: 200 queued
+  ✓ custom-insurance-underwriter-review-insurance-appl   dispatch: 200 queued
+  draining 5 A.3 jobs before Phase B…
+  drain done in 111.6s
+
+## Phase B — Content-graded sample
+
+Sampling 17 templates: 8 built-in + 9 representative custom
+
+  ✓ summarize-repo                                       174.8s :: A → A
+  ✓ run-digest                                           3.0s :: A → A
+  ✓ publish-folder                                       0.0s :: A → A
+  ✓ search-brain                                         0.1s :: A → A
+  ✓ add-note                                             3.0s :: A → A
+  ✓ browse-vault                                         0.0s :: A → A
+  ✗ general-task                                         286.0s :: F(-4) → F
+  ✓ sync-downloads                                       4.1s :: A → A
+  ○ custom-give-me-a-report-on-the-r-d-ai-research-pro   15.1s :: B+ → B+
+  ○ custom-what-is-in-the-readme-of-the-clawbot-repo-o   30.1s :: B+ → B+
+  ○ custom-compare-what-my-vault-says-about-neuroworks   9.0s :: B+ → B+
+  ○ custom-give-me-a-summary-on-neuroworks               36.1s :: B+ → B+
+  ○ custom-insurance-sales-agent-sell-auto-home-life-h   153.6s :: B+ → B+
+  ○ custom-head-of-ai-define-and-lead-the-company-s-ov   105.4s :: B+ → B+
+  ○ custom-clawbot-daily-focus                           108.4s :: B+ → B+
+  ○ custom-clawbot-quick-web-look-up                     87.4s :: B+ → B+
+  ○ custom-researcher-latest-news-scan-web-only          132.5s :: B+ → B+
+
+## Phase A scorecard (invocation, all 74)
+
+| id | role | grade | note |
+|---|---|---|---|
+| summarize-repo | Engineering | **A** | addressable via /api/templates |
+| run-digest | Engineering | **A** | addressable via /api/templates |
+| publish-folder | Engineering | **A** | addressable via /api/templates |
+| search-brain | Knowledge | **A** | addressable via /api/templates |
+| add-note | Knowledge | **A** | addressable via /api/templates |
+| browse-vault | Knowledge | **A** | addressable via /api/templates |
+| general-task | Insights | **A** | addressable via /api/templates |
+| sync-downloads | Knowledge | **A** | addressable via /api/templates |
+| custom-give-me-a-report-on-the-r-d-ai-research-project-in-my-pc | Custom | **A** | addressable via /api/templates |
+| custom-what-is-in-the-readme-of-the-clawbot-repo-on-github | Custom | **A** | addressable via /api/templates |
+| custom-compare-what-my-vault-says-about-neuroworks-to-the-clawbot-r | Custom | **A** | addressable via /api/templates |
+| custom-give-me-a-summary-on-neuroworks | Custom | **A** | addressable via /api/templates |
+| custom-insurance-sales-agent-sell-auto-home-life-health-or-commercial | Custom | **A** | addressable via /api/templates |
+| custom-insurance-sales-agent-explain-policy-options-coverage-limits-p | Custom | **A** | addressable via /api/templates |
+| custom-insurance-sales-agent-identify-client-needs-and-recommend-suit | Custom | **A** | addressable via /api/templates |
+| custom-insurance-sales-agent-generate-new-business-through-leads-refe | Custom | **A** | addressable via /api/templates |
+| custom-insurance-sales-agent-maintain-accurate-client-records-and-fol | Custom | **A** | addressable via /api/templates |
+| custom-insurance-underwriter-review-insurance-applications-and-suppor | Custom | **A** | addressable via /api/templates |
+| custom-insurance-underwriter-assess-risk-based-on-client-history-fina | Custom | **A** | addressable via /api/templates |
+| custom-insurance-underwriter-approve-decline-or-modify-insurance-cove | Custom | **A** | addressable via /api/templates |
+| custom-insurance-underwriter-determine-premiums-deductibles-and-cover | Custom | **A** | addressable via /api/templates |
+| custom-insurance-underwriter-work-with-agents-and-brokers-to-gather-a | Custom | **A** | addressable via /api/templates |
+| custom-head-of-ai-define-and-lead-the-company-s-overall-ai | Custom | **A** | addressable via /api/templates |
+| custom-head-of-ai-identify-opportunities-to-use-ai-to-impr | Custom | **A** | addressable via /api/templates |
+| custom-head-of-ai-build-manage-and-mentor-ai-machine-learn | Custom | **A** | addressable via /api/templates |
+| custom-head-of-ai-oversee-the-development-testing-deployme | Custom | **A** | addressable via /api/templates |
+| custom-head-of-ai-partner-with-leadership-product-engineer | Custom | **A** | addressable via /api/templates |
+| custom-aiia-marketing-specialist-v2-write-social-media-copy-for-increa | Custom | **A** | addressable via /api/templates |
+| custom-aiia-marketing-specialist-v2-draft-press-releases-to-announce-c | Custom | **A** | addressable via /api/templates |
+| custom-aiia-marketing-specialist-v2-monitor-brand-mentions-on-various- | Custom | **A** | addressable via /api/templates |
+| custom-aiia-marketing-specialist-v2-coordinate-event-communications-fo | Custom | **A** | addressable via /api/templates |
+| custom-aiia-marketing-specialist-v2-manage-digital-marketing-campaigns | Custom | **A** | addressable via /api/templates |
+| custom-go-fetch-https-example-com-and-write-a-single-sentence-descr | Custom | **A** | addressable via /api/templates |
+| custom-go-fetch-https-example-com-and-write-one-short-sentence-abou | Custom | **A** | addressable via /api/templates |
+| custom-research-what-claude-opus-4-7-was-released-for | Custom | **A** | addressable via /api/templates |
+| custom-summarize-what-my-vault-knows-about-cognify | Custom | **A** | addressable via /api/templates |
+| custom-render-https-example-com-with-a-real-browser-and-tell-me-wha | Custom | **A** | addressable via /api/templates |
+| custom-do-some-research-on-the-judiciary-authority-of-zimbabwe | Custom | **A** | addressable via /api/templates |
+| custom-do-some-research-on-top-ai-developments-in-the-last-3-months | Custom | **A** | addressable via /api/templates |
+| custom-clawbot-daily-focus | Custom | **A** | addressable via /api/templates |
+| custom-clawbot-weekly-vault-review | Custom | **A** | addressable via /api/templates |
+| custom-clawbot-find-related-notes | Custom | **A** | addressable via /api/templates |
+| custom-clawbot-capture-and-connect | Custom | **A** | addressable via /api/templates |
+| custom-clawbot-quick-web-look-up | Custom | **A** | addressable via /api/templates |
+| custom-researcher-web-investigation-multi-perspective | Custom | **A** | addressable via /api/templates |
+| custom-researcher-latest-news-scan-web-only | Custom | **A** | addressable via /api/templates |
+| custom-researcher-compare-two-on-the-web | Custom | **A** | addressable via /api/templates |
+| custom-researcher-fact-check-a-claim | Custom | **A** | addressable via /api/templates |
+| custom-researcher-find-primary-sources | Custom | **A** | addressable via /api/templates |
+| custom-researcher-topic-landscape-map | Custom | **A** | addressable via /api/templates |
+| custom-researcher-vault-web-bridge | Custom | **A** | addressable via /api/templates |
+| custom-customer-success-draft-a-reply-to-a-customer | Custom | **A** | addressable via /api/templates |
+| custom-customer-success-health-check-a-customer-account | Custom | **A** | addressable via /api/templates |
+| custom-customer-success-renewal-preparation-memo | Custom | **A** | addressable via /api/templates |
+| custom-customer-success-onboarding-plan-for-a-new-customer | Custom | **A** | addressable via /api/templates |
+| custom-operations-coordinator-turn-a-goal-into-an-action-plan | Custom | **A** | addressable via /api/templates |
+| custom-operations-coordinator-write-a-runbook | Custom | **A** | addressable via /api/templates |
+| custom-operations-coordinator-weekly-schedule-from-priorities | Custom | **A** | addressable via /api/templates |
+| custom-operations-coordinator-status-report | Custom | **A** | addressable via /api/templates |
+| custom-software-engineer-investigate-fix-a-bug | Custom | **A** | addressable via /api/templates |
+| custom-software-engineer-code-review-on-a-diff-pr | Custom | **A** | addressable via /api/templates |
+| custom-software-engineer-architecture-trade-off-memo | Custom | **A** | addressable via /api/templates |
+| custom-software-engineer-repo-orientation | Custom | **A** | addressable via /api/templates |
+| custom-marketing-manager-positioning-sprint | Custom | **A** | addressable via /api/templates |
+| custom-marketing-manager-campaign-brief | Custom | **A** | addressable via /api/templates |
+| custom-marketing-manager-landing-page-copy | Custom | **A** | addressable via /api/templates |
+| custom-marketing-manager-email-sequence-3-step | Custom | **A** | addressable via /api/templates |
+| custom-marketing-manager-copy-critique | Custom | **A** | addressable via /api/templates |
+| custom-use-research-multiperspective-with-perspectives-recent-to-sc | Custom | **A** | addressable via /api/templates |
+| custom-whats-in-the-zbc-letter | Custom | **A** | addressable via /api/templates |
+| custom-fact-check-the-following-claim-against-the-live-web-run-two- | Custom | **A** | addressable via /api/templates |
+| custom-you-are-operating-as-researcher-the-investigative-analyst-bi | Custom | **A** | addressable via /api/templates |
+| custom-you-are-operating-as-clawbot-the-ai-agent-operator-bias-tool | Custom | **A** | addressable via /api/templates |
+| custom-say-hello-in-one-sentence | Custom | **A** | addressable via /api/templates |
+| summarize-repo | Built-in | **A** | 400 missing-inputs (correct gate): missing inputs: repo |
+| publish-folder | Built-in | **A** | 400 missing-inputs (correct gate): missing inputs: path |
+| search-brain | Built-in | **A** | 400 missing-inputs (correct gate): missing inputs: query |
+| add-note | Built-in | **A** | 400 missing-inputs (correct gate): missing inputs: title, body |
+| general-task | Built-in | **A** | 400 missing-inputs (correct gate): missing inputs: task |
+| custom-give-me-a-report-on-the-r-d-ai-research-project-in-my-pc | Custom | **A** | 200 queued (jobId=2689a041) |
+| custom-what-is-in-the-readme-of-the-clawbot-repo-on-github | Custom | **A** | 200 queued (jobId=70acaf61) |
+| custom-compare-what-my-vault-says-about-neuroworks-to-the-clawbot-r | Custom | **A** | 200 queued (jobId=9ddcb502) |
+| custom-insurance-sales-agent-sell-auto-home-life-health-or-commercial | Custom | **A** | 200 queued (jobId=5de4f6c5) |
+| custom-insurance-underwriter-review-insurance-applications-and-suppor | Custom | **A** | 200 queued (jobId=c498643a) |
+
+**Phase A total:** 84 ✓ · 0 ✗ · 0 other / 84
+
+## Phase B scorecard (content-graded sample)
+
+| template | role | target | elapsed | content | time | FINAL |
+|---|---|---|---|---|---|---|
+| summarize-repo | Engineering | 120s | 174.8s | A | 0 | **A** |
+| run-digest | Engineering | 60s | 3s | A | 0 | **A** |
+| publish-folder | Engineering | 120s | 0s | A | 0 | **A** |
+| search-brain | Knowledge | 15s | 0.1s | A | 0 | **A** |
+| add-note | Knowledge | 25s | 3s | A | 0 | **A** |
+| browse-vault | Knowledge | 5s | 0s | A | 0 | **A** |
+| general-task | Insights | 90s | 286s | F | -4 | **F** |
+| sync-downloads | Knowledge | 120s | 4.1s | A | 0 | **A** |
+| custom-give-me-a-report-on-the-r-d-ai-research-project-in-my | Custom | 120s | 15.1s | B+ | 0 | **B+** |
+| custom-what-is-in-the-readme-of-the-clawbot-repo-on-github | Custom | 120s | 30.1s | B+ | 0 | **B+** |
+| custom-compare-what-my-vault-says-about-neuroworks-to-the-cl | Custom | 120s | 9s | B+ | 0 | **B+** |
+| custom-give-me-a-summary-on-neuroworks | Custom | 120s | 36.1s | B+ | 0 | **B+** |
+| custom-insurance-sales-agent-sell-auto-home-life-health-or-c | Custom | 120s | 153.6s | B+ | 0 | **B+** |
+| custom-head-of-ai-define-and-lead-the-company-s-overall-ai | Custom | 120s | 105.4s | B+ | 0 | **B+** |
+| custom-clawbot-daily-focus | Custom | 120s | 108.4s | B+ | 0 | **B+** |
+| custom-clawbot-quick-web-look-up | Custom | 120s | 87.4s | B+ | 0 | **B+** |
+| custom-researcher-latest-news-scan-web-only | Custom | 120s | 132.5s | B+ | 0 | **B+** |
+
+**Phase B total:** 16 above B · 0 at B · 1 below B / 17
+
+## Combined summary
+
+100 above-B grades across 101 rows (84 invocation + 17 content-graded)
+
+## Phase B outputs
+
+
+### summarize-repo — A
+status: succeeded · 174.8s vs 120s target
+```
+{"path":"_clawbot/summaries/RUBIEM-DEVELOPERS-REPO-clawbot.md","committed":true,"pushed":false,"error":"push rejected; auto-rebase disabled (set CLAWBOT_AUTO_REBASE_RECOVERY=1 to enable). Original error: To https://github.com/RUBIEM-DEVELOPERS-REPO/main-brain.git\n!\tHEAD:refs/heads/main\t[rejected] (fetch first)\nDone\nPushing to https://github.com/RUBIEM-DEVELOPERS-REPO/main-brain.git\nerror: failed to pu"}
+```
+
+### run-digest — A
+status: succeeded · 3s vs 60s target
+```
+{"dispatched":true,"lookbackDays":"1"}
+```
+
+### publish-folder — A
+status: destructive, gated · 0s vs 120s target
+```
+approval-gated; rejected for safety
+```
+
+### search-brain — A
+status: succeeded · 0.1s vs 15s target
+```
+Found **50** notes mentioning **clawbot**:
+
+1. **0-Inbox/2026-04-27-aiia-pc-inventory.md** (line 117) — - [ ] Get AIIA repos (if any) under `RUBIEM-DEVELOPERS-REPO` org so the cloud clawbot includes them in daily digests.
+2. **0-Inbox/2026-05-18-clawbot-update.md** (line 2) — title: "Clawbot update — skill library, smarter picker, customer-friendly run log"
+3. **0-Inbox/2026-05-19-1773731595-eoi-training-ai-260316-110157-1.md** (line 16) — - Imported by: clawbot `fs.import_to_vault`
+4. **0-Inbox
+```
+
+### add-note — A
+status: succeeded · 3s vs 25s target
+```
+{"path":"0-Inbox/202605211122-harness-invoke-1779362542369.md","committed":true,"pushed":false,"error":"push rejected; auto-rebase disabled (set CLAWBOT_AUTO_REBASE_RECOVERY=1 to enable). Original error: To https://github.com/RUBIEM-DEVELOPERS-REPO/main-brain.git\n!\tHEAD:refs/heads/main\t[rejected] (fetch first)\nDone\nPushing to https://github.com/RUBIEM-DEVELOPERS-REPO/main-brain.git\nerror: failed to pu"}
+```
+
+### browse-vault — A
+status: succeeded · 0s vs 5s target
+```
+{"redirect":"/knowledge"}
+```
+
+### general-task — F
+status: error · 286s vs 90s target
+```
+poll timeout for f1361b6e-1a4f-4655-90a2-578915b1525b
+```
+
+### sync-downloads — A
+status: succeeded · 4.1s vs 120s target
+```
+{"source":"C:\\Users\\Arthur Magaya\\Downloads","totalFiles":1318,"byCategory":{"Video":[{"name":"AI Dreamer to Creator_ Free App Dev & Automation Secrets.mp4","relPath":"files/Video/AI Dreamer to Creator_ Free App Dev & Automation Secrets.mp4","size":100677827,"mtimeMs":1772518820589.6187},{"name":"Mentorship Unlocks Potential_ See Our Student's Success!.mp4","relPath":"files/Video/Mentorship Unlocks Potential_ See Our Student's Success!.mp4","size":47921526,"mtimeMs":1772518780493.2148},{"name
+```
+
+### custom-give-me-a-report-on-the-r-d-ai-research-project-in-my-pc — B+
+status: succeeded · 15.1s vs 120s target
+```
+## Partial result
+
+The synthesis step didn't complete cleanly, so here is the raw evidence we gathered for: **give me a report on the R&D/ai research project in my pc**
+
+### What worked
+
+**Step 1 — vault.search**
+```
+{"matches":[]}
+```
+
+---
+_Auto-generated rescue summary. Try the task again — the next attempt may have the model available._
+```
+
+### custom-what-is-in-the-readme-of-the-clawbot-repo-on-github — B+
+status: succeeded · 30.1s vs 120s target
+```
+The README for the **clawbot** repository (owner = RUBIEM‑DEVELOPERS‑REPO) contains a concise overview of the project’s purpose and architecture. It is structured as follows:
+
+1. **Project Title**  
+   `# clawbot + NeuroWorks`
+
+2. **High‑level description**  
+   The repo hosts two related components:
+   * **clawbot** – a cloud‑based cron worker (GitHub Actions) that ingests repository activity and feeds it into the `main‑brain` Obsidian vault.  
+   * **NeuroWorks** – a local web console that let
+```
+
+### custom-compare-what-my-vault-says-about-neuroworks-to-the-clawbot-r — B+
+status: succeeded · 9s vs 120s target
+```
+## Partial result
+
+The synthesis step didn't complete cleanly (`OpenRouter 429: {"error":{"message":"Provider returned error","code":429,"metadata":{"raw":"openai/g`), so here is the raw evidence we gathered for: **compare what my vault says about neuroworks to the clawbot README on github**
+
+### What worked
+
+**Step 1 — Searching your second brain for "neuroworks"**
+```
+{"matches":[{"path":"0-Inbox/2026-04-27-aiia-pc-inventory.md","line":21,"preview":"- **NeuroWorks** — AI workforce / talent dev
+```
+
+### custom-give-me-a-summary-on-neuroworks — B+
+status: succeeded · 36.1s vs 120s target
+```
+NeuroWorks is an AI‑focused workforce and talent‑development platform that aggregates and manages AI talent for organizations. It provides tools for sourcing, training, and deploying AI professionals, enabling companies to build and scale their internal AI capabilities. The platform is referenced in several internal documents (e.g., “NeuroWorks smoke test” series, AIIA inventory, and e‑learning training records), indicating its use for both internal testing and external talent acquisition. Neuro
+```
+
+### custom-insurance-sales-agent-sell-auto-home-life-health-or-commercial — B+
+status: succeeded · 153.6s vs 120s target
+```
+## Insurance Sales Agent Report  
+
+**Objective** – Persuade prospective clients to purchase auto, home, life, health, or commercial insurance policies by demonstrating value, addressing needs, and guiding them through a compliant buying process.  
+
+### 1. Prospecting & Qualification  
+1. **Identify target segments** – drivers with recent vehicle purchases, homeowners in high‑risk areas, families with dependents, small‑business owners, and individuals approaching major life events (marriage, new 
+```
+
+### custom-head-of-ai-define-and-lead-the-company-s-overall-ai — B+
+status: succeeded · 105.4s vs 120s target
+```
+The available vault entries only point to a “default vault‑first plan” for the task *“As a Head of AI, define and lead the company’s overall AI strategy”* and a template that mentions the same origin task, but they contain no actual description of what that strategy should include or how it should be executed. The external web sources are dictionary definitions of the word “head” and do not provide any guidance on AI‑strategy responsibilities.  
+
+**Therefore, the evidence does not contain enough
+```
+
+### custom-clawbot-daily-focus — B+
+status: succeeded · 108.4s vs 120s target
+```
+**Prioritized focus for today – provisional list**
+
+| # | Item (placeholder) | Why it matters |
+|---|---------------------|----------------|
+| 1 | **Review pending “TODO” / “blocked” entries from the last 5 days in `_neuroworks/jobs/`** | These items are the most recent work‑in‑progress; clearing blockers or completing near‑deadline tasks prevents downstream delays. |
+| 2 | **Address any unchecked check‑boxes or “follow‑up” tags in `0‑Inbox/`** | Inbox items represent open questions, external de
+```
+
+### custom-clawbot-quick-web-look-up — B+
+status: succeeded · 87.4s vs 120s target
+```
+I couldn’t locate a specific question to answer. The request only contains the instruction “Look up the following question on the web…,” but the actual query itself is missing.
+
+**What I need to proceed**
+1. The exact question or topic you want researched.  
+2. Any preferred sources or constraints (e.g., only scholarly articles, a particular date range).  
+3. Whether you need a concise 3‑5 sentence answer or a longer summary.  
+
+Once you provide the concrete question, I can perform a web lookup 
+```
+
+### custom-researcher-latest-news-scan-web-only — B+
+status: succeeded · 132.5s vs 120s target
+```
+## Topic statement  
+The task is to identify developments over the past 6‑12 months (roughly 2025‑2026) in mobile and desktop document‑scanning solutions, focusing on news releases, blog posts, and official announcements, and to note how these differ from earlier descriptions of the technology.
+
+## Perspectives  
+
+### mainstream  
+The mainstream sources list a series of product‑focused announcements from CamScanner. In April 2026 the company launched an **AI‑powered tax‑documentation workflow** 
+```

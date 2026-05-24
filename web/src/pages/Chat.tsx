@@ -16,6 +16,38 @@ type Msg = {
 
 const STORAGE_KEY = "neuroworks.chat";
 const SESSION_ID_KEY = "neuroworks.chat.sessionId";
+// Recent sessions ring buffer — last 3 distinct sessions (excluding the
+// current one when it's still active). Each entry carries the full message
+// list so "resume" can swap them straight back into view without a server
+// fetch. Capped at 3 to keep localStorage small.
+const RECENT_SESSIONS_KEY = "neuroworks.chat.recent";
+const RECENT_MAX = 3;
+
+type RecentSession = {
+  id: string;
+  title: string;
+  savedAt: string;
+  messages: Msg[];
+};
+
+function loadRecentSessions(): RecentSession[] {
+  try {
+    const raw = localStorage.getItem(RECENT_SESSIONS_KEY);
+    if (!raw) return [];
+    const arr = JSON.parse(raw);
+    return Array.isArray(arr) ? arr.slice(0, RECENT_MAX) : [];
+  } catch { return []; }
+}
+
+function snapshotRecentSession(id: string, messages: Msg[]) {
+  if (messages.length === 0) return;
+  const first = messages.find(m => m.role === "user");
+  const title = (first?.content ?? "Session").slice(0, 60).replace(/\s+/g, " ").trim() || "Session";
+  const entry: RecentSession = { id, title, savedAt: new Date().toISOString(), messages: messages.slice(-50) };
+  const prev = loadRecentSessions().filter(s => s.id !== id);
+  const next = [entry, ...prev].slice(0, RECENT_MAX);
+  try { localStorage.setItem(RECENT_SESSIONS_KEY, JSON.stringify(next)); } catch {}
+}
 
 export function Chat() {
   const [messages, setMessages] = useState<Msg[]>(() => {
@@ -38,6 +70,14 @@ export function Chat() {
   // template as a chip above the input and keep the textarea clean for the
   // ONE thing they actually need to type (their topic / specifics).
   const [activeTemplate, setActiveTemplate] = useState<{ title: string; task: string; placeholder?: string } | null>(null);
+  // Pending context-attachments — uploaded docs the next send will reference.
+  // Each chip is removable; chips clear after a successful send.
+  const [pendingAttachments, setPendingAttachments] = useState<{ contextId: string; filename: string; bytes: number; chars: number }[]>([]);
+  // Upload state separate from chat-busy: upload progress shouldn't block
+  // the user from continuing to type their accompanying message.
+  const [uploadState, setUploadState] = useState<{ status: "idle" | "uploading" | "error" | "saved"; filename?: string; error?: string; vaultPath?: string }>({ status: "idle" });
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [uploadTarget, setUploadTarget] = useState<"context" | "vault">("context");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [model, setModel] = useState<string | null>(null);
@@ -48,9 +88,20 @@ export function Chat() {
   // generic set covering vault search, digests, and notes.
   const [activePersona, setActivePersona] = useState<{ id: string; name: string; role: string } | null>(null);
   const [personaTemplates, setPersonaTemplates] = useState<{ title: string; description?: string; origin?: { task?: string } }[]>([]);
+  // Recent sessions (last 3) for one-click resume. Updated after every save
+  // and when New Session is clicked (we snapshot the just-ended session).
+  const [recentSessions, setRecentSessions] = useState<RecentSession[]>(() => loadRecentSessions());
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => { try { localStorage.setItem(STORAGE_KEY, JSON.stringify(messages.slice(-50))); } catch {} }, [messages]);
+  // Snapshot into the recent-sessions ring buffer whenever the message list
+  // grows. Debounced via useEffect's natural batching — the effect runs once
+  // per render of new `messages`, which is exactly once per turn.
+  useEffect(() => {
+    if (messages.length === 0) return;
+    snapshotRecentSession(sessionId, messages);
+    setRecentSessions(loadRecentSessions());
+  }, [messages, sessionId]);
   useEffect(() => { scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" }); }, [messages, busy]);
   useEffect(() => { api.health().then(h => setModel(h.model)).catch(() => {}); }, []);
 
@@ -139,35 +190,56 @@ export function Chat() {
   }
 
   function newSession() {
+    // Snapshot the current session before nuking it so it remains resumable.
+    if (messages.length > 0) snapshotRecentSession(sessionId, messages);
     const fresh = `session-${new Date().toISOString().slice(0, 10)}-${Math.random().toString(36).slice(2, 8)}`;
     try { localStorage.setItem(SESSION_ID_KEY, fresh); } catch {}
     setSessionId(fresh);
     setMessages([]);
     localStorage.removeItem(STORAGE_KEY);
     setSaveState({ status: "idle" });
+    setRecentSessions(loadRecentSessions());
+  }
+
+  function resumeSession(s: RecentSession) {
+    if (s.id === sessionId && messages.length === s.messages.length) return;
+    // Snapshot the CURRENT session before swapping so it stays in recents.
+    if (messages.length > 0 && sessionId !== s.id) snapshotRecentSession(sessionId, messages);
+    setSessionId(s.id);
+    try { localStorage.setItem(SESSION_ID_KEY, s.id); } catch {}
+    setMessages(s.messages);
+    setActiveTemplate(null);
+    setPendingAttachments([]);
+    setSaveState({ status: "idle" });
+    setRecentSessions(loadRecentSessions());
   }
 
   async function send() {
     const topic = draft.trim();
-    if (!topic || busy) return;
+    // Allow empty topic when attachments alone carry the intent — e.g.
+    // "Summarize this for me" can be implied by just attaching a doc.
+    if (busy) return;
+    if (!topic && pendingAttachments.length === 0) return;
     // If a template is pinned, the customer's typed text is the TOPIC. We
     // splice it into the template prompt server-side so the planner sees
     // the full instruction ("research.multiperspective: <topic>") while the
     // customer only had to type their topic. The user-facing bubble shows
     // their topic alone — keeping the chat clean.
-    const displayText = topic;
+    const effectiveTopic = topic || `Read the attached document${pendingAttachments.length > 1 ? "s" : ""} and produce a concise summary highlighting the key facts, dates, owners, and risks.`;
+    const displayText = topic || `[Attachments only] ${pendingAttachments.map(a => a.filename).join(", ")}`;
     const sendText = activeTemplate
-      ? `${activeTemplate.task.trim()}\n\nTopic: ${topic}`
-      : topic;
+      ? `${activeTemplate.task.trim()}\n\nTopic: ${effectiveTopic}`
+      : effectiveTopic;
     const next: Msg[] = [...messages, { role: "user", content: displayText }];
-    setMessages(next); setDraft(""); setActiveTemplate(null); setErr(""); setBusy(true);
+    const attachmentsToSend = pendingAttachments.map(a => ({ contextId: a.contextId }));
+    setMessages(next); setDraft(""); setActiveTemplate(null); setPendingAttachments([]); setErr(""); setBusy(true);
     try {
       const payload = next.map((m, idx) =>
         idx === next.length - 1 && m.role === "user"
           ? { role: m.role, content: sendText }
           : { role: m.role, content: m.content },
       );
-      const r = await api.chat(payload);
+      const r = await api.chat(payload, attachmentsToSend.length > 0 ? { attachments: attachmentsToSend } : undefined);
       setMessages(prev => [...prev, {
         role: "assistant",
         content: r.text,
@@ -178,6 +250,53 @@ export function Chat() {
       }]);
     } catch (e: any) { setErr(e.message); }
     finally { setBusy(false); }
+  }
+
+  async function handleFileSelected(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = ""; // reset so the same file can be re-selected
+    if (!file) return;
+    if (file.size > 20 * 1024 * 1024) {
+      setUploadState({ status: "error", filename: file.name, error: "File too large (max 20 MB)" });
+      return;
+    }
+    setUploadState({ status: "uploading", filename: file.name });
+    try {
+      const buf = await file.arrayBuffer();
+      // Convert ArrayBuffer → base64 in chunks (avoids the 32k-arg call-stack
+      // limit on String.fromCharCode for large files).
+      const bytes = new Uint8Array(buf);
+      let binary = "";
+      const CHUNK = 0x8000;
+      for (let i = 0; i < bytes.length; i += CHUNK) {
+        binary += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + CHUNK)));
+      }
+      const contentBase64 = btoa(binary);
+      const r = await api.upload({
+        filename: file.name,
+        contentBase64,
+        target: uploadTarget,
+        mimeType: file.type || undefined,
+      });
+      if (r.target === "vault") {
+        setUploadState({ status: "saved", filename: file.name, vaultPath: r.vaultPath });
+        setTimeout(() => setUploadState(s => s.status === "saved" ? { status: "idle" } : s), 4000);
+      } else if (r.contextId) {
+        setPendingAttachments(prev => [...prev, {
+          contextId: r.contextId!,
+          filename: r.filename ?? file.name,
+          bytes: r.bytes ?? file.size,
+          chars: r.extractedChars ?? 0,
+        }]);
+        setUploadState({ status: "idle" });
+      }
+    } catch (err: any) {
+      setUploadState({ status: "error", filename: file.name, error: err?.message ?? String(err) });
+    }
+  }
+
+  function removeAttachment(contextId: string) {
+    setPendingAttachments(prev => prev.filter(a => a.contextId !== contextId));
   }
 
   // Empty-state launchpad. Each suggestion pins itself as an activeTemplate
@@ -240,6 +359,37 @@ export function Chat() {
           </button>
         </div>
       </div>
+
+      {recentSessions.filter(s => s.id !== sessionId || messages.length === 0).length > 0 && (
+        <div className="px-8 py-2 border-b border-ink-800 bg-ink-900/40">
+          <div className="flex items-center gap-2 max-w-3xl mx-auto flex-wrap">
+            <span className="text-[10px] uppercase tracking-wider text-cream-300/50 mr-1">Recent</span>
+            {recentSessions.filter(s => s.id !== sessionId || messages.length === 0).slice(0, 3).map(s => {
+              const when = (() => {
+                const d = new Date(s.savedAt);
+                const m = Math.round((Date.now() - d.getTime()) / 60000);
+                if (m < 1) return "just now";
+                if (m < 60) return `${m}m ago`;
+                const h = Math.round(m / 60);
+                if (h < 24) return `${h}h ago`;
+                return d.toLocaleDateString();
+              })();
+              return (
+                <button
+                  key={s.id}
+                  type="button"
+                  onClick={() => resumeSession(s)}
+                  className="group inline-flex items-center gap-2 px-3 py-1 bg-ink-900 hover:bg-ink-850 border border-ink-800 hover:border-violet-500/40 rounded-full text-[11px] transition-colors max-w-[260px]"
+                  title={`${s.messages.length} message${s.messages.length === 1 ? "" : "s"} · saved ${when}`}
+                >
+                  <span className="text-cream-100 truncate group-hover:text-cream-50">{s.title}</span>
+                  <span className="text-cream-300/40 group-hover:text-cream-300/60 text-[10px] flex-shrink-0">{s.messages.length}·{when}</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       <div ref={scrollRef} className="flex-1 overflow-auto scrollbar-thin px-8 py-6">
         {messages.length === 0 && (
@@ -309,22 +459,84 @@ export function Chat() {
               </button>
             </div>
           )}
+          {pendingAttachments.length > 0 && (
+            <div className="flex items-center gap-2 mb-2 flex-wrap">
+              <span className="text-[10px] uppercase tracking-wider text-cream-300/50">Attached for this send:</span>
+              {pendingAttachments.map(a => (
+                <span
+                  key={a.contextId}
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-leaf-500/10 border border-leaf-500/30 rounded-lg text-[11px]"
+                  title={`${a.chars} chars extracted · ${(a.bytes / 1024).toFixed(1)} KB`}
+                >
+                  <span aria-hidden>📎</span>
+                  <span className="text-cream-100 max-w-[180px] truncate">{a.filename}</span>
+                  <span className="text-cream-300/50 text-[10px]">{a.chars > 0 ? `${a.chars.toLocaleString()} chars` : "binary"}</span>
+                  <button
+                    type="button"
+                    onClick={() => removeAttachment(a.contextId)}
+                    className="text-cream-300/60 hover:text-coral-400 text-sm leading-none ml-1"
+                    aria-label={`Remove ${a.filename}`}
+                  >
+                    ✕
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
+          {uploadState.status === "uploading" && (
+            <div className="text-[11px] text-violet-300 mb-2">Uploading {uploadState.filename}…</div>
+          )}
+          {uploadState.status === "error" && (
+            <div className="text-[11px] text-coral-400 mb-2">Upload failed: {uploadState.error}</div>
+          )}
+          {uploadState.status === "saved" && uploadState.vaultPath && (
+            <div className="text-[11px] text-leaf-400 mb-2">
+              ✓ saved to vault at <Link to={`/knowledge/${uploadState.vaultPath}`} className="underline hover:text-leaf-300">{uploadState.vaultPath}</Link>
+            </div>
+          )}
           <div className="flex items-end gap-2">
+            <div className="flex flex-col items-center gap-1">
+              <input
+                ref={fileInputRef}
+                type="file"
+                className="hidden"
+                onChange={handleFileSelected}
+              />
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={uploadState.status === "uploading"}
+                className="bg-ink-900 hover:bg-ink-850 border border-ink-800 hover:border-violet-500/40 disabled:opacity-40 text-cream-100 w-12 h-12 rounded-xl flex items-center justify-center text-lg"
+                title={uploadTarget === "context" ? "Attach a document for this chat (TTL: 1h)" : "Upload to your knowledge vault"}
+                aria-label="Attach document"
+              >
+                📎
+              </button>
+              <select
+                value={uploadTarget}
+                onChange={e => setUploadTarget(e.target.value as "context" | "vault")}
+                className="bg-ink-900 border border-ink-800 text-[10px] text-cream-300 rounded px-1 py-0.5 hover:border-violet-500/40 focus:outline-none focus:border-violet-500/60 cursor-pointer"
+                title="Where the next upload goes — context (this chat only) or knowledge vault (permanent)"
+              >
+                <option value="context">context</option>
+                <option value="vault">vault</option>
+              </select>
+            </div>
             <textarea
               value={draft}
               onChange={e => setDraft(e.target.value)}
               onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
               rows={1}
-              placeholder={activeTemplate?.placeholder ?? "Message clawbot…"}
+              placeholder={activeTemplate?.placeholder ?? (pendingAttachments.length > 0 ? "Add a note (optional) — Send to ask about the attachment…" : "Message clawbot…")}
               className="flex-1 bg-ink-900 border border-ink-800 focus:border-violet-500/60 rounded-xl px-4 py-3 text-sm resize-none focus:outline-none placeholder:text-cream-300/40"
               style={{ maxHeight: 200 }}
             />
-            <button type="submit" disabled={busy || !draft.trim()} className="bg-violet-500 hover:bg-violet-600 disabled:opacity-40 text-white px-5 py-3 rounded-xl text-sm font-medium">
+            <button type="submit" disabled={busy || (!draft.trim() && pendingAttachments.length === 0)} className="bg-violet-500 hover:bg-violet-600 disabled:opacity-40 text-white px-5 py-3 rounded-xl text-sm font-medium">
               Send
             </button>
           </div>
         </form>
-        <div className="max-w-3xl mx-auto text-[10px] text-cream-300/40 mt-2 px-1">Enter to send · Shift+Enter for newline{model ? ` · Ollama local model: ${model}` : ""}</div>
+        <div className="max-w-3xl mx-auto text-[10px] text-cream-300/40 mt-2 px-1">Enter to send · Shift+Enter for newline · 📎 to attach a doc (toggle context/vault){model ? ` · Ollama local model: ${model}` : ""}</div>
       </div>
     </div>
   );

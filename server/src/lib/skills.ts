@@ -195,6 +195,26 @@ const SKILL_KEYWORDS: { skill: string; patterns: RegExp[] }[] = [
   { skill: "source-triangulation",   patterns: [/\b(?:triangulat|cross[- ]?(?:check|verify|reference)|verify\s+across|multiple\s+sources|three\s+sources|independent\s+sources)\b/i, /\b(?:confirm(?:ed)?\s+(?:by|with|across)|corroborat)\b/i] },
   { skill: "primary-source-check",   patterns: [/\b(?:primary\s+source|official\s+(?:source|page|filing|docs?|documentation)|go\s+to\s+the\s+(?:source|filing|docs?|primary)|filing|10[- ]K|SEC\s+filing|press\s+release)\b/i, /\b(?:from\s+(?:their|the\s+company['']?s?)\s+(?:own\s+)?(?:site|page|docs?|documentation|pricing))\b/i] },
   { skill: "landscape-scan",         patterns: [/\b(?:landscape|market\s+(?:landscape|map|overview|scan)|who(?:'?s|\s+is)\s+(?:playing|in)\s+(?:this|the)\s+(?:market|category|space)|map\s+(?:the\s+|out\s+the\s+)?market|category\s+overview|state\s+of\s+the\s+(?:market|category|industry))\b/i] },
+  // ─── 2026-05-24: employee-task skills (50 canonical tasks) ───
+  { skill: "meeting-actions",        patterns: [/\b(?:meeting\s+transcript|action\s+items?|turn\s+(?:this|the)\s+(?:meeting|transcript)|extract\s+action\s+items?|from\s+this\s+transcript)\b/i] },
+  { skill: "crm-update",             patterns: [/\bupdate\s+(?:our\s+|the\s+)?(?:CRM|HubSpot|Salesforce|Pipedrive)\b/i, /\b(?:CRM[-\s]ready|CRM\s+(?:fields?|update|record)|structured\s+(?:CRM|sales)\s+(?:fields?|updates?))\b/i] },
+  { skill: "jd-to-tasks",            patterns: [/\b(?:from\s+this\s+job\s+description|task\s+list\s+from\s+(?:this\s+)?(?:JD|job\s+description)|role[-\s]based\s+(?:workflow|task)|JD\s+(?:to|→)\s+tasks?)\b/i] },
+  { skill: "cv-screening",           patterns: [/\b(?:screen\s+(?:these\s+|the\s+)?(?:CVs?|resumes?|candidates?)|rank(?:ed)?\s+shortlist|CV\s+(?:screening|review)|candidate\s+(?:shortlist|screening|review))\b/i] },
+  { skill: "vendor-comparison",      patterns: [/\b(?:compare\s+(?:vendor|supplier)\s+(?:quotes?|proposals?)|vendor\s+(?:comparison|quotes?|matrix)|TCO\s+(?:comparison|breakdown))\b/i] },
+  { skill: "compliance-check",       patterns: [/\b(?:compliance\s+(?:check|review|issues?|audit)|check\s+(?:this|the)\s+document\s+for\s+compliance|legal\s+(?:risk|review)\s+(?:check|of)|items?\s+needing\s+(?:legal|manager)\s+approval)\b/i] },
+  { skill: "travel-itinerary",       patterns: [/\b(?:travel\s+itinerary|itinerary\s+from\s+(?:these|the)\s+bookings?|trip\s+(?:itinerary|plan)|full\s+itinerary)\b/i] },
+  { skill: "support-themes",         patterns: [/\b(?:support\s+tickets?\s+by\s+theme|cluster\s+(?:these\s+)?(?:tickets?|complaints?|feedback)|ticket\s+(?:themes?|clusters?|trends?)|issue\s+(?:clusters?|themes?)|summari[sz]e\s+(?:customer\s+)?(?:support\s+)?tickets?)\b/i] },
+  { skill: "support-escalation",     patterns: [/\b(?:escalat\w*\s+(?:any\s+)?(?:support\s+)?tickets?|escalation\s+(?:list|triage)|tickets?\s+that\s+(?:look|need)\s+(?:serious|escalation)|escalation\s+with\s+reason)\b/i] },
+  { skill: "kb-article",             patterns: [/\b(?:knowledge[-\s]?base\s+article|KB\s+article|help[-\s]?center\s+article|from\s+(?:this\s+)?solved\s+ticket|help[-\s]?center[-\s]?ready)\b/i] },
+  { skill: "feedback-trends",        patterns: [/\b(?:customer\s+feedback\s+(?:trends?|analysis|themes?)|analy[sz]e\s+(?:customer\s+)?feedback|sentiment\s+(?:analysis|trends?)|recurring\s+themes?\s+in\s+feedback|NPS\s+(?:analysis|trends?))\b/i] },
+  { skill: "slide-outline",          patterns: [/\bslide\s+(?:outline|structure|deck\s+outline)|slide[-\s]?by[-\s]?slide\s+(?:structure|outline)|presentation\s+(?:outline|structure)|deck\s+(?:outline|structure)\b/i] },
+  { skill: "competitor-summary",     patterns: [/\bcompetitor\s+(?:summary|comparison\s+table)|summari[sz]e\s+(?:our\s+)?competitors?\b|research\s+competitors?\s+and\s+summari[sz]e/i] },
+  { skill: "lead-qualification",     patterns: [/\blead\s+(?:qualification|scor(?:ing|e)|qualif\w+)|qualify\s+(?:this|the)\s+lead|lead\s+fit\s+(?:assessment|analysis)|inbound\s+lead\s+(?:scor|review)/i] },
+  { skill: "translation",            patterns: [/\btranslate\s+(?:this|the)\s+(?:customer\s+)?(?:message|email|reply|response)|translation\s+(?:plus|and)\s+(?:response|reply)|translate\s+to\s+\w+\s+and\s+draft/i] },
+  { skill: "sop-writing",            patterns: [/\b(?:standard\s+operating\s+procedure|SOP\s+(?:for|writing|creation)|turn\s+(?:this|the)\s+process\s+into\s+(?:an\s+)?SOP|process\s+to\s+SOP|write\s+(?:an?\s+)?SOP)\b/i] },
+  { skill: "procurement-request",    patterns: [/\bprocurement\s+request|purchase\s+request|generate\s+(?:a\s+)?(?:procurement|purchase)\s+request|structured\s+purchase\s+(?:order|request)\b/i] },
+  { skill: "training-quiz",          patterns: [/\btraining\s+quiz|generate\s+(?:a\s+)?quiz\s+from|quiz\s+from\s+(?:this\s+)?(?:policy|training|doc)|quiz\s+(?:questions?|with\s+answer\s+key)/i] },
+  { skill: "tomorrow-plan",          patterns: [/\btomorrow(?:'s|\s+work)?\s+plan|plan\s+(?:for\s+)?tomorrow|tomorrow'?s?\s+(?:schedule|priorities|tasks?)|prioriti[sz]ed\s+schedule\s+(?:for\s+)?tomorrow|unfinished\s+tasks?\s+(?:for|to)\s+tomorrow/i] },
 ];
 
 // Combined picker: matches BOTH on intent AND on doc-type keywords in the

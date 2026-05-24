@@ -1,0 +1,154 @@
+# Template + Original-Purpose Harness :: r2 :: 2026-05-21T07:02:27.531Z
+Server: http://127.0.0.1:7471
+Model: qwen2.5:3b
+OpenRouter: enabled (openai/gpt-oss-20b:free)
+
+## Phase 1 — Routing (intent → templateId)
+
+  summarize-repo     ✓ (14.3s) → summarize-repo
+  run-digest         ✓ (3.5s) → run-digest
+  publish-folder     ✓ (5.0s) → publish-folder
+  search-brain       ✓ (3.8s) → search-brain
+  add-note           ✓ (4.6s) → add-note
+  browse-vault       ✓ (2.5s) → browse-vault
+  general-task       ✓ (2.1s) → null
+  sync-downloads     ✓ (2.9s) → sync-downloads
+
+## Phase 2 — Execution (live for safe; approval-gate for destructive)
+
+  ▶ browse-vault…
+     0.0s :: A  → A
+  ▶ search-brain…
+     0.1s :: A  → A
+  ▶ add-note…
+     3.0s :: A  → A
+  ▶ summarize-repo…
+     153.7s :: A (time -1) → A-
+  ▶ sync-downloads…
+     3.9s :: A  → A
+  ▶ general-task…
+     42.8s :: B+  → B+
+  ▶ publish-folder (approval gate)…
+     ✓ 0.0s — gated as awaiting-approval, rejected: rejected
+
+## Phase 3 — Original purpose (multi-step plan + execute + vault capture)
+
+  ▶ plan-vault-chain…
+     84.4s :: C  → C · steps: fs.find_in → fs.read_external → quality.check → security.scan → peer.review
+  ▶ plan-github-fetch…
+     18.1s :: C  → C · steps: github.get_file → ollama.generate
+  ▶ plan-research-capture…
+     96.4s :: B+  → B+ · steps: research.deep → quality.check → security.scan → peer.review
+
+## Routing scorecard
+
+| template | input | expected | detected | source | pass |
+|---|---|---|---|---|---|
+| summarize-repo | summarize the clawbot project | summarize-repo | summarize-repo | ollama | ✓ |
+| run-digest | run the daily digest | run-digest | run-digest | ollama | ✓ |
+| publish-folder | publish D:\test as a private repo | publish-folder | publish-folder | keyword | ✓ |
+| search-brain | search my vault for typescript | search-brain | search-brain | ollama | ✓ |
+| add-note | add a note titled harness test - body content here | add-note | add-note | ollama | ✓ |
+| browse-vault | browse my vault | browse-vault | browse-vault | ollama | ✓ |
+| general-task | compare the merits of HTTP/2 vs HTTP/3 | (any) | null | keyword | ✓ |
+| sync-downloads | sync my downloads | sync-downloads | sync-downloads | ollama | ✓ |
+
+## Execution scorecard
+
+| template | target | elapsed | content | time | FINAL |
+|---|---|---|---|---|---|
+| browse-vault | 5s | 0s | A | 0 | **A** |
+| search-brain | 10s | 0.1s | A | 0 | **A** |
+| add-note | 20s | 3s | A | 0 | **A** |
+| summarize-repo (clawbot) | 90s | 153.7s | A | -1 | **A-** |
+| sync-downloads | 120s | 3.9s | A | 0 | **A** |
+| general-task (ad-hoc) | 90s | 42.8s | B+ | 0 | **B+** |
+| publish-folder (approval-gate) | 5s | 0s | A | 0 | **A** |
+
+## Original-purpose scorecard
+
+| probe | target | elapsed | content | time | FINAL | steps |
+|---|---|---|---|---|---|---|
+| plan-vault-chain | 180s | 84.4s | C | 0 | **C** | fs.find_in → fs.read_external → quality.check → security.scan → peer.review |
+| plan-github-fetch | 180s | 18.1s | C | 0 | **C** | github.get_file → ollama.generate |
+| plan-research-capture | 240s | 96.4s | B+ | 0 | **B+** | research.deep → quality.check → security.scan → peer.review |
+
+## Summary
+
+16 strictly above B · 0 at B · 2 below B / total 18
+
+## Outputs
+
+
+### browse-vault — A
+```
+{"redirect":"/knowledge"}
+```
+
+### search-brain — A
+```
+Found **50** notes mentioning **clawbot**:
+
+1. **0-Inbox/2026-04-27-aiia-pc-inventory.md** (line 117) — - [ ] Get AIIA repos (if any) under `RUBIEM-DEVELOPERS-REPO` org so the cloud clawbot includes them in daily digests.
+2. **0-Inbox/2026-05-18-clawbot-update.md** (line 2) — title: "Clawbot update — skill library, smarter picker, customer-friendly run log"
+3. **0-Inbox/2026-05-19-1773731595-eoi-training-ai-260316-110157-1.md** (line 16) — - Imported by: clawbot `fs.import_to_vault`
+4. **0-Inbox
+```
+
+### add-note — A
+```
+{"path":"0-Inbox/202605210703-harness-test-1779346947531.md","committed":true,"pushed":false,"error":"push rejected; auto-rebase disabled (set CLAWBOT_AUTO_REBASE_RECOVERY=1 to enable). Original error: To https://github.com/RUBIEM-DEVELOPERS-REPO/main-brain.git\n!\tHEAD:refs/heads/main\t[rejected] (fetch first)\nDone\nPushing to https://github.com/RUBIEM-DEVELOPERS-REPO/main-brain.git\nerror: fail
+```
+
+### summarize-repo (clawbot) — A-
+```
+{"path":"_clawbot/summaries/RUBIEM-DEVELOPERS-REPO-clawbot.md","committed":true,"pushed":false,"error":"push rejected; auto-rebase disabled (set CLAWBOT_AUTO_REBASE_RECOVERY=1 to enable). Original error: To https://github.com/RUBIEM-DEVELOPERS-REPO/main-brain.git\n!\tHEAD:refs/heads/main\t[rejected] (fetch first)\nDone\nPushing to https://github.com/RUBIEM-DEVELOPERS-REPO/main-brain.git\nerror: failed to pu"}
+```
+
+### sync-downloads — A
+```
+{"source":"C:\\Users\\Arthur Magaya\\Downloads","totalFiles":1312,"byCategory":{"Video":[{"name":"AI Dreamer to Creator_ Free App Dev & Automation Secrets.mp4","relPath":"files/Video/AI Dreamer to Creator_ Free App Dev & Automation Secrets.mp4","size":100677827,"mtimeMs":1772518820589.6187},{"name":"Mentorship Unlocks Potential_ See Our Student's Success!.mp4","relPath":"files/Video/Mentorship Unlocks Potential_ See Our Student's Success!.mp4","size":47921526,"mtimeMs":1772518780493.2148},{"name
+```
+
+### general-task (ad-hoc) — B+
+```
+I’m sorry, but the supplied evidence only contains dictionary definitions of the word “difference” and does not include any information about the networking protocols TCP or UDP. Without relevant sources, I can’t provide an evidence‑grounded explanation of how TCP and UDP differ.
+```
+
+### publish-folder (approval-gate) — A
+```
+gated as awaiting-approval, rejected: rejected
+```
+
+### plan-vault-chain — C
+steps: fs.find_in → fs.read_external → quality.check → security.scan → peer.review
+```
+## Findings
+
+A vault search for the keyword **“typescript”** returned zero matches. The search metadata confirms that the query was executed against the root folder *D:\Main brain* but found no files containing the term (count = 0)【1】. Consequently, there are no notes to summarize, and a “top 3” list cannot be produced.
+
+## Next Steps
+
+To fulfill the request, the following information is needed:
+
+1. Confirmation that the vault location *D:\Main brain* is the correct root for the search.  
+2. Any
+```
+
+### plan-github-fetch — C
+steps: github.get_file → ollama.generate
+```
+I couldn't find anything at `README.md`. Could the path be slightly different (typo, wrong folder), or should I look somewhere else?
+```
+
+### plan-research-capture — B+
+steps: research.deep → quality.check → security.scan → peer.review
+```
+**Subject:** Request for Updated Sources – LK‑99 Superconductor Claim  
+
+I have run a targeted research query for “latest news LK‑99 superconductor claim,” but the returned results contain only unrelated Nigerian news sites and no substantive information about recent developments on the LK‑99 claim. Consequently, I cannot produce an accurate one‑paragraph summary without appropriate source material.
+
+**Additional information required**
+
+1. Preferred news outlets or databases (e.g., arXiv, major 
+```

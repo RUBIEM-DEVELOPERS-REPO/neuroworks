@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, statSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Plan } from "./agent.js";
@@ -21,14 +21,24 @@ export type CustomTemplate = {
 };
 
 let cache: CustomTemplate[] | null = null;
+let cacheMtime: number = 0;
 
 export function loadCustomTemplates(): CustomTemplate[] {
-  if (cache) return cache;
-  if (!existsSync(FILE)) { cache = []; return cache; }
+  if (!existsSync(FILE)) {
+    if (!cache) cache = [];
+    return cache;
+  }
+  // Re-read when the file's mtime advances since our cache was set. Lets
+  // out-of-band seeders (e.g. _seed-employee-templates.mjs) refresh the
+  // registry without a server restart. Without this we'd have to bounce
+  // tsx every time the customs file grew.
   try {
+    const mt = statSync(FILE).mtimeMs;
+    if (cache && mt === cacheMtime) return cache;
     const data = JSON.parse(readFileSync(FILE, "utf8")) as CustomTemplate[];
     cache = Array.isArray(data) ? data : [];
-  } catch { cache = []; }
+    cacheMtime = mt;
+  } catch { if (!cache) cache = []; }
   return cache;
 }
 

@@ -194,15 +194,24 @@ function pickCustomSample(customs) {
     /what-is-in-the-readme-of-the-clawbot/,
     /compare-what-my-vault-says-about-neuroworks/,
     /give-me-a-summary-on-neuroworks/,
-    /insurance-sales-agent-sell-auto-home/,
     /head-of-ai-define-and-lead/,
-    /aiia-marketing-specialist-write-social/,
-    /clawbot-daily-focus/,
     /clawbot-quick-web-look/,
     /researcher-latest-news-scan/,
   ];
+  // Always include 8 of the new employee-task templates to validate they
+  // route through the chat path correctly and the new skills auto-load.
+  const empWanted = [
+    /custom-emp-meeting-to-actions/,
+    /custom-emp-cv-screening/,
+    /custom-emp-vendor-comparison/,
+    /custom-emp-compliance-check/,
+    /custom-emp-support-ticket-themes/,
+    /custom-emp-kb-article-from-ticket/,
+    /custom-emp-slide-outline/,
+    /custom-emp-tomorrow-work-plan/,
+  ];
   const picked = [];
-  for (const re of wanted) {
+  for (const re of [...wanted, ...empWanted]) {
     const t = customs.find(c => re.test(c.id));
     if (t) picked.push(t);
   }
@@ -210,7 +219,7 @@ function pickCustomSample(customs) {
   // over time). Ensures Phase B has coverage even if the wanted list rots.
   if (picked.length < 5) {
     for (const c of customs) {
-      if (!picked.includes(c) && picked.length < 8) picked.push(c);
+      if (!picked.includes(c) && picked.length < 10) picked.push(c);
     }
   }
   return picked;

@@ -50,7 +50,31 @@ export const api = {
   runReflection: (windowHours = 24) => req<{ date: string; path: string; stats: any; reflection: string; generatedAt: string; modelUsed?: string }>("/api/reflection/run", { method: "POST", body: JSON.stringify({ windowHours }) }),
   getReflection: (date: string) => req<{ date: string; path: string; body: string }>(`/api/reflection/${encodeURIComponent(date)}`),
   triggerDigest: (lookbackDays = 7) => req<{ jobId: string }>("/api/tasks/digest", { method: "POST", body: JSON.stringify({ lookbackDays: String(lookbackDays) }) }),
-  chat: (messages: { role: "user" | "assistant" | "system"; content: string }[]) => req<{ kind: "message" | "task"; text: string; jobId?: string; templateId?: string; requiresApproval?: boolean; brainHits?: { path: string; line: number; preview: string }[]; activePersona?: { id: string; name: string; role: string } | null }>("/api/chat", { method: "POST", body: JSON.stringify({ messages }) }),
+  chat: (messages: { role: "user" | "assistant" | "system"; content: string }[], opts?: { attachments?: { contextId: string }[]; persona?: string }) => req<{ kind: "message" | "task"; text: string; jobId?: string; templateId?: string; requiresApproval?: boolean; brainHits?: { path: string; line: number; preview: string }[]; activePersona?: { id: string; name: string; role: string } | null; personaAutoRouted?: { personaId: string | null; score: number; matched: string[] } | null }>("/api/chat", { method: "POST", body: JSON.stringify({ messages, ...(opts?.attachments ? { attachments: opts.attachments } : {}), ...(opts?.persona ? { persona: opts.persona } : {}) }) }),
+  team: (tasks: { persona?: string; content: string; attachments?: { contextId: string }[] }[]) => req<{
+    kind: "team-task";
+    tasksDispatched: number;
+    tasks: {
+      taskIndex: number;
+      persona: { id: string; name: string; role: string } | null;
+      personaAutoRouted: boolean;
+      jobId: string;
+      route: "primary" | "auto" | "explicit" | "active";
+    }[];
+  }>("/api/team", { method: "POST", body: JSON.stringify({ tasks }) }),
+  upload: (body: { filename: string; contentBase64: string; target: "context" | "vault"; vaultFolder?: string; mimeType?: string }) => req<{
+    ok: true;
+    target: "context" | "vault";
+    contextId?: string;
+    filename?: string;
+    bytes: number;
+    vaultPath?: string;
+    hasExtractedText?: boolean;
+    extractedChars?: number;
+    extractError?: string;
+    ttlSeconds?: number;
+    message?: string;
+  }>("/api/uploads", { method: "POST", body: JSON.stringify(body) }),
   saveSession: (sessionId: string, messages: { role: string; content: string; jobId?: string }[]) => req<{ saved: true; path: string; sessionId: string }>("/api/chat/save-session", { method: "POST", body: JSON.stringify({ sessionId, messages }) }),
   listPersonas: () => req<{ personas: any[]; activeId: string | null; active: any }>("/api/personas"),
   createPersona: (body: { name: string; jobDescription: string; tone?: string; role?: string; description?: string; responsibilities?: string[]; systemPromptOverride?: string }) => req<{ persona: any }>("/api/personas", { method: "POST", body: JSON.stringify(body) }),

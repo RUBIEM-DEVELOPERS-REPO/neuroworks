@@ -5,6 +5,7 @@ import { newJob, runJob } from "../lib/jobs.js";
 import { config } from "../config.js";
 import { searchVault } from "../lib/vault.js";
 import { getActivePersona, personaSystemSuffix } from "../lib/personas.js";
+import { autoRoutePersona } from "../lib/persona-router.js";
 import { checkLaneFit, buildOutOfLaneRefusal } from "../lib/lane.js";
 import { localInflightCount, pickLightestIdlePeer, pickPeerByRole, pickExecutor, delegateToPeer, type PeerInfo, type RoutingDecision } from "../lib/peers.js";
 import { curatePeerOutput } from "../lib/curation.js";
@@ -354,7 +355,30 @@ async function handleChat(req: any, res: any) {
   // 3. No template matched — route to general-task agent. The agent plans + executes
   //    using primitives, optionally saves the plan as a custom template for next time.
   const tpl = templates.find(t => t.id === "general-task")!;
-  const persona = getActivePersona();
+  // Persona resolution:
+  //   a) If the user (or upstream caller) supplied req.body.persona, honour it.
+  //   b) Else use the active persona from the dashboard.
+  //   c) Else, if nothing is active OR the active persona is the generalist
+  //      "clawbot", auto-route the task to a specialized built-in persona via
+  //      pattern matching. The auto-route only fires when the pattern catalog
+  //      yields a confident single winner; otherwise we stay on clawbot.
+  let persona = getActivePersona();
+  let personaAutoRouted: { matched: string[]; score: number } | null = null;
+  const explicitPersonaId = typeof req.body?.persona === "string" ? req.body.persona.trim() : "";
+  if (explicitPersonaId) {
+    try {
+      const { loadPersonas } = await import("../lib/personas.js");
+      const store = loadPersonas();
+      const found = store.personas.find(p => p.id === explicitPersonaId);
+      if (found) persona = found;
+    } catch { /* fall back to active */ }
+  } else if (!persona || persona.id === "clawbot") {
+    const routed = autoRoutePersona(text);
+    if (routed) {
+      persona = routed.persona;
+      personaAutoRouted = { matched: routed.matched, score: routed.score };
+    }
+  }
 
   // ─── Lane gate ───
   // BEFORE invoking the planner, check whether the active persona is the
@@ -491,7 +515,33 @@ async function handleChat(req: any, res: any) {
   // heuristic was too narrow. Customers continue topics implicitly all the
   // time ("make it shorter", "what about Q4 too"); explicitly opting out is
   // the rarer case and is detected via the NEW_TOPIC / greeting markers.
-  const enrichedTask = buildEnrichedTask(text, useThreadContext, recentUserTurns, lastAssistantTurn, persona, intentDetection);
+  //
+  // Attachments support: when the chat body includes
+  //   attachments: [{ contextId: "<uuid>" }]
+  // we resolve each one via the uploads context store and fold the
+  // extracted text into the enriched task as an "Attached document"
+  // block. The planner / synth sees it the same way it sees any other
+  // evidence. The 8k-char cap per attachment keeps the prompt budget
+  // sane; longer docs should be vault-imported via /api/uploads
+  // target=vault instead, where vault.read can serve them on demand.
+  const attachments = Array.isArray(req.body?.attachments) ? req.body.attachments : [];
+  let attachmentBlock = "";
+  let attachmentMeta: { filename: string; chars: number }[] = [];
+  if (attachments.length > 0) {
+    const { resolveContextAttachment } = await import("./uploads.js");
+    const resolved = (await Promise.all(attachments.map(async (a: any) => {
+      if (!a?.contextId) return null;
+      const r = await resolveContextAttachment(String(a.contextId));
+      if (!r) return null;
+      return { filename: r.filename, text: r.text.slice(0, 8000) };
+    }))).filter(Boolean) as { filename: string; text: string }[];
+    if (resolved.length > 0) {
+      attachmentBlock = "\n\nAttached documents (user uploaded as context for THIS task — read them carefully and use them as primary evidence):\n" +
+        resolved.map((a, i) => `[Attachment ${i + 1}: ${a.filename}]\n${a.text}`).join("\n\n---\n\n");
+      attachmentMeta = resolved.map(r => ({ filename: r.filename, chars: r.text.length }));
+    }
+  }
+  const enrichedTask = buildEnrichedTask(text, useThreadContext, recentUserTurns, lastAssistantTurn, persona, intentDetection) + attachmentBlock;
   const job = newJob(`insights:general-task`);
   job.template = tpl.id;
   job.title = `Ad-hoc: ${text.slice(0, 60)}`;
@@ -513,7 +563,16 @@ async function handleChat(req: any, res: any) {
     intentTone: intentDetection.tone,
     intentScope: intentDetection.scope,
     ...(delegatedPeer ? { delegatedTo: delegatedPeer.url } : {}),
+    ...(personaAutoRouted ? { personaAutoRouted: persona?.id ?? null, autoRouteMatches: personaAutoRouted.matched } : {}),
+    ...(persona ? { personaId: persona.id } : {}),
+    ...(attachmentMeta.length > 0 ? { attachments: attachmentMeta } : {}),
   };
+  if (personaAutoRouted && persona) {
+    job.log.push(`[${new Date().toISOString()}] auto-routed to persona "${persona.id}" (score=${personaAutoRouted.score}, matched=${personaAutoRouted.matched.slice(0, 3).join(", ")})`);
+  }
+  if (attachmentMeta.length > 0) {
+    job.log.push(`[${new Date().toISOString()}] folded ${attachmentMeta.length} attachment${attachmentMeta.length === 1 ? "" : "s"} into task: ${attachmentMeta.map(a => `${a.filename} (${a.chars} chars)`).join(", ")}`);
+  }
   job.requiresApproval = false;
   // Chat blurb framed as labor-on-demand: the customer hires an employee for
   // each task. When a worker peer is available we say "hiring {Name} —
@@ -535,6 +594,7 @@ async function handleChat(req: any, res: any) {
     requiresApproval: false,
     text: delegationBlurb,
     activePersona: persona ? { id: persona.id, name: persona.name, role: persona.role } : null,
+    personaAutoRouted: personaAutoRouted ? { ...personaAutoRouted, personaId: persona?.id ?? null } : null,
     delegatedPeer,
     delegationReason,
   });
@@ -1318,3 +1378,148 @@ async function runTemplateInline(templateId: string, inputs: Record<string, unkn
   return runFromChat(templateId, inputs, push);
 }
 void config; void searchVault; void ollamaGenerate;
+
+// POST /api/chat/team
+//
+// Multi-persona parallel team-task endpoint. Accepts an array of tasks, each
+// with its own persona (or auto-routed if omitted). Dispatches each in
+// parallel — different specialists working the same problem from different
+// angles, or working independent slices of a larger workstream.
+//
+// Body:
+//   { tasks: [{ persona?: string, content: string, attachments?: [{contextId}] }] }
+//
+// Returns:
+//   { jobs: [{ jobId, persona: {id,name,role}, autoRouted, title }] }
+//
+// Each task runs as its own job through the standard planAndExecute path,
+// with personaSystemSuffix injected so the persona's lane + voice apply.
+// Jobs fire concurrently — limited by the worker pool ceiling already in
+// place (CLAWBOT_MAX_WORKERS), so 6 team tasks against a 3-worker pool will
+// queue the last 3 behind the first 3.
+chatRouter.post("/team", async (req, res) => {
+  try {
+    const rawTasks = Array.isArray(req.body?.tasks) ? req.body.tasks : [];
+    if (rawTasks.length === 0) {
+      return res.status(400).json({ error: "tasks: [] required (at least one task)" });
+    }
+    if (rawTasks.length > 12) {
+      return res.status(400).json({ error: `too many tasks (${rawTasks.length}); max 12 per team call` });
+    }
+
+    const { loadPersonas } = await import("../lib/personas.js");
+    const { planAndExecute } = await import("../lib/agent.js");
+    const { commitAndPush } = await import("../lib/vault.js");
+    const personaStore = loadPersonas();
+
+    type ResolvedTask = {
+      jobId: string;
+      persona: import("../lib/personas.js").Persona | null;
+      autoRouted: boolean;
+      autoMatches: string[];
+      title: string;
+      content: string;
+      attachments: Array<{ contextId?: string }>;
+    };
+    const resolved: ResolvedTask[] = [];
+
+    for (const t of rawTasks) {
+      const content = String(t?.content ?? "").trim();
+      if (!content) {
+        return res.status(400).json({ error: "each task must have non-empty 'content'" });
+      }
+      let persona: import("../lib/personas.js").Persona | null = null;
+      let autoRouted = false;
+      let autoMatches: string[] = [];
+      const explicit = typeof t?.persona === "string" ? t.persona.trim() : "";
+      if (explicit) {
+        const found = personaStore.personas.find(p => p.id === explicit);
+        if (!found) {
+          return res.status(400).json({ error: `unknown persona id: ${explicit}` });
+        }
+        persona = found;
+      } else {
+        const routed = autoRoutePersona(content);
+        if (routed) {
+          persona = routed.persona;
+          autoRouted = true;
+          autoMatches = routed.matched;
+        }
+      }
+      const job = newJob(`insights:general-task`);
+      job.title = `Team: ${persona?.name ?? "auto"} · ${content.slice(0, 50)}`;
+      job.inputs = {
+        task: content,
+        userText: content,
+        teamTask: true,
+        ...(persona ? { personaId: persona.id } : {}),
+        ...(autoRouted ? { personaAutoRouted: persona?.id ?? null, autoRouteMatches: autoMatches } : {}),
+      };
+      job.log.push(`[${new Date().toISOString()}] team-task · persona=${persona?.id ?? "generalist"}${autoRouted ? ` (auto-routed, matched=${autoMatches.slice(0, 3).join(", ")})` : ""}`);
+
+      const attachments = Array.isArray(t?.attachments) ? t.attachments : [];
+
+      resolved.push({
+        jobId: job.id,
+        persona,
+        autoRouted,
+        autoMatches,
+        title: job.title,
+        content,
+        attachments,
+      });
+
+      // Fire the job. Each runs independently — Promise execution begins now
+      // but we don't await; the response returns the handles immediately.
+      void runJob(job, async (push, progress) => {
+        // Fold attached document text into the task if any.
+        let attachmentBlock = "";
+        if (attachments.length > 0) {
+          try {
+            const { resolveContextAttachment } = await import("./uploads.js");
+            const parts: string[] = [];
+            for (const a of attachments) {
+              if (!a?.contextId) continue;
+              const r = await resolveContextAttachment(String(a.contextId));
+              if (r) parts.push(`[Attachment: ${r.filename}]\n${r.text.slice(0, 8000)}`);
+            }
+            if (parts.length > 0) attachmentBlock = "\n\nAttached documents (user uploaded as context):\n" + parts.join("\n\n---\n\n");
+          } catch (e: any) {
+            push(`Attachment resolution warning: ${String(e?.message ?? e).slice(0, 120)}`);
+          }
+        }
+        const enriched = persona
+          ? `(You are operating as ${persona.name}, the ${persona.role}. Bias tool choices, output shape, and depth toward this role's conventions.)\n\n${content}${attachmentBlock}`
+          : content + attachmentBlock;
+        const personaSuffix = personaSystemSuffix(persona);
+        if (persona) push(`Working as ${persona.name} — ${persona.role}.`);
+        const r = await planAndExecute(enriched, push, (patch) => progress(patch as Record<string, unknown>), { personaSystemSuffix: personaSuffix });
+        if (r.hadWrites) {
+          push("Wrote to second brain — committing.");
+          try {
+            const c = await commitAndPush(`clawbot team-task: ${content.slice(0, 60)}`);
+            push(`Vault commit: ${(c as any)?.ok === false ? "failed" : "done"}.`);
+          } catch (e: any) { push(`Commit didn't go through (non-fatal): ${e?.message ?? e}.`); }
+        }
+        return r;
+      });
+    }
+
+    return res.json({
+      ok: true,
+      count: resolved.length,
+      jobs: resolved.map(r => ({
+        jobId: r.jobId,
+        title: r.title,
+        persona: r.persona
+          ? { id: r.persona.id, name: r.persona.name, role: r.persona.role }
+          : null,
+        autoRouted: r.autoRouted,
+        autoMatches: r.autoMatches,
+      })),
+    });
+  } catch (e: any) {
+    console.error("[chat/team] error:", e?.message ?? e);
+    res.status(500).json({ error: String(e?.message ?? e) });
+  }
+});

@@ -1,0 +1,154 @@
+# Multi-turn Continuity Harness :: r4 :: 2026-05-22T07:06:07.719Z
+Server: http://127.0.0.1:7471
+Model: qwen2.5:3b
+OpenRouter: enabled (openai/gpt-oss-20b:free)
+
+▶ shorten-pronoun
+  ✓ 46.5s :: A → A
+▶ what-about-shift
+  ✓ 12.9s :: A → A
+▶ pronoun-it-summary
+  ✓ 17.9s :: A → A
+▶ explicit-switch
+  ✓ 36.6s :: A → A
+▶ bare-yes-with-context
+  ✗ 48.3s :: B(-1) → B-
+▶ affirmation-cold
+  ✓ 0s :: A → A
+▶ continue-cold
+  ✓ 0s :: A → A
+▶ qa-then-bullet
+  ✓ 23.8s :: A → A
+## Scorecard
+
+| probe | target | turn-2 | total | content | time | FINAL | description |
+|---|---|---|---|---|---|---|---|
+| shorten-pronoun | 90s | 46.5s | 55.8s | A | 0 | **A** | Turn 1: explain RAG. Turn 2: 'shorten it' — should produce a shorter RAG explanation. |
+| what-about-shift | 60s | 12.9s | 67.5s | A | 0 | **A** | Turn 1: capital of France. Turn 2: 'what about Germany' — should answer Berlin. |
+| pronoun-it-summary | 90s | 17.9s | 78.4s | A | 0 | **A** | Turn 1: what is HTTP/2. Turn 2: 'summarise it in one sentence'. |
+| explicit-switch | 60s | 36.6s | 60.8s | A | 0 | **A** | Turn 1: tell me about Python. Turn 2: 'new task: what is Rust' — should switch topic. |
+| bare-yes-with-context | 30s | 48.3s | 214.1s | B | -1 | **B-** | Turn 1: 'should I research X' (clawbot offers). Turn 2: 'yes' — should ack and act on prior offer. |
+| affirmation-cold | 5s | 0s | 0s | A | 0 | **A** | Cold 'yes' with NO prior context — should ask for clarification, not act. |
+| continue-cold | 5s | 0s | 0s | A | 0 | **A** | Cold 'continue' with NO prior context — should ask 'from where'. |
+| qa-then-bullet | 120s | 23.8s | 78.5s | A | 0 | **A** | Turn 1: explain transformers (model arch). Turn 2: 'give me 3 key components' — should produce 3 bullets about transformers. |
+
+**Summary:** 7 above B · 0 at B · 1 below B / 8
+
+## Outputs
+
+
+### shorten-pronoun — A
+*Turn 1: explain RAG. Turn 2: 'shorten it' — should produce a shorter RAG explanation.*
+
+**Conversation:**
+- user: explain RAG retrieval augmented generation
+- assistant: **RAG Retrieval Augmented Generation**
+
+RAG stands for Retrieval Augmented Generation, a technique that combines the strengths of retrieval-based and 
+- user: shorten it
+
+**Final assistant response (source: inline):**
+```
+RAG is a technique that merges retrieval-based and generation-based models for better text accuracy and informativeness. It comprises two main components:
+
+- **Retrieval**: A dense model indexing a corpus, enabling efficient query-relevant passage retrieval.
+- **Generation**: A text generator using these passages to produce summaries or expansions.
+
+Key benefits include improved accuracy, reduced hallucinations due to actual corpus input, and enhanced efficiency in handling complex queries. Common applications are question answering.
+```
+
+### what-about-shift — A
+*Turn 1: capital of France. Turn 2: 'what about Germany' — should answer Berlin.*
+
+**Conversation:**
+- user: what is the capital of France
+- assistant: The capital of France is Paris. 
+
+I don't have specific knowledge of 'AIIA' in this context.
+
+Questions:
+- Could you provide more details about the in
+- user: what about Germany
+
+**Final assistant response (source: inline):**
+```
+The capital of Germany is Berlin.
+```
+
+### pronoun-it-summary — A
+*Turn 1: what is HTTP/2. Turn 2: 'summarise it in one sentence'.*
+
+**Conversation:**
+- user: what is HTTP/2
+- assistant: HTTP/2 is a version of the Hypertext Transfer Protocol designed to improve performance by allowing multiple requests to be sent over a single connecti
+- user: summarise it in one sentence
+
+**Final assistant response (source: inline):**
+```
+HTTP/2 improves performance through multiplexing streams, bidirectional communication, header compression, and flow/congestion control, while also featuring server push for resource optimization.
+```
+
+### explicit-switch — A
+*Turn 1: tell me about Python. Turn 2: 'new task: what is Rust' — should switch topic.*
+
+**Conversation:**
+- user: tell me about Python in two sentences
+- assistant: Python is a high‑level, interpreted programming language known for its clear syntax and extensive standard library, making it easy for both beginners 
+- user: new task: what is Rust
+
+**Final assistant response (source: task):**
+```
+I’m sorry, but the supplied sources do not contain any information about “Rust.” There is no evidence to define or describe Rust in the provided material, so I cannot give an answer based on the available data.
+```
+
+### bare-yes-with-context — B-
+*Turn 1: 'should I research X' (clawbot offers). Turn 2: 'yes' — should ack and act on prior offer.*
+
+**Conversation:**
+- user: I'm thinking about researching the LK-99 superconductor saga — should I
+- assistant: ## Recommendation Report – Researching the LK‑99 Superconductor Saga  
+
+**Background** – The LK‑99 story began with a 2023 pre‑print that claimed room
+- user: yes
+
+**Final assistant response (source: task):**
+```
+Sure, let's focus on summarizing key points for quick decision-making. The LK-99 saga involves claims of room temperature superconductivity in a lead-phosphide compound, which has not been independently replicated and is widely considered unsubstantiated by experts. Do you want to dive into why this might be important or what steps we could take with the current knowledge?
+```
+
+### affirmation-cold — A
+*Cold 'yes' with NO prior context — should ask for clarification, not act.*
+
+**Conversation:**
+- user: yes
+
+**Final assistant response (source: inline):**
+```
+I don't have a pending suggestion to confirm — what would you like me to do? Drop me a task or a question and I'll get on it.
+```
+
+### continue-cold — A
+*Cold 'continue' with NO prior context — should ask 'from where'.*
+
+**Conversation:**
+- user: continue
+
+**Final assistant response (source: inline):**
+```
+Continue from where? I don't see a previous thread to pick up — share the topic or paste what we were working on.
+```
+
+### qa-then-bullet — A
+*Turn 1: explain transformers (model arch). Turn 2: 'give me 3 key components' — should produce 3 bullets about transformers.*
+
+**Conversation:**
+- user: explain transformer neural networks
+- assistant: Transformer neural networks are a type of deep learning model that have revolutionized natural language processing (NLP) tasks such as text classifica
+- user: give me 3 key components
+
+**Final assistant response (source: inline):**
+```
+1. Self-attention mechanisms are used to weigh the importance of different parts of the input sequence.
+2. Transformers capture long-range dependencies in sequential data more effectively than traditional RNNs.
+3. They do not have recurrence or feedback connections, facilitating parallelizing training and inference.
+```

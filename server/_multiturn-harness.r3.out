@@ -1,0 +1,157 @@
+# Multi-turn Continuity Harness :: r3 :: 2026-05-22T06:35:09.138Z
+Server: http://127.0.0.1:7471
+Model: qwen2.5:3b
+OpenRouter: enabled (openai/gpt-oss-20b:free)
+
+▶ shorten-pronoun
+  ✓ 100.7s :: A → A
+▶ what-about-shift
+  ✓ 83.2s :: A → A
+▶ pronoun-it-summary
+  ✓ 88.9s :: A → A
+▶ explicit-switch
+  ✓ 129.6s :: A(-2) → B+
+▶ bare-yes-with-context
+  ✗ 168.7s :: B(-9) → F
+▶ affirmation-cold
+  ✓ 0s :: A → A
+▶ continue-cold
+  ✓ 0s :: A → A
+▶ qa-then-bullet
+  ✓ 132.5s :: A → A
+## Scorecard
+
+| probe | target | elapsed | content | time | FINAL | description |
+|---|---|---|---|---|---|---|
+| shorten-pronoun | 90s | 100.7s | A | 0 | **A** | Turn 1: explain RAG. Turn 2: 'shorten it' — should produce a shorter RAG explanation. |
+| what-about-shift | 60s | 83.2s | A | 0 | **A** | Turn 1: capital of France. Turn 2: 'what about Germany' — should answer Berlin. |
+| pronoun-it-summary | 90s | 88.9s | A | 0 | **A** | Turn 1: what is HTTP/2. Turn 2: 'summarise it in one sentence'. |
+| explicit-switch | 60s | 129.6s | A | -2 | **B+** | Turn 1: tell me about Python. Turn 2: 'new task: what is Rust' — should switch topic. |
+| bare-yes-with-context | 30s | 168.7s | B | -9 | **F** | Turn 1: 'should I research X' (clawbot offers). Turn 2: 'yes' — should ack and act on prior offer. |
+| affirmation-cold | 5s | 0s | A | 0 | **A** | Cold 'yes' with NO prior context — should ask for clarification, not act. |
+| continue-cold | 5s | 0s | A | 0 | **A** | Cold 'continue' with NO prior context — should ask 'from where'. |
+| qa-then-bullet | 120s | 132.5s | A | 0 | **A** | Turn 1: explain transformers (model arch). Turn 2: 'give me 3 key components' — should produce 3 bullets about transformers. |
+
+**Summary:** 7 above B · 0 at B · 1 below B / 8
+
+## Outputs
+
+
+### shorten-pronoun — A
+*Turn 1: explain RAG. Turn 2: 'shorten it' — should produce a shorter RAG explanation.*
+
+**Conversation:**
+- user: explain RAG retrieval augmented generation
+- assistant: _Assumed: I am explaining what Retrieval-Augmented Generation (RAG) is._
+
+Retrieval-Augmented Generation (RAG) is a technique in natural language proc
+- user: shorten it
+
+**Final assistant response (source: inline):**
+```
+Retrieval-Augmented Generation (RAG) enhances model performance by using an external knowledge base to make predictions about unseen data points, improving accuracy and relevance. It combines supervised learning with the vastness of unstructured database knowledge, leading to more nuanced text generation and understanding tasks.
+```
+
+### what-about-shift — A
+*Turn 1: capital of France. Turn 2: 'what about Germany' — should answer Berlin.*
+
+**Conversation:**
+- user: what is the capital of France
+- assistant: The capital of France is Paris. 
+
+I don't have specific knowledge of 'AIIA' in this context.
+
+Questions:
+1. Could you provide more details about the r
+- user: what about Germany
+
+**Final assistant response (source: inline):**
+```
+The capital of Germany is Berlin.
+```
+
+### pronoun-it-summary — A
+*Turn 1: what is HTTP/2. Turn 2: 'summarise it in one sentence'.*
+
+**Conversation:**
+- user: what is HTTP/2
+- assistant: HTTP/2 is an evolution of the Hypertext Transfer Protocol (HTTP) designed to improve performance by allowing multiple requests to be sent over a singl
+- user: summarise it in one sentence
+
+**Final assistant response (source: inline):**
+```
+HTTP/2 improves performance through multiplexing, header compression, and Server Push, enabling concurrent data transfer and reducing header size. Widely adopted for its efficiency enhancements in modern web applications.
+```
+
+### explicit-switch — B+
+*Turn 1: tell me about Python. Turn 2: 'new task: what is Rust' — should switch topic.*
+
+**Conversation:**
+- user: tell me about Python in two sentences
+- assistant: Python is an open‑source, high‑level programming language released under the permissive Python Software Foundation License, known for its readable syn
+- user: new task: what is Rust
+
+**Final assistant response (source: task):**
+```
+**Rust programming language – at a glance**
+
+| Aspect | What the evidence says |
+|--------|------------------------|
+| **Purpose & paradigm** | Rust is a *general‑purpose* language that emphasizes safety, speed, and concurrency. Its design combines low‑level control with high‑level abstractions, making it suitable for systems programming, embedded work, web services, and more【2】. |
+| **Performance** | Rust compiles to native code with **no runtime or garbage collector**, delivering “blazingly fast” and memory‑efficient execution. This lets it power performance‑critical services, run on tiny em
+```
+
+### bare-yes-with-context — F
+*Turn 1: 'should I research X' (clawbot offers). Turn 2: 'yes' — should ack and act on prior offer.*
+
+**Conversation:**
+- user: I'm thinking about researching the LK-99 superconductor saga — should I
+- assistant: **To:** Research Lead  
+**From:** Sam, Software Engineer  
+**Date:** 2026‑05‑22  
+**Subject:** Recommendation on Pursuing an LK‑99 Superconductor Rese
+- user: yes
+
+**Final assistant response (source: task):**
+```
+That sounds interesting. What specific aspects are you curious about?
+```
+
+### affirmation-cold — A
+*Cold 'yes' with NO prior context — should ask for clarification, not act.*
+
+**Conversation:**
+- user: yes
+
+**Final assistant response (source: inline):**
+```
+I don't have a pending suggestion to confirm — what would you like me to do? Drop me a task or a question and I'll get on it.
+```
+
+### continue-cold — A
+*Cold 'continue' with NO prior context — should ask 'from where'.*
+
+**Conversation:**
+- user: continue
+
+**Final assistant response (source: inline):**
+```
+Continue from where? I don't see a previous thread to pick up — share the topic or paste what we were working on.
+```
+
+### qa-then-bullet — A
+*Turn 1: explain transformers (model arch). Turn 2: 'give me 3 key components' — should produce 3 bullets about transformers.*
+
+**Conversation:**
+- user: explain transformer neural networks
+- assistant: _Assumed: I am explaining the basic architecture and key components of a Transformer neural network._ 
+
+Transformer neural networks are a type of deep
+- user: give me 3 key components
+
+**Final assistant response (source: inline):**
+```
+1. **Self-Attention Mechanism**: This mechanism enables the model to focus on specific elements within an input sequence by assigning them varying weights based on importance.
+2. **Multi-Head Attention**: By utilizing multiple attention heads, each processing different segments of the input independently and then merging their outputs, Transformers can effectively handle longer sequences without losing information.
+3. *
+```

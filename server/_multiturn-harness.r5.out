@@ -1,0 +1,147 @@
+# Multi-turn Continuity Harness :: r5 :: 2026-05-22T07:18:44.184Z
+Server: http://127.0.0.1:7471
+Model: qwen2.5:3b
+OpenRouter: enabled (openai/gpt-oss-20b:free)
+
+▶ shorten-pronoun
+  ✓ 18.7s :: A → A
+▶ what-about-shift
+  ✓ 13.8s :: A → A
+▶ pronoun-it-summary
+  ✓ 13.7s :: A → A
+▶ explicit-switch
+  ✓ 54.2s :: A → A
+▶ bare-yes-with-context
+  ✓ 3.1s :: A → A
+▶ affirmation-cold
+  ✓ 0s :: A → A
+▶ continue-cold
+  ✓ 0s :: A → A
+▶ qa-then-bullet
+  ✓ 18.8s :: A → A
+## Scorecard
+
+| probe | target | turn-2 | total | content | time | FINAL | description |
+|---|---|---|---|---|---|---|---|
+| shorten-pronoun | 90s | 18.7s | 76.1s | A | 0 | **A** | Turn 1: explain RAG. Turn 2: 'shorten it' — should produce a shorter RAG explanation. |
+| what-about-shift | 60s | 13.8s | 71.5s | A | 0 | **A** | Turn 1: capital of France. Turn 2: 'what about Germany' — should answer Berlin. |
+| pronoun-it-summary | 90s | 13.7s | 65.1s | A | 0 | **A** | Turn 1: what is HTTP/2. Turn 2: 'summarise it in one sentence'. |
+| explicit-switch | 60s | 54.2s | 66.3s | A | 0 | **A** | Turn 1: tell me about Python. Turn 2: 'new task: what is Rust' — should switch topic. |
+| bare-yes-with-context | 60s | 3.1s | 171.8s | A | 0 | **A** | Turn 1: 'should I research X' (clawbot offers). Turn 2: 'yes' — should ack and act on prior offer. |
+| affirmation-cold | 5s | 0s | 0s | A | 0 | **A** | Cold 'yes' with NO prior context — should ask for clarification, not act. |
+| continue-cold | 5s | 0s | 0s | A | 0 | **A** | Cold 'continue' with NO prior context — should ask 'from where'. |
+| qa-then-bullet | 120s | 18.8s | 88.5s | A | 0 | **A** | Turn 1: explain transformers (model arch). Turn 2: 'give me 3 key components' — should produce 3 bullets about transformers. |
+
+**Summary:** 8 above B · 0 at B · 0 below B / 8
+
+## Outputs
+
+
+### shorten-pronoun — A
+*Turn 1: explain RAG. Turn 2: 'shorten it' — should produce a shorter RAG explanation.*
+
+**Conversation:**
+- user: explain RAG retrieval augmented generation
+- assistant: _Assumed: I am explaining what Retrieval-Augmented Generation (RAG) is._
+
+Retrieval-Augmented Generation (RAG) refers to a technique in natural langua
+- user: shorten it
+
+**Final assistant response (source: inline):**
+```
+Retrieval-Augmented Generation (RAG) is a technique where models use relevant documents from a database to enhance their responses, making them more accurate and detailed. This approach improves text quality by incorporating external data that complements the model's knowledge.
+```
+
+### what-about-shift — A
+*Turn 1: capital of France. Turn 2: 'what about Germany' — should answer Berlin.*
+
+**Conversation:**
+- user: what is the capital of France
+- assistant: The capital of France is Paris. 
+
+I don't have specific knowledge of 'AIIA' in this context.
+
+Questions:
+1. Could you provide more details about why u
+- user: what about Germany
+
+**Final assistant response (source: inline):**
+```
+The capital of Germany is Berlin.
+```
+
+### pronoun-it-summary — A
+*Turn 1: what is HTTP/2. Turn 2: 'summarise it in one sentence'.*
+
+**Conversation:**
+- user: what is HTTP/2
+- assistant: HTTP/2 is an evolution of the Hypertext Transfer Protocol designed to improve performance by allowing multiple requests and responses to be sent over 
+- user: summarise it in one sentence
+
+**Final assistant response (source: inline):**
+```
+HTTP/2 improves performance through multiplexing, header compression, server push, and stream prioritization, reducing latency and increasing throughput over HTTP/1.x.
+```
+
+### explicit-switch — A
+*Turn 1: tell me about Python. Turn 2: 'new task: what is Rust' — should switch topic.*
+
+**Conversation:**
+- user: tell me about Python in two sentences
+- assistant: I’m sorry, but the provided vault notes and web sources contain no information about the Python programming language, so I can’t give an evidence‑base
+- user: new task: what is Rust
+
+**Final assistant response (source: task):**
+```
+I’m sorry, but the supplied evidence does not contain any information about “Rust.” The available documents are all news‑site pages that discuss Kenyan current events and contain no description of the Rust programming language, the Rust fungus, or any other meaning of the term. Consequently, I can’t provide a grounded answer from the given sources.
+```
+
+### bare-yes-with-context — A
+*Turn 1: 'should I research X' (clawbot offers). Turn 2: 'yes' — should ack and act on prior offer.*
+
+**Conversation:**
+- user: I'm thinking about researching the LK-99 superconductor saga — should I
+- assistant: I’m sorry, but the material you provided doesn’t contain any information about the LK‑99 superconductor controversy—its scientific background, the rec
+- user: yes
+
+**Final assistant response (source: task):**
+```
+I'd need to verify the vault notes and web sources again to give a recommendation on researching the LK-99 superconductor saga.
+```
+
+### affirmation-cold — A
+*Cold 'yes' with NO prior context — should ask for clarification, not act.*
+
+**Conversation:**
+- user: yes
+
+**Final assistant response (source: inline):**
+```
+I don't have a pending suggestion to confirm — what would you like me to do? Drop me a task or a question and I'll get on it.
+```
+
+### continue-cold — A
+*Cold 'continue' with NO prior context — should ask 'from where'.*
+
+**Conversation:**
+- user: continue
+
+**Final assistant response (source: inline):**
+```
+Continue from where? I don't see a previous thread to pick up — share the topic or paste what we were working on.
+```
+
+### qa-then-bullet — A
+*Turn 1: explain transformers (model arch). Turn 2: 'give me 3 key components' — should produce 3 bullets about transformers.*
+
+**Conversation:**
+- user: explain transformer neural networks
+- assistant: Transformer neural networks are a type of deep learning model that revolutionized natural language processing (NLP) by focusing on self-attention mech
+- user: give me 3 key components
+
+**Final assistant response (source: inline):**
+```
+1. Encoder-decoder architecture.
+2. Attention mechanism for weighted input processing.
+3. Enables parallel processing for faster training.
+```

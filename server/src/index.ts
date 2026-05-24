@@ -20,12 +20,17 @@ import { ensureAllPersonasHaveTemplates } from "./lib/persona-templates.js";
 import { startReflectionScheduler, stopReflectionScheduler } from "./lib/reflection.js";
 import { reflectionRouter } from "./routes/reflection.js";
 import { skillsRouter } from "./routes/skills.js";
+import { uploadsRouter } from "./routes/uploads.js";
+import { teamRouter } from "./routes/team.js";
 import { originGuard } from "./lib/origin-guard.js";
 
 const app = express();
 // JSON body, but also accept text/plain (navigator.sendBeacon defaults to
 // it when given a plain JSON Blob) so the chat unmount-save reaches us.
-app.use(express.json({ limit: "1mb", type: ["application/json", "text/plain"] }));
+// 25 MB limit accommodates base64-encoded document uploads (a 15 MB PDF
+// base64-encodes to ~20 MB). Most uploads are <2 MB; the cap exists to
+// stop accidental DOS via giant payloads, not to be aspirationally generous.
+app.use(express.json({ limit: "25mb", type: ["application/json", "text/plain"] }));
 app.use((_req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "http://127.0.0.1:7470");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -67,6 +72,8 @@ app.use("/api/peers", peersRouter);
 app.use("/api/models", modelsRouter);
 app.use("/api/reflection", reflectionRouter);
 app.use("/api/skills", skillsRouter);
+app.use("/api/uploads", uploadsRouter);
+app.use("/api/team", teamRouter);
 
 // Global error handler — every route mounts before this so any throw bubbles
 // up here. We log the request method+url for debugability and return a

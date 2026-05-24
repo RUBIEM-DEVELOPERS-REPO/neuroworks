@@ -6,6 +6,7 @@ import { api } from "../lib/api";
 const primaryNav = [
   { to: "/dashboard", label: "Dashboard", icon: "◉" },
   { to: "/chat", label: "Chat", icon: "◌" },
+  { to: "/team", label: "Team", icon: "⌬" },
   { to: "/tasks", label: "Tasks", icon: "▤" },
   { to: "/results", label: "Reports", icon: "❡" },
   { to: "/approvals", label: "Approvals", icon: "✓", badgeKey: "approvals" },

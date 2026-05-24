@@ -1133,22 +1133,105 @@ export async function planAndExecute(
     }
   }
 
+  // REVIEW-DRIVEN RETRY (third-tier): peer review still says needs-work/bad
+  // after the quality and OR rescues — re-synthesize with the reviewer's
+  // specific issues injected as revision instructions, then re-review. If
+  // the retry clears (verdict=good) we swap the draft AND replace the review
+  // object so the user never sees the failed review chip in the UI.
+  //
+  // Only one retry attempt — bounded to keep the cost predictable. If the
+  // retry STILL doesn't pass, we fall back to whichever has the better
+  // quality score (retry vs. original) so the user gets the best version we
+  // have rather than the one with the lowest reviewer confidence.
+  let reviewRetriedDraft: string | undefined;
+  let postRetryReview: typeof review = review;
+  // Use the current best draft (rescued or original) as the baseline so we
+  // don't lose ground from the rescue paths above.
+  const draftAfterRescues = rescuedSynth ?? synth.answer;
+  if (
+    review && review.verdict !== "good" && Array.isArray(review.issues) && review.issues.length > 0 &&
+    draftAfterRescues.length >= MIN_REVIEW_CHARS
+  ) {
+    push(`peer review verdict=${review.verdict} (${(review.issues ?? []).slice(0, 2).join("; ").slice(0, 120)}) — retrying with reviewer's issues as guidance before returning to user`);
+    try {
+      // Stitch the reviewer's issues onto the task as explicit revision
+      // instructions. The synthesizer's existing prompt machinery will then
+      // bias toward fixing exactly the named problems.
+      const issuesBlock = (review.issues ?? []).slice(0, 6).map((s: string, i: number) => `${i + 1}. ${s}`).join("\n");
+      const reviseGuidance = `\n\n--- REVISION INSTRUCTIONS (from peer review) ---\nThe previous draft was flagged with these specific issues. Address each one in the new version:\n${issuesBlock}\n\nProduce a tightened, corrected answer that fixes every issue above. Use the same evidence already gathered; do NOT add new fabrications. If the prior draft cited specific dates, contacts, or numbers, verify each against the evidence catalog and correct any inconsistencies. Drop filler.\n--- END REVISION INSTRUCTIONS ---`;
+      const reviseTask = task + reviseGuidance;
+      const retry = await synthesize(reviseTask, p, runs, opts.personaSystemSuffix, undefined, { forceComplex: true, push });
+      if (retry && retry.answer.length >= MIN_REVIEW_CHARS) {
+        // Re-run the peer review on the retry draft. If verdict is "good",
+        // swap both the draft AND the review. If not, compare quality scores
+        // and pick the better of the two.
+        try {
+          const reviewTool = findPrimitive("peer.review");
+          if (reviewTool) {
+            const retryReviewRaw: any = await reviewTool.handler({ task, answer: retry.answer });
+            const retryReview = coerceReview(retryReviewRaw);
+            if (retryReview.verdict === "good") {
+              push(`retry cleared peer review (verdict=good, confidence=${retryReview.confidence ?? "?"}); using retry as final answer`);
+              reviewRetriedDraft = retry.answer;
+              postRetryReview = retryReview;
+              finalSkillUsed = retry.skillUsed ?? finalSkillUsed;
+              finalSkillScore = retry.skillScore ?? finalSkillScore;
+            } else {
+              // Not good — compare quality scores to pick the better draft.
+              try {
+                const qcheck = findPrimitive("quality.check");
+                if (qcheck) {
+                  const retryQ: any = await qcheck.handler({ task, answer: retry.answer, sources: buildEvidenceCatalog(runs) });
+                  const baseQ: any = quality ?? { score: 0 };
+                  const retryScore = Number(retryQ?.score ?? 0);
+                  const baseScore = Number(baseQ?.score ?? 0);
+                  if (retryScore > baseScore) {
+                    push(`retry verdict=${retryReview.verdict} but quality improved (${baseScore} → ${retryScore}); using retry`);
+                    reviewRetriedDraft = retry.answer;
+                    postRetryReview = retryReview;
+                    quality = { ...retryQ, reviewRetried: true, originalScore: baseScore };
+                    finalSkillUsed = retry.skillUsed ?? finalSkillUsed;
+                    finalSkillScore = retry.skillScore ?? finalSkillScore;
+                  } else {
+                    push(`retry verdict=${retryReview.verdict} and quality not improved (${retryScore} ≤ ${baseScore}); keeping the rescued/original draft`);
+                  }
+                }
+              } catch (e: any) {
+                push(`retry quality compare failed (${String(e?.message ?? e).slice(0, 60)}); keeping the rescued/original draft`);
+              }
+            }
+          }
+        } catch (e: any) {
+          push(`retry re-review failed (${String(e?.message ?? e).slice(0, 60)}); keeping the rescued/original draft`);
+        }
+      } else {
+        push(`retry synth too short (${retry?.answer.length ?? 0} chars); keeping the rescued/original draft`);
+      }
+    } catch (e: any) {
+      push(`review-driven retry failed: ${String(e?.message ?? e).slice(0, 80)}; keeping the rescued/original draft`);
+    }
+  }
+
   // Final answer precedence:
-  //   1. Rescued synth (large OR model) if it scored better — that's the
-  //      strongest output we have access to; favour it over a small-model
-  //      peer review revision.
-  //   2. Reviewer revision if reviewer flagged + provided one AND rescue
-  //      didn't happen (so the small-model draft isn't surfacing untouched).
-  //   3. Original synth.
-  // Original is preserved on the review object for audit either way.
-  const finalAnswer = rescuedSynth
-    ? rescuedSynth
-    : ((review && review.verdict !== "good" && review.revised_answer)
-        ? review.revised_answer
-        : synth.answer);
+  //   1. Review-driven retry if it cleared (or beat the rescued draft on
+  //      quality) — most recent + most informed by reviewer feedback.
+  //   2. Rescued synth (large OR model) if it scored better — strongest
+  //      output we have; favour it over a small-model peer review revision.
+  //   3. Reviewer revision if reviewer flagged + provided one AND no rescue
+  //      happened (so the small-model draft isn't surfacing untouched).
+  //   4. Original synth.
+  // Original is preserved on the (final) review object for audit either way.
+  const reviewForFinal = postRetryReview;
+  const finalAnswer = reviewRetriedDraft
+    ? reviewRetriedDraft
+    : (rescuedSynth
+        ? rescuedSynth
+        : ((reviewForFinal && reviewForFinal.verdict !== "good" && reviewForFinal.revised_answer)
+            ? reviewForFinal.revised_answer
+            : synth.answer));
 
   return {
-    task, plan: p, runs, answer: finalAnswer, hadWrites, review, quality, security, budgets, subagentTimings,
+    task, plan: p, runs, answer: finalAnswer, hadWrites, review: reviewForFinal, quality, security, budgets, subagentTimings,
     skillUsed: finalSkillUsed,
     skillScore: finalSkillScore,
   };
@@ -1355,7 +1438,7 @@ export function heuristicPlan(task: string): Plan | null {
   );
   if (vaultScanMatch) {
     const raw = (vaultScanMatch[1] ?? vaultScanMatch[2] ?? vaultScanMatch[3] ?? "").toLowerCase().trim().replace(/^my\s+|^the\s+|^your\s+/i, "");
-    const folderAliases = {
+    const folderAliases: Record<string, string> = {
       inbox: "0-Inbox", "0-inbox": "0-Inbox",
       knowledge: "_knowledge", neuroworks: "_neuroworks",
       jobs: "_neuroworks/jobs", archive: "_archive",

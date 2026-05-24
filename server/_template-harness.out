@@ -1,0 +1,139 @@
+# Template + Original-Purpose Harness :: full :: 2026-05-21T06:38:36.960Z
+Server: http://127.0.0.1:7471
+Model: qwen2.5:3b
+OpenRouter: enabled (openai/gpt-oss-20b:free)
+
+## Phase 1 — Routing (intent → templateId)
+
+  summarize-repo     ✓ (3.9s) → summarize-repo
+  run-digest         ✓ (3.4s) → run-digest
+  publish-folder     ✓ (4.7s) → publish-folder
+  search-brain       ✓ (3.0s) → search-brain
+  add-note           ✓ (4.8s) → add-note
+  browse-vault       ✓ (2.4s) → browse-vault
+  general-task       ✗ (2.0s) → search-brain
+  sync-downloads     ✓ (2.9s) → sync-downloads
+
+## Phase 2 — Execution (live for safe; approval-gate for destructive)
+
+  ▶ browse-vault…
+     0.0s :: A  → A
+  ▶ search-brain…
+     0.1s :: A  → A
+  ▶ add-note…
+     6.1s :: A  → A
+  ▶ summarize-repo…
+     172.0s :: A (time -1) → A-
+  ▶ sync-downloads…
+     4.2s :: A  → A
+  ▶ general-task…
+     30.2s :: B+  → B+
+  ▶ publish-folder (approval gate)…
+     ✓ 0.0s — gated as awaiting-approval, rejected: rejected
+
+## Phase 3 — Original purpose (multi-step plan + execute + vault capture)
+
+  ▶ plan-vault-chain…
+     0.2s :: C  → C · steps: —
+  ▶ plan-github-fetch…
+     93.4s :: B+  → B+ · steps: research.deep → quality.check → security.scan → peer.review
+  ▶ plan-research-capture…
+     78.3s :: B+  → B+ · steps: research.deep → quality.check → security.scan → peer.review
+
+## Routing scorecard
+
+| template | input | expected | detected | source | pass |
+|---|---|---|---|---|---|
+| summarize-repo | summarize the clawbot project | summarize-repo | summarize-repo | ollama | ✓ |
+| run-digest | run the daily digest | run-digest | run-digest | ollama | ✓ |
+| publish-folder | publish D:\test as a private repo | publish-folder | publish-folder | keyword | ✓ |
+| search-brain | search my vault for typescript | search-brain | search-brain | ollama | ✓ |
+| add-note | add a note titled harness test - body content here | add-note | add-note | ollama | ✓ |
+| browse-vault | browse my vault | browse-vault | browse-vault | ollama | ✓ |
+| general-task | compare the merits of HTTP/2 vs HTTP/3 | (any) | search-brain | keyword | ✗ |
+| sync-downloads | sync my downloads | sync-downloads | sync-downloads | ollama | ✓ |
+
+## Execution scorecard
+
+| template | target | elapsed | content | time | FINAL |
+|---|---|---|---|---|---|
+| browse-vault | 5s | 0s | A | 0 | **A** |
+| search-brain | 10s | 0.1s | A | 0 | **A** |
+| add-note | 20s | 6.1s | A | 0 | **A** |
+| summarize-repo (clawbot) | 90s | 172s | A | -1 | **A-** |
+| sync-downloads | 120s | 4.2s | A | 0 | **A** |
+| general-task (ad-hoc) | 90s | 30.2s | B+ | 0 | **B+** |
+| publish-folder (approval-gate) | 5s | 0s | A | 0 | **A** |
+
+## Original-purpose scorecard
+
+| probe | target | elapsed | content | time | FINAL | steps |
+|---|---|---|---|---|---|---|
+| plan-vault-chain | 180s | 0.2s | C | 0 | **C** | — |
+| plan-github-fetch | 180s | 93.4s | B+ | 0 | **B+** | research.deep → quality.check → security.scan → peer.review |
+| plan-research-capture | 240s | 78.3s | B+ | 0 | **B+** | research.deep → quality.check → security.scan → peer.review |
+
+## Summary
+
+16 strictly above B · 0 at B · 2 below B / total 18
+
+## Outputs
+
+
+### browse-vault — A
+```
+{"redirect":"/knowledge"}
+```
+
+### search-brain — A
+```
+Found **50** notes mentioning **clawbot**:
+
+1. **0-Inbox/2026-04-27-aiia-pc-inventory.md** (line 117) — - [ ] Get AIIA repos (if any) under `RUBIEM-DEVELOPERS-REPO` org so the cloud clawbot includes them in daily digests.
+2. **0-Inbox/2026-05-18-clawbot-update.md** (line 2) — title: "Clawbot update — skill library, smarter picker, customer-friendly run log"
+3. **0-Inbox/2026-05-19-1773731595-eoi-training-ai-260316-110157-1.md** (line 16) — - Imported by: clawbot `fs.import_to_vault`
+4. **0-Inbox
+```
+
+### add-note — A
+```
+{"path":"0-Inbox/202605210639-harness-test-1779345516959.md","committed":true,"pushed":false,"error":"push rejected; auto-rebase disabled (set CLAWBOT_AUTO_REBASE_RECOVERY=1 to enable). Original error: To https://github.com/RUBIEM-DEVELOPERS-REPO/main-brain.git\n!\tHEAD:refs/heads/main\t[rejected] (fetch first)\nDone\nPushing to https://github.com/RUBIEM-DEVELOPERS-REPO/main-brain.git\nerror: fail
+```
+
+### summarize-repo (clawbot) — A-
+```
+{"path":"_clawbot/summaries/RUBIEM-DEVELOPERS-REPO-clawbot.md","committed":true,"pushed":false,"error":"push rejected; auto-rebase disabled (set CLAWBOT_AUTO_REBASE_RECOVERY=1 to enable). Original error: To https://github.com/RUBIEM-DEVELOPERS-REPO/main-brain.git\n!\tHEAD:refs/heads/main\t[rejected] (fetch first)\nDone\nPushing to https://github.com/RUBIEM-DEVELOPERS-REPO/main-brain.git\nerror: failed to pu"}
+```
+
+### sync-downloads — A
+```
+{"source":"C:\\Users\\Arthur Magaya\\Downloads","totalFiles":1312,"byCategory":{"Video":[{"name":"AI Dreamer to Creator_ Free App Dev & Automation Secrets.mp4","relPath":"files/Video/AI Dreamer to Creator_ Free App Dev & Automation Secrets.mp4","size":100677827,"mtimeMs":1772518820589.6187},{"name":"Mentorship Unlocks Potential_ See Our Student's Success!.mp4","relPath":"files/Video/Mentorship Unlocks Potential_ See Our Student's Success!.mp4","size":47921526,"mtimeMs":1772518780493.2148},{"name
+```
+
+### general-task (ad-hoc) — B+
+```
+I’m sorry, but none of the provided sources contain information about the technical differences between TCP (Transmission Control Protocol) and UDP (User Datagram Protocol). Without relevant evidence, I can’t give a supported answer to that question.
+```
+
+### publish-folder (approval-gate) — A
+```
+gated as awaiting-approval, rejected: rejected
+```
+
+### plan-vault-chain — C
+steps: —
+```
+No notes in your vault match **typescript and tell me what the top 3 notes say about it**. Try a broader term, check the spelling, or add a note on this topic and search again.
+```
+
+### plan-github-fetch — B+
+steps: research.deep → quality.check → security.scan → peer.review
+```
+I pulled the README from the Clawbot repository on GitHub. It describes Clawbot as a lightweight, modular framework for building conversational AI agents. The project provides a set of core components—such as intent recognition, dialogue management, and response generation—that can be extended with custom plugins. It includes example agents, a command‑line interface, and documentation on how to integrate with external APIs. The README also lists prerequisites (Python 3.8+, pip), installation ste
+```
+
+### plan-research-capture — B+
+steps: research.deep → quality.check → security.scan → peer.review
+```
+I’ve reviewed the most recent coverage of the LK‑99 superconductor claim. In early May 2024, several independent laboratories reported that the material, originally reported in 2023, does not exhibit room‑temperature superconductivity under ambient pressure, contradicting the initial claims. Subsequent peer‑reviewed studies have found that the observed zero‑resistance signals were likely due to experimental artifacts. The consensus in the scientific community is that LK‑99 is not a superconducto
+```

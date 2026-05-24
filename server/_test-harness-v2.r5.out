@@ -1,0 +1,137 @@
+# Test harness v2 run :: v2-r5 :: 2026-05-20T17:48:19.382Z
+Server:        http://127.0.0.1:7471
+Model:         qwen2.5:3b
+OpenRouter:    enabled (openai/gpt-oss-20b:free)
+
+> date (what's the date today...)
+  0.2s :: A  -> A
+> bigmath (what is 137 * 24...)
+  0s :: A  -> A
+> rag (explain RAG retrieval augmented generation...)
+  38.4s :: A  -> A
+> who-dario (who is dario amodei...)
+  56.2s :: A  -> A
+> vault-list5 (list 5 notes from my vault inbox folder...)
+  43.6s :: A  -> A
+> vault-ts (search my vault for notes mentioning typescript...)
+  0.3s :: B+  -> B+
+> rag-best (research how RAG systems handle citation grounding...)
+  146.4s :: A-  -> A-
+> llm-compare (compare local LLM inference with cloud APIs and gi...)
+  123.5s :: A  -> A
+| id | tier | target | elapsed | content | time | FINAL |
+|---|---|---|---|---|---|---|
+| date | trivial | 5s | 0.2s | A | 0 | **A** |
+| bigmath | trivial | 5s | 0s | A | 0 | **A** |
+| rag | research-light | 60s | 38.4s | A | 0 | **A** |
+| who-dario | research-light | 60s | 56.2s | A | 0 | **A** |
+| vault-list5 | multi-step | 120s | 43.6s | A | 0 | **A** |
+| vault-ts | multi-step | 90s | 0.3s | B+ | 0 | **B+** |
+| rag-best | heavy | 200s | 146.4s | A- | 0 | **A-** |
+| llm-compare | heavy | 200s | 123.5s | A | 0 | **A** |
+
+Summary: 8 strictly above B - 0 at B - 0 below B / total 8
+
+## Outputs
+
+### date - what's the date today
+grade: **A** (content A, time penalty 0) - 0.2s vs 5s target
+
+```
+Today is Wednesday, May 20, 2026.
+```
+
+### bigmath - what is 137 * 24
+grade: **A** (content A, time penalty 0) - 0s vs 5s target
+
+```
+137 * 24 = 3288
+```
+
+### rag - explain RAG retrieval augmented generation
+grade: **A** (content A, time penalty 0) - 38.4s vs 60s target
+plan: 1 step(s) - research.deep=ok/36279ms
+
+```
+**Retrieval‑augmented generation (RAG)** is a two‑step architecture that lets a large language model (LLM) “look up” external information before it writes a response.
+
+| Stage | What happens | Key pieces |
+|-------|--------------|------------|
+| **1. Retrieval** | The user query is encoded into a vector and compared to vectors of pre‑processed document chunks that live in a *vector database* (or other index). The most similar chunks are returned. | • Embedding model (creates semantic vectors)  <br>• Vector store / index  <br>• Retriever (similarity search) |
+| **2. Generation** | The retrieved text is concatenated with the original query (prompt‑augmentation) and fed to the LLM, which genera
+```
+
+### who-dario - who is dario amodei
+grade: **A** (content A, time penalty 0) - 56.2s vs 60s target
+plan: 1 step(s) - research.deep=ok/35077ms
+
+```
+**Dario Amodei – Brief Profile**
+
+- **Born:** 1983, San Francisco, California, USA.  
+- **Education:** B.S. in physics (Stanford); Ph.D. in biophysics (Princeton) – thesis on network‑scale electrophysiology; post‑doctoral scholar at Stanford School of Medicine【1†L13-L15】.  
+- **Early career:** Worked at Baidu (Nov 2014‑Oct 2015) and Google before joining OpenAI in 2016【1†L30-L33】.  
+
+### OpenAI (2016‑2021)  
+- Joined as a researcher, later became **Vice President of Research**.  
+- Oversaw development of large‑language models such as **GPT‑2** and **GPT‑3** and co‑invented *reinforcement learning from human feedback*【2†L9-L12】.  
+
+### Anthropic (2021‑present)  
+- Co‑founded Anthropic with hi
+```
+
+### vault-list5 - list 5 notes from my vault inbox folder
+grade: **A** (content A, time penalty 0) - 43.6s vs 120s target
+skill: list-making (score 29)
+plan: 3 step(s) - vault.list=ok/3ms, quality.check=ok/13702ms, security.scan=ok/1ms
+
+```
+1. 1773731595_eoi_training_ai_260316_110157 (1).pdf – PDF containing EOI training materials for AI project.  
+2. 2026-04-27-aiia-pc-inventory.md – Markdown file listing PC inventory for AIIA.  
+3. 2026-05-18-clawbot-update.md – Update log for Clawbot system enhancements.  
+4. 2026-05-19-1773731595-eoi-training-ai-260316-110157-1.md – Markdown version of the EOI training document.  
+5. 2026-05-19-202605171116-research-check-in-my-downloads-for-aiia-referen.md – Research check‑in note for AIIA reference downloads.
+```
+
+### vault-ts - search my vault for notes mentioning typescript
+grade: **B+** (content B+, time penalty 0) - 0.3s vs 90s target
+
+```
+Found **7** notes mentioning **typescript**:
+
+1. **decisions.md** (line 23) — **Decision:** The cloud-side `clawbot` is built as a small standalone TypeScript repo that runs in GitHub Actions, not as an openclaw plugin. Openclaw stays in 
+2. **_knowledge/downloads/files/Documents/dpa_system_testing_strategy_for_claude.md** (line 502) — If using **Node.js / TypeScript**:
+3. **_neuroworks/jobs/2026-05-20-search-the-knowledge-base-09a9293a.md** (line 26) — "query": "typescript"
+4. **_neuroworks/jobs/2026-05-20-search-the-knowledge-base-4f62cf7b.md** (line 26) — "query": "typescript"
+5. **_neuroworks/jobs/2026-05-20-search-the-knowledge-base-50e56c6e.md** (line 26) — "query": "typescript"
+6. **_
+```
+
+### rag-best - research how RAG systems handle citation grounding and give me 3 best practices
+grade: **A-** (content A-, time penalty 0) - 146.4s vs 200s target
+plan: 4 step(s) - research.deep=ok/34041ms, quality.check=ok/25913ms, security.scan=ok/0ms, peer.review=ok/33201ms
+
+```
+1. Retrieve documents with stable identifiers and embed those identifiers directly in the generated response so each claim can be traced to its source [0].  
+2. Apply a post‑generation verification step that matches each sentence against the retrieved passages, suppressing or flagging any content that lacks a supporting citation [0].  
+3. Prompt the model to explicitly request citations for each factual statement and to format them consistently (e.g., footnotes or inline brackets) to ensure clear grounding [0].
+
+*From general knowledge — the search step didn't return material on this; cross‑check with an up‑to‑date source if recency matters.*
+```
+
+### llm-compare - compare local LLM inference with cloud APIs and give me 3 trade-offs each way
+grade: **A** (content A, time penalty 0) - 123.5s vs 200s target
+plan: 4 step(s) - research.multiperspective=ok/27089ms, quality.check=ok/17325ms, security.scan=ok/0ms, peer.review=ok/20915ms
+
+```
+**For local inference**
+
+1. **Up‑front hardware cost** – Purchasing GPUs or specialized accelerators requires significant capital expenditure before any model can be run.  
+2. **Data privacy control** – All input and output remain on‑premises, eliminating the risk of transmitting sensitive information to external services.  
+3. **Latency consistency** – Inference latency is predictable and typically lower for small‑to‑medium models because no network round‑trip is involved.
+
+**For cloud APIs**
+
+1. **Pay‑as‑you-go pricing** – No hardware investment is needed; costs scale with usage, which is advantageous for intermittent workloads.  
+2. **Scalability and model access** – Cloud providers offer
+```
