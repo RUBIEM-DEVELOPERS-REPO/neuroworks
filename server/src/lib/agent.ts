@@ -124,7 +124,18 @@ export type AgentResult = {
 // audit (so the planner prompt can name it back), or null when no signal.
 const RESEARCH_SIGNAL_PATTERNS: RegExp[] = [
   // Look-up verbs anywhere in the body
-  /\b(?:look\s+(?:it\s+|them\s+|this\s+)?up|research\s+(?:it|them|this|how|what|who|the|on|whether|if)|find\s+(?:out|me\s+)\s*(?:what|how|who|whether|if)|investigate|dig\s+into|look\s+into)\b/i,
+  /\b(?:look\s+(?:it\s+|them\s+|this\s+)?up|find\s+(?:out|me\s+)\s*(?:what|how|who|whether|if)|investigate|dig\s+into|look\s+into)\b/i,
+  // "Research X" — broadened. Previously required research + (it|them|this|
+  // how|...) which missed the most common research framing "Research Notion's
+  // launches" / "Research Stripe pricing" / "Research the current state of X".
+  // Now matches research followed by ANY word (capitalised entity, article,
+  // determiner, pronoun) — anything except a sentence boundary.
+  /\bresearch\s+(?:[\w']+|the\s+|a\s+|an\s+)/i,
+  // "Scan X" / "map the landscape for X" — landscape-scan trigger
+  /\b(?:scan\s+(?:the\s+|a\s+)?(?:current\s+)?(?:landscape|market|category|space|players|competitive\s+set)|map\s+(?:the\s+|out\s+the\s+)?(?:market|landscape|competitive\s+set|category))\b/i,
+  // Triangulate / verify / fact-check — these all imply gathering multiple
+  // sources before answering
+  /\b(?:triangulat(?:e|ing|ed)|verify\s+(?:the\s+|this\s+|a\s+)?claim|fact[- ]?check\s+(?:the\s+|this\s+|a\s+)?claim|cross[- ](?:check|verify|reference)\s+(?:the\s+|this\s+|a\s+)?claim)\b/i,
   // "Look up <noun> (on the web|online)" — most common research framing
   /\blook\s+up\s+(?:the\s+|a\s+|an\s+|some\s+)?\w+/i,
   // Recency markers — claims that depend on fresh facts
