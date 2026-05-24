@@ -1815,14 +1815,25 @@ async function synthesize(
   // signature output format. Without this carve-out, the rs1 harness saw
   // raw research notes returned instead of MEDDIC / brief / verdict shapes,
   // and the graders dinged the shape even though the citations were there.
+  //
+  // CAPTURE the raw research answer here so it can serve as a fallback if
+  // the synth path below returns empty/very short output. Without this
+  // safety net, the emp1 harness saw 4/8 probes return 0 chars because
+  // synth had OpenRouter timeouts and we threw the perfectly-good research
+  // result away.
   const taskIsLongForm = task.length >= 200;
   const hasPersona = !!personaSystemSuffix && personaSystemSuffix.trim().length > 50;
   const skipPassthroughForPersona = hasPersona && taskIsLongForm;
-  if (!skipPassthroughForPersona && (succeeded.length === 1 || (succeeded.length > 0 && hasOnlyOneSemanticStep(succeeded)))) {
+  let rawPrimitiveAnswer: string | null = null;
+  if ((succeeded.length === 1 || (succeeded.length > 0 && hasOnlyOneSemanticStep(succeeded)))) {
     const candidate = succeeded[0]?.result;
     if (candidate && typeof candidate === "object" && typeof candidate.answer === "string" && candidate.answer.trim().length >= 60) {
-      onPartial?.(candidate.answer.trim());
-      return { answer: candidate.answer.trim() };
+      if (!skipPassthroughForPersona) {
+        onPartial?.(candidate.answer.trim());
+        return { answer: candidate.answer.trim() };
+      }
+      // Stash the raw answer for the synth-fallback check below.
+      rawPrimitiveAnswer = candidate.answer.trim();
     }
   }
 
@@ -1955,7 +1966,16 @@ async function synthesize(
       const text = meta.text.trim();
       if (text.length < MIN_USEFUL_SYNTH) {
         // Model produced nothing useful — that's a content failure, not
-        // a transport one. No point retrying; fall through to fallback.
+        // a transport one. No point retrying. PREFER the raw primitive
+        // answer when we captured one (skipped passthrough for persona
+        // reshaping but synth then failed) — that's still real evidence-
+        // grounded content, and a research note beats a templated rescue
+        // copy any day.
+        if (rawPrimitiveAnswer) {
+          if (opts.push) opts.push(`Synth produced empty output — falling back to the raw research result.`);
+          onPartial?.(rawPrimitiveAnswer);
+          return { answer: rawPrimitiveAnswer, skillUsed: pickedSkill, skillScore: pickedSkillScore };
+        }
         return { answer: fallbackSynthesis(task, p, runs), skillUsed: pickedSkill, skillScore: pickedSkillScore };
       }
       if (attempt > 0 && opts.push) opts.push(`Synth recovered on retry — keeping the rescue draft.`);
@@ -1983,6 +2003,15 @@ async function synthesize(
       }
       break;
     }
+  }
+  // Two attempts failed. Prefer the raw research result over the
+  // synthetic fallback copy — same reasoning as the < MIN_USEFUL_SYNTH
+  // branch above. The fallbackSynthesis is informational ("synth couldn't
+  // run because X"), while the raw research has real cited content.
+  if (rawPrimitiveAnswer) {
+    if (opts.push) opts.push(`Synth retries exhausted — returning the raw research result instead.`);
+    onPartial?.(rawPrimitiveAnswer);
+    return { answer: rawPrimitiveAnswer, skillUsed: pickedSkill, skillScore: pickedSkillScore };
   }
   return { answer: fallbackSynthesis(task, p, runs, String(lastErr?.message ?? lastErr)), skillUsed: pickedSkill, skillScore: pickedSkillScore };
 }

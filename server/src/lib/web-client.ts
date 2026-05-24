@@ -143,9 +143,16 @@ export async function fetchWeb(url: string, opts: FetchOptions = {}): Promise<{ 
   } finally { clearTimeout(t); }
 }
 
-// Search the web. Tries DuckDuckGo lite first (no API key); if it returns
-// nothing or fails, falls back to Bing's HTML results page. The first engine
-// that produces hits wins.
+// Search the web. Multi-tier fallback so a single engine outage / anti-bot
+// block doesn't kill the research path:
+//   1. DuckDuckGo lite (no API key, pure HTML)
+//   2. Bing HTML results page
+//   3. Playwright tier — render DDG in a real browser. Catches the case
+//      where HTTP-only scraping gets blocked by JS challenges, anti-bot,
+//      or rate-limit pages, but a real Chromium gets through. Lazy import
+//      so we don't pay Playwright's load cost on the happy path.
+//   4. Playwright tier — Bing rendered. Final fallback before giving up.
+// The first engine that produces hits wins.
 export type SearchHit = { title: string; url: string; snippet: string };
 
 export async function searchWeb(query: string, limit = 8): Promise<{ engine: string; results: SearchHit[]; tried: string[] }> {
@@ -157,7 +164,71 @@ export async function searchWeb(query: string, limit = 8): Promise<{ engine: str
       if (r.length > 0) return { engine, results: r, tried };
     } catch { /* try next */ }
   }
+  // Both HTTP engines returned nothing. Escalate to Playwright — a real
+  // browser gets past anti-bot challenges that block our HTML scraper.
+  for (const engine of ["ddg-browser", "bing-browser"] as const) {
+    tried.push(engine);
+    try {
+      const r = await browserSearch(engine, query, limit);
+      if (r.length > 0) return { engine, results: r, tried };
+    } catch { /* try next */ }
+  }
   return { engine: "none", results: [], tried };
+}
+
+// Playwright-backed search. Renders the search engine's results page in a
+// real headless Chromium and extracts result links. Used as the LAST resort
+// when both HTTP-tier engines failed.
+//
+// We share browser.ts's singleton browser to avoid the 1-3s launch cost on
+// every retry. Lazy import keeps the playwright dependency out of the boot
+// path for users who never hit this fallback.
+async function browserSearch(engine: "ddg-browser" | "bing-browser", query: string, limit: number): Promise<SearchHit[]> {
+  const { scrape } = await import("./browser.js");
+  const url = engine === "ddg-browser"
+    ? `https://duckduckgo.com/?q=${encodeURIComponent(query)}&ia=web`
+    : `https://www.bing.com/search?q=${encodeURIComponent(query)}&count=${limit}`;
+  // 18s budget — DDG's full-fat results page can take 6-10s under load.
+  const r = await scrape({ url, timeoutMs: 18_000 });
+  if (engine === "ddg-browser") return parseDdgRendered(r.text, r.html ?? "", limit);
+  return parseBingRendered(r.text, r.html ?? "", limit);
+}
+
+// Parse DDG full-fat results page. The rendered DOM is different from
+// /lite/ — actual <article> elements with [data-testid="result"] children.
+// We work from the raw page text (extracted by browser.ts's innerText)
+// instead of HTML since the DOM is heavily reactive and selectors drift.
+// Heuristic: alternating "title line" / "url line" / "snippet" triples.
+function parseDdgRendered(text: string, _html: string, limit: number): SearchHit[] {
+  const out: SearchHit[] = [];
+  // DDG result rows look like:
+  //   <Title>\n<bare url or display path>\n<snippet>\n
+  // We split on blank lines and walk groups that start with a URL-ish second
+  // line. Tolerant — drops malformed groups silently.
+  const lines = text.split(/\n+/).map(l => l.trim()).filter(Boolean);
+  for (let i = 0; i + 1 < lines.length && out.length < limit; i++) {
+    const title = lines[i];
+    const maybeUrl = lines[i + 1];
+    const m = maybeUrl.match(/^(https?:\/\/[^\s]+)/i);
+    if (m && title.length >= 8 && title.length <= 200 && !/^(http|https)/i.test(title)) {
+      const snippet = lines[i + 2] && !/^https?:/i.test(lines[i + 2]) ? lines[i + 2].slice(0, 300) : "";
+      out.push({ title, url: m[1], snippet });
+      i += 2;
+    }
+  }
+  return out;
+}
+
+// Parse Bing rendered results. The DOM is essentially the same as the HTTP
+// fallback so we reuse parseBing on the captured HTML when available; when
+// it isn't (browser.ts returned only text), fall back to a heuristic walk
+// similar to parseDdgRendered.
+function parseBingRendered(text: string, html: string, limit: number): SearchHit[] {
+  if (html && /b_algo/i.test(html)) {
+    const hits = parseBing(html);
+    if (hits.length > 0) return hits.slice(0, limit);
+  }
+  return parseDdgRendered(text, html, limit);
 }
 
 async function ddgSearch(query: string, limit: number): Promise<SearchHit[]> {
