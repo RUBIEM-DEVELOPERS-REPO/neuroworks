@@ -22,7 +22,12 @@ export type Job = {
 };
 
 const jobs = new Map<string, Job>();
-const RECENT = 50;
+// Bumped from 50 → 200 because team-dispatch can fire 12 parallel jobs that
+// each spawn sub-jobs (peer.delegate, peer.review), and at 50 the eviction
+// would kick out still-running team-task jobs before the harness could poll
+// them ("job not found" 404s). 200 fits a full day of typical use; the
+// reflection eats the long-term audit needs.
+const RECENT = 200;
 
 // Per-job event stream for SSE consumers. Emits:
 //   "log"   — a new line was appended to j.log (payload: line string)
@@ -66,8 +71,17 @@ export function newJob(kind: string): Job {
   const j: Job = { id: randomUUID(), kind, status: "pending", startedAt: new Date().toISOString(), log: [] };
   jobs.set(j.id, j);
   if (jobs.size > RECENT) {
-    const oldest = [...jobs.values()].sort((a, b) => a.startedAt.localeCompare(b.startedAt))[0];
-    if (oldest) jobs.delete(oldest.id);
+    // ONLY evict TERMINAL jobs — never kick out a job that's still pending or
+    // running, even if it's the oldest. A team dispatch can leave a job in
+    // `running` for 2-3 minutes; older but still-in-flight jobs MUST stay
+    // pollable by the caller. Without this guard, polling returns 404 on a
+    // perfectly-good running job and the caller treats it as failed.
+    const sorted = [...jobs.values()].sort((a, b) => a.startedAt.localeCompare(b.startedAt));
+    const oldestTerminal = sorted.find(x => x.status === "succeeded" || x.status === "failed" || x.status === "rejected");
+    if (oldestTerminal) jobs.delete(oldestTerminal.id);
+    // If everything in the table is in-flight, we let the table grow past
+    // RECENT temporarily — it'll trim itself as jobs finish. Better than
+    // dropping live work.
   }
   return j;
 }

@@ -385,6 +385,77 @@ export function stopVaultWatcher(): void {
   if (vaultWatcher) { try { vaultWatcher.close(); } catch { /* tolerate */ } vaultWatcher = null; }
 }
 
+// Periodic pull --rebase so Obsidian edits made on ANOTHER machine (or via
+// Obsidian's git plugin pushing to the same remote) sync into the local
+// vault that clawbot reads from. Without this, clawbot only sees changes
+// that landed locally — a remote Obsidian save needs a manual git pull
+// before clawbot can search / read it.
+//
+// Defaults: every CLAWBOT_VAULT_PULL_MIN minutes (default 5). Skipped when:
+//   • CLAWBOT_VAULT_PULL=0 (opt-out)
+//   • Local has uncommitted changes (a pull would conflict with in-flight work)
+//   • A push is currently in flight (avoid racing simpleGit calls)
+//   • Vault path doesn't exist (drive unmounted)
+//
+// The pull itself is time-boxed at 10s — a stalled remote shouldn't block
+// the scheduler from running again.
+let vaultPullTimer: NodeJS.Timeout | null = null;
+let lastPullAt = 0;
+let lastPullResult: { ok: boolean; at: string; details?: string } = { ok: false, at: "never" };
+const PULL_TIMEOUT_MS = 10_000;
+
+export async function pullFromOrigin(): Promise<{ ok: boolean; reason?: string; pulled?: boolean }> {
+  if (!existsSync(VAULT)) {
+    return { ok: false, reason: `vault path ${VAULT} not present (drive unmounted?)` };
+  }
+  const git = simpleGit(VAULT);
+  try {
+    const status = await git.status();
+    if (status.modified.length + status.created.length + status.deleted.length + status.staged.length + status.renamed.length > 0) {
+      return { ok: false, reason: "local has uncommitted changes; pull skipped to avoid conflicts" };
+    }
+    await raceTimeout(git.fetch("origin"), PULL_TIMEOUT_MS, "fetch timeout");
+    const before = (await git.revparse(["HEAD"])).trim();
+    await raceTimeout(git.pull("origin", "HEAD", { "--rebase": "true" }), PULL_TIMEOUT_MS, "pull timeout");
+    const after = (await git.revparse(["HEAD"])).trim();
+    const pulled = before !== after;
+    lastPullAt = Date.now();
+    lastPullResult = { ok: true, at: new Date().toISOString(), details: pulled ? `pulled ${before.slice(0, 7)} → ${after.slice(0, 7)}` : "already up-to-date" };
+    if (pulled) invalidateSearchCache();
+    return { ok: true, pulled };
+  } catch (e: any) {
+    const msg = String(e?.message ?? e);
+    lastPullAt = Date.now();
+    lastPullResult = { ok: false, at: new Date().toISOString(), details: msg.slice(0, 200) };
+    return { ok: false, reason: msg };
+  }
+}
+
+export function startVaultPullScheduler(): void {
+  if (vaultPullTimer) return;
+  if (process.env.CLAWBOT_VAULT_PULL === "0") {
+    console.log("[vault] periodic pull disabled via CLAWBOT_VAULT_PULL=0");
+    return;
+  }
+  const minutes = Math.max(1, Number(process.env.CLAWBOT_VAULT_PULL_MIN ?? "5"));
+  const ms = minutes * 60_000;
+  vaultPullTimer = setInterval(() => {
+    void pullFromOrigin().catch((e: any) => console.warn(`[vault] pull error: ${e?.message ?? e}`));
+  }, ms);
+  vaultPullTimer.unref?.();
+  // Fire one immediately so a fresh-start server catches up before doing work.
+  void pullFromOrigin().catch(() => { /* logged inside */ });
+  console.log(`[vault] periodic pull armed (every ${minutes}m, opt out with CLAWBOT_VAULT_PULL=0)`);
+}
+
+export function stopVaultPullScheduler(): void {
+  if (vaultPullTimer) { clearInterval(vaultPullTimer); vaultPullTimer = null; }
+}
+
+export function getVaultPullStatus(): { lastPullAt: number; lastPullResult: typeof lastPullResult } {
+  return { lastPullAt, lastPullResult };
+}
+
 // Filename-only vault scan. Walks the vault tree but ONLY checks the .md
 // filename for the query — never opens the file. Fast (~50-200ms on a multi-
 // thousand-note vault) vs ~10-15s for full-content searchVault().

@@ -12,7 +12,7 @@ import { localInflightCount } from "./lib/peers.js";
 import { modelsRouter } from "./routes/models.js";
 import { ollamaGenerate } from "./lib/ollama.js";
 import { shutdownCommitQueue } from "./lib/commit-queue.js";
-import { startVaultWatcher, stopVaultWatcher } from "./lib/vault.js";
+import { startVaultWatcher, stopVaultWatcher, startVaultPullScheduler, stopVaultPullScheduler } from "./lib/vault.js";
 import { autodiscoverLocalPeers } from "./lib/peer-registry.js";
 import { ensureWorker, shutdownManagedWorker } from "./lib/worker-manager.js";
 import { loadPersonas } from "./lib/personas.js";
@@ -187,6 +187,11 @@ app.listen(config.port, "127.0.0.1", () => {
   // watcher misbehaves. Fall-back behaviour is the 60s search cache TTL.
   startVaultWatcher();
 
+  // Periodic git pull from origin so Obsidian edits made on another machine
+  // (or via Obsidian's git plugin) sync into the local vault that clawbot
+  // reads. Default every 5m; opt out with CLAWBOT_VAULT_PULL=0.
+  startVaultPullScheduler();
+
   // Nightly self-reflection. Only the primary runs the scheduler — secondary
   // clawbots are workers and the reflection covers the whole fleet from the
   // primary's job list anyway. Disable with CLAWBOT_REFLECTION=0.
@@ -214,6 +219,8 @@ async function gracefulExit(signal: string) {
   catch { /* never block shutdown on a scheduler stop */ }
   try { stopVaultWatcher(); }
   catch { /* never block shutdown on a watcher close */ }
+  try { stopVaultPullScheduler(); }
+  catch { /* never block shutdown on a scheduler stop */ }
   process.exit(0);
 }
 process.on("SIGTERM", () => void gracefulExit("SIGTERM"));

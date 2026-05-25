@@ -5,7 +5,7 @@ import { config } from "../config.js";
 import { llmHealth } from "../lib/llm.js";
 import { latestRun } from "../lib/github.js";
 import { vaultCommitStats } from "../lib/commit-queue.js";
-import { pushOnly, clearStaleVaultLock } from "../lib/vault.js";
+import { pushOnly, clearStaleVaultLock, pullFromOrigin, getVaultPullStatus } from "../lib/vault.js";
 import { localInflightCount } from "../lib/peers.js";
 import { jobStoreStats } from "../lib/job-store.js";
 
@@ -27,7 +27,20 @@ statusRouter.get("/llm", async (_req, res) => {
 // last commit landed, how many writes are queued, and how many enqueue calls
 // coalesced into single commits (i.e. the speedup from the queue).
 statusRouter.get("/vault", (_req, res) => {
-  res.json(vaultCommitStats());
+  res.json({ ...vaultCommitStats(), pull: getVaultPullStatus() });
+});
+
+// Manual pull from origin — picks up Obsidian edits made on another machine
+// (or via Obsidian's git plugin) without waiting for the next scheduler tick.
+// Skipped automatically if there are local uncommitted changes; the response
+// carries `reason` in that case so the UI can show why.
+statusRouter.post("/vault/pull", async (_req, res) => {
+  try {
+    const r = await pullFromOrigin();
+    res.json(r);
+  } catch (e: any) {
+    res.status(500).json({ error: e?.message ?? String(e) });
+  }
 });
 
 // Retry the push manually. Useful when the last commit landed locally but
