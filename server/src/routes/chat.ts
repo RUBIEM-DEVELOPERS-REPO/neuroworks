@@ -76,6 +76,23 @@ async function handleChat(req: any, res: any) {
   if (last.role !== "user" || !last.content?.trim()) return res.status(400).json({ error: "last message must be a non-empty user turn" });
   const text = last.content.trim();
 
+  // Continuation support. When clawbot previously responded with
+  // needsContext: true, the client preserves the original task text +
+  // optional original job id and sends them back with the next message.
+  // We don't stitch into `text` (early routing layers still see the bare
+  // reply) — instead we set `continuationContext` which the general-task
+  // path picks up when building the enriched task for the planner. The
+  // clarification gates are short-circuited when a continuation is in
+  // play because the user has, by definition, already responded to one.
+  const continuation = (req.body?.continuesTaskRef && typeof req.body.continuesTaskRef === "object")
+    ? {
+        originalText: String(req.body.continuesTaskRef.originalText ?? "").trim(),
+        originalJobId: typeof req.body.continuesTaskRef.originalJobId === "string" ? req.body.continuesTaskRef.originalJobId : undefined,
+        summary: typeof req.body.continuesTaskRef.summary === "string" ? req.body.continuesTaskRef.summary : undefined,
+      }
+    : null;
+  const isContinuation = !!(continuation && continuation.originalText);
+
   // Pre-compute the conversation slice the planner will see. We default to
   // INCLUDING recent context (last 2 user turns + last assistant turn) unless
   // the current message clearly opens a new topic (greeting, "new task:",
@@ -159,11 +176,21 @@ async function handleChat(req: any, res: any) {
           text: `On it — running **${tpl.title}**${friendlyInputs(tpl.id, inputs)}. I'll surface the result on the Tasks page when it's done.`,
         });
       }
-      // Missing required inputs — ask back conversationally
+      // Missing required inputs — ask back conversationally.
+      // Tag with needsContext so the UI surfaces a "Continue this task"
+      // button; the user's reply gets stitched into the original task and
+      // re-dispatched as a continuation.
       const ask = missing.map(m => `**${m.label}**`).join(", ");
       return res.json({
         kind: "message",
         text: `I can run **${tpl.title}**, but I need: ${ask}. Reply with the value(s), or use the Templates page to fill the form.`,
+        needsContext: true,
+        clarification: {
+          originalText: text,
+          templateId: tpl.id,
+          missing: missing.map(m => ({ name: m.name, label: m.label })),
+          summary: `${tpl.title} — missing ${missing.map(m => m.label).join(", ")}`,
+        },
       });
     }
   }
@@ -184,18 +211,34 @@ async function handleChat(req: any, res: any) {
   //      Combined with the existing detectAmbiguity for residual shape
   //      catches (bare pronouns, bare confirmations).
   const intentDetection = extractIntent(text, useThreadContext);
-  if (!useThreadContext && intentDetection.followUp) {
+  // Skip the clarification gates entirely when the user is responding to
+  // a prior "needs context" prompt — they have, by definition, already
+  // satisfied a slot we asked about, so re-asking would loop.
+  if (!useThreadContext && !isContinuation && intentDetection.followUp) {
     return res.json({
       kind: "message",
       text: intentDetection.followUp,
+      needsContext: true,
+      clarification: {
+        originalText: text,
+        intent: intentDetection.intent,
+        followUpKind: (intentDetection as any).followUpKind ?? "slot",
+        summary: `${intentDetection.intent ?? "request"} — need: ${intentDetection.followUp.replace(/[?!.]+$/, "").slice(0, 80)}`,
+      },
     });
   }
-  if (!useThreadContext) {
+  if (!useThreadContext && !isContinuation) {
     const clarification = detectAmbiguity(text);
     if (clarification.ambiguous) {
       return res.json({
         kind: "message",
         text: clarification.question,
+        needsContext: true,
+        clarification: {
+          originalText: text,
+          ambiguityKind: "shape",
+          summary: clarification.question.slice(0, 80),
+        },
       });
     }
   }
@@ -541,10 +584,28 @@ async function handleChat(req: any, res: any) {
       attachmentMeta = resolved.map(r => ({ filename: r.filename, chars: r.text.length }));
     }
   }
-  const enrichedTask = buildEnrichedTask(text, useThreadContext, recentUserTurns, lastAssistantTurn, persona, intentDetection) + attachmentBlock;
+  // Continuation block — when this turn is the user's reply to a prior
+  // "needs context" prompt, we prepend the original request so the
+  // planner sees both halves as one request. The bare reply alone
+  // ("Sarah, head of Eng") would re-trigger ambiguity; with the
+  // original task stitched in, the planner has everything it needs.
+  let continuationBlock = "";
+  if (isContinuation) {
+    continuationBlock =
+      `**This is a continuation of a prior request.** The previous response paused for missing context; below is the original request and the context the user just provided. Treat them as a single combined task.\n\n` +
+      `--- Original request ---\n${continuation!.originalText}\n\n` +
+      `--- Additional context the user just provided ---\n${text}\n\n` +
+      `Proceed with the combined request. Do NOT pause again for the same missing slot.`;
+  }
+  const baseTask = isContinuation
+    ? continuationBlock
+    : buildEnrichedTask(text, useThreadContext, recentUserTurns, lastAssistantTurn, persona, intentDetection);
+  const enrichedTask = baseTask + attachmentBlock;
   const job = newJob(`insights:general-task`);
   job.template = tpl.id;
-  job.title = `Ad-hoc: ${text.slice(0, 60)}`;
+  job.title = isContinuation
+    ? `Continuation: ${(continuation!.summary ?? continuation!.originalText).slice(0, 60)}`
+    : `Ad-hoc: ${text.slice(0, 60)}`;
   // `task` (what the planner consumes) is the enriched version. `userText`
   // (the bare user message) is kept on the job for UI display, retry, and
   // the journal record. The detected intent is stamped on inputs so the
@@ -566,12 +627,21 @@ async function handleChat(req: any, res: any) {
     ...(personaAutoRouted ? { personaAutoRouted: persona?.id ?? null, autoRouteMatches: personaAutoRouted.matched } : {}),
     ...(persona ? { personaId: persona.id } : {}),
     ...(attachmentMeta.length > 0 ? { attachments: attachmentMeta } : {}),
+    ...(isContinuation ? {
+      continuesOriginalText: continuation!.originalText,
+      ...(continuation!.originalJobId ? { continuesJobId: continuation!.originalJobId } : {}),
+      ...(continuation!.summary ? { continuesSummary: continuation!.summary } : {}),
+    } : {}),
   };
   if (personaAutoRouted && persona) {
     job.log.push(`[${new Date().toISOString()}] auto-routed to persona "${persona.id}" (score=${personaAutoRouted.score}, matched=${personaAutoRouted.matched.slice(0, 3).join(", ")})`);
   }
   if (attachmentMeta.length > 0) {
     job.log.push(`[${new Date().toISOString()}] folded ${attachmentMeta.length} attachment${attachmentMeta.length === 1 ? "" : "s"} into task: ${attachmentMeta.map(a => `${a.filename} (${a.chars} chars)`).join(", ")}`);
+  }
+  if (isContinuation) {
+    const prevRef = continuation!.originalJobId ? ` (continues job ${continuation!.originalJobId.slice(0, 8)})` : "";
+    job.log.push(`[${new Date().toISOString()}] continuation${prevRef} · original task: ${continuation!.originalText.slice(0, 120)}`);
   }
   job.requiresApproval = false;
   // Chat blurb framed as labor-on-demand: the customer hires an employee for

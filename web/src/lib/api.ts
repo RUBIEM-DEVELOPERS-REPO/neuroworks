@@ -50,7 +50,35 @@ export const api = {
   runReflection: (windowHours = 24) => req<{ date: string; path: string; stats: any; reflection: string; generatedAt: string; modelUsed?: string }>("/api/reflection/run", { method: "POST", body: JSON.stringify({ windowHours }) }),
   getReflection: (date: string) => req<{ date: string; path: string; body: string }>(`/api/reflection/${encodeURIComponent(date)}`),
   triggerDigest: (lookbackDays = 7) => req<{ jobId: string }>("/api/tasks/digest", { method: "POST", body: JSON.stringify({ lookbackDays: String(lookbackDays) }) }),
-  chat: (messages: { role: "user" | "assistant" | "system"; content: string }[], opts?: { attachments?: { contextId: string }[]; persona?: string }) => req<{ kind: "message" | "task"; text: string; jobId?: string; templateId?: string; requiresApproval?: boolean; brainHits?: { path: string; line: number; preview: string }[]; activePersona?: { id: string; name: string; role: string } | null; personaAutoRouted?: { personaId: string | null; score: number; matched: string[] } | null }>("/api/chat", { method: "POST", body: JSON.stringify({ messages, ...(opts?.attachments ? { attachments: opts.attachments } : {}), ...(opts?.persona ? { persona: opts.persona } : {}) }) }),
+  chat: (messages: { role: "user" | "assistant" | "system"; content: string }[], opts?: {
+    attachments?: { contextId: string }[];
+    persona?: string;
+    continuesTaskRef?: { originalText: string; originalJobId?: string; summary?: string };
+  }) => req<{
+    kind: "message" | "task";
+    text: string;
+    jobId?: string;
+    templateId?: string;
+    requiresApproval?: boolean;
+    brainHits?: { path: string; line: number; preview: string }[];
+    activePersona?: { id: string; name: string; role: string } | null;
+    personaAutoRouted?: { personaId: string | null; score: number; matched: string[] } | null;
+    needsContext?: boolean;
+    clarification?: {
+      originalText: string;
+      summary?: string;
+      missing?: { name: string; label: string }[];
+      templateId?: string;
+      intent?: string;
+      followUpKind?: string;
+      ambiguityKind?: string;
+    };
+  }>("/api/chat", { method: "POST", body: JSON.stringify({
+    messages,
+    ...(opts?.attachments ? { attachments: opts.attachments } : {}),
+    ...(opts?.persona ? { persona: opts.persona } : {}),
+    ...(opts?.continuesTaskRef ? { continuesTaskRef: opts.continuesTaskRef } : {}),
+  }) }),
   team: (tasks: { persona?: string; content: string; attachments?: { contextId: string }[] }[]) => req<{
     kind: "team-task";
     tasksDispatched: number;

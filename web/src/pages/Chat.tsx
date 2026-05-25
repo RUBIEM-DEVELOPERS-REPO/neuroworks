@@ -5,6 +5,16 @@ import { api } from "../lib/api";
 import { BrandMark } from "../components/BrandMark";
 import { ResultPanel } from "../components/ResultPanel";
 
+type Clarification = {
+  originalText: string;
+  summary?: string;
+  missing?: { name: string; label: string }[];
+  templateId?: string;
+  intent?: string;
+  followUpKind?: string;
+  ambiguityKind?: string;
+};
+
 type Msg = {
   role: "user" | "assistant";
   content: string;
@@ -12,6 +22,12 @@ type Msg = {
   templateId?: string;
   requiresApproval?: boolean;
   brainHits?: { path: string; line: number; preview: string }[];
+  // Clawbot paused for missing context — the UI surfaces a "Continue this
+  // task" button on the bubble, and clicking it pins a continuation chip
+  // above the input so the user's next message gets stitched back to the
+  // original task instead of starting a new one.
+  needsContext?: boolean;
+  clarification?: Clarification;
 };
 
 const STORAGE_KEY = "neuroworks.chat";
@@ -73,6 +89,11 @@ export function Chat() {
   // Pending context-attachments — uploaded docs the next send will reference.
   // Each chip is removable; chips clear after a successful send.
   const [pendingAttachments, setPendingAttachments] = useState<{ contextId: string; filename: string; bytes: number; chars: number }[]>([]);
+  // Pending continuation — when the user clicks "Continue this task" on a
+  // bubble where clawbot paused for context, the original task text is pinned
+  // here. The next send carries it as continuesTaskRef so the server stitches
+  // it into the planner's task instead of treating the reply as a new ask.
+  const [pendingContinuation, setPendingContinuation] = useState<{ originalText: string; summary?: string; originalJobId?: string } | null>(null);
   // Upload state separate from chat-busy: upload progress shouldn't block
   // the user from continuing to type their accompanying message.
   const [uploadState, setUploadState] = useState<{ status: "idle" | "uploading" | "error" | "saved"; filename?: string; error?: string; vaultPath?: string }>({ status: "idle" });
@@ -232,14 +253,18 @@ export function Chat() {
       : effectiveTopic;
     const next: Msg[] = [...messages, { role: "user", content: displayText }];
     const attachmentsToSend = pendingAttachments.map(a => ({ contextId: a.contextId }));
-    setMessages(next); setDraft(""); setActiveTemplate(null); setPendingAttachments([]); setErr(""); setBusy(true);
+    const continuationToSend = pendingContinuation;
+    setMessages(next); setDraft(""); setActiveTemplate(null); setPendingAttachments([]); setPendingContinuation(null); setErr(""); setBusy(true);
     try {
       const payload = next.map((m, idx) =>
         idx === next.length - 1 && m.role === "user"
           ? { role: m.role, content: sendText }
           : { role: m.role, content: m.content },
       );
-      const r = await api.chat(payload, attachmentsToSend.length > 0 ? { attachments: attachmentsToSend } : undefined);
+      const opts: Parameters<typeof api.chat>[1] = {};
+      if (attachmentsToSend.length > 0) opts.attachments = attachmentsToSend;
+      if (continuationToSend) opts.continuesTaskRef = continuationToSend;
+      const r = await api.chat(payload, Object.keys(opts).length > 0 ? opts : undefined);
       setMessages(prev => [...prev, {
         role: "assistant",
         content: r.text,
@@ -247,9 +272,41 @@ export function Chat() {
         templateId: r.templateId,
         requiresApproval: r.requiresApproval,
         brainHits: r.brainHits,
+        needsContext: r.needsContext,
+        clarification: r.clarification,
       }]);
+      // If the server is asking for context AGAIN (same task still missing
+      // something), auto-pin the continuation chip so the user's next
+      // message keeps stitching to the same original task. Prefer the
+      // continuation we just sent (preserves the ORIGINAL task across
+      // multiple clarification rounds) over the new clarification's
+      // originalText (which would be the stitched form on round 2+).
+      if (r.needsContext && r.clarification) {
+        setPendingContinuation(continuationToSend ?? {
+          originalText: r.clarification.originalText,
+          summary: r.clarification.summary,
+          originalJobId: r.jobId,
+        });
+      }
     } catch (e: any) { setErr(e.message); }
     finally { setBusy(false); }
+  }
+
+  // Start a continuation manually from a bubble's "Continue this task" button.
+  // Pins the chip; the user's next typed message gets stitched server-side.
+  function startContinuation(clarification: Clarification, originalJobId?: string) {
+    setPendingContinuation({
+      originalText: clarification.originalText,
+      summary: clarification.summary,
+      originalJobId,
+    });
+    // Drop the user straight into the input so they can type the missing piece.
+    setTimeout(() => {
+      try {
+        const ta = document.querySelector<HTMLTextAreaElement>("textarea");
+        ta?.focus();
+      } catch { /* tolerate */ }
+    }, 50);
   }
 
   async function handleFileSelected(e: React.ChangeEvent<HTMLInputElement>) {
@@ -427,7 +484,14 @@ export function Chat() {
         )}
 
         <div className="max-w-3xl mx-auto space-y-5">
-          {messages.map((m, i) => <Bubble key={i} m={m} />)}
+          {messages.map((m, i) => (
+            <Bubble
+              key={i}
+              m={m}
+              onStartContinuation={startContinuation}
+              continuationActive={!!pendingContinuation && pendingContinuation.originalText === m.clarification?.originalText}
+            />
+          ))}
           {busy && (
             <div className="flex gap-3 items-start">
               <BrandMark size={28} />
@@ -454,6 +518,29 @@ export function Chat() {
                 className="ml-auto text-cream-300/60 hover:text-cream-50 text-sm leading-none"
                 title="Clear template"
                 aria-label="Clear template"
+              >
+                ✕
+              </button>
+            </div>
+          )}
+          {pendingContinuation && (
+            <div className="flex items-start gap-2 mb-2 px-3 py-2 bg-flame-500/10 border border-flame-500/30 rounded-lg text-xs">
+              <span aria-hidden className="mt-0.5">↻</span>
+              <div className="min-w-0 flex-1">
+                <div className="text-flame-300 font-medium">Continuing task</div>
+                <div className="text-cream-100 truncate" title={pendingContinuation.originalText}>
+                  {pendingContinuation.summary ?? pendingContinuation.originalText.slice(0, 120)}
+                </div>
+                <div className="text-[10px] text-cream-300/60 mt-0.5">
+                  Your next message will be stitched into the original task so the planner sees both halves.
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setPendingContinuation(null)}
+                className="text-cream-300/60 hover:text-cream-50 text-sm leading-none"
+                title="Cancel continuation — treat next message as a new task"
+                aria-label="Cancel continuation"
               >
                 ✕
               </button>
@@ -527,7 +614,12 @@ export function Chat() {
               onChange={e => setDraft(e.target.value)}
               onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
               rows={1}
-              placeholder={activeTemplate?.placeholder ?? (pendingAttachments.length > 0 ? "Add a note (optional) — Send to ask about the attachment…" : "Message clawbot…")}
+              placeholder={
+                activeTemplate?.placeholder
+                ?? (pendingContinuation ? "Add the missing context (e.g. the file path, the recipient, the topic)…"
+                : pendingAttachments.length > 0 ? "Add a note (optional) — Send to ask about the attachment…"
+                : "Message clawbot…")
+              }
               className="flex-1 bg-ink-900 border border-ink-800 focus:border-violet-500/60 rounded-xl px-4 py-3 text-sm resize-none focus:outline-none placeholder:text-cream-300/40"
               style={{ maxHeight: 200 }}
             />
@@ -551,7 +643,7 @@ function shortHint(desc: string): string {
   return desc.replace(/\.$/, "").slice(0, 40);
 }
 
-function Bubble({ m }: { m: Msg }) {
+function Bubble({ m, onStartContinuation, continuationActive }: { m: Msg; onStartContinuation?: (c: Clarification, jobId?: string) => void; continuationActive?: boolean }) {
   if (m.role === "user") {
     return (
       <div className="flex justify-end">
@@ -566,6 +658,23 @@ function Bubble({ m }: { m: Msg }) {
       <BrandMark size={28} />
       <div className="flex-1 max-w-[80%] space-y-2">
         <div className="bg-ink-900 border border-ink-800 rounded-2xl rounded-tl-sm px-4 py-3 text-sm text-cream-100 prose-vault" dangerouslySetInnerHTML={{ __html: marked.parse(m.content) as string }} />
+        {m.needsContext && m.clarification && (
+          <div className="flex items-center gap-2 px-3 py-2 bg-flame-500/10 border border-flame-500/30 rounded-lg text-xs">
+            <span aria-hidden>⏸</span>
+            <span className="text-flame-300">Paused for missing context.</span>
+            {continuationActive ? (
+              <span className="text-cream-300/70 ml-1">Type the missing piece and send — I'll continue the task.</span>
+            ) : (
+              <button
+                type="button"
+                onClick={() => onStartContinuation?.(m.clarification!, m.jobId)}
+                className="ml-auto text-flame-400 hover:text-flame-300 font-medium underline-offset-2 hover:underline"
+              >
+                Continue this task →
+              </button>
+            )}
+          </div>
+        )}
         {m.jobId && <InlineJob jobId={m.jobId} requiresApproval={m.requiresApproval} templateId={m.templateId} />}
         {m.brainHits && m.brainHits.length > 0 && (
           <div className="bg-ink-950 border border-ink-800 rounded-lg p-3">
