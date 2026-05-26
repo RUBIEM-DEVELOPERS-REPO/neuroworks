@@ -341,7 +341,7 @@ export const primitives: Primitive[] = [
   },
   {
     name: "vault.create_zettel",
-    description: "Create a Zettelkasten permanent note with proper frontmatter and YYYYMMDDHHmm ID. Returns the created path.",
+    description: "Persist a Zettelkasten permanent note to disk (2-Permanent/). Use ONLY when the user explicitly asks to SAVE / CAPTURE / FILE / STORE / ADD-TO-MY-VAULT a note. Do NOT use for tasks that just transform inline content into a deliverable (\"turn this transcript into action items\", \"rewrite this as a KB article\", \"format this as a memo\") — those want ollama.generate to produce the output in the response, not a vault write.",
     readonly: false,
     args: [
       { name: "title", type: "string", required: true, description: "One-sentence claim/title" },

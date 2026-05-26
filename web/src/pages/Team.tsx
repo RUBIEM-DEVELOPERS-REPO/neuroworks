@@ -64,6 +64,13 @@ export function Team() {
   const [dispatched, setDispatched] = useState<DispatchResult[]>([]);
   const [jobs, setJobs] = useState<Record<string, any>>({});
   const [err, setErr] = useState("");
+  // Per-row retry state. When a persona's job fails (or returns empty),
+  // the row shows a Retry button; clicking it re-dispatches that ONE task
+  // via /api/team and swaps the row's jobId so polling continues against
+  // the new job. The original job is preserved in retryHistory so the
+  // user can still inspect it on the Results page.
+  const [retrying, setRetrying] = useState<Record<string, boolean>>({});
+  const [retryHistory, setRetryHistory] = useState<Record<string, string[]>>({});
 
   useEffect(() => { try { localStorage.setItem(STORAGE_KEY, brief); } catch {} }, [brief]);
 
@@ -196,6 +203,59 @@ export function Team() {
     setDispatched([]);
     setJobs({});
     setErr("");
+    setRetrying({});
+    setRetryHistory({});
+  }
+
+  // Retry a single failed (or empty) team-task row. Re-dispatches just
+  // that one task via /api/team, then swaps the row's jobId in-place so
+  // the existing polling loop picks up the new job's status. Original
+  // jobIds are preserved in retryHistory for audit.
+  async function retryRow(rowIndex: number) {
+    const d = dispatched[rowIndex];
+    if (!d) return;
+    const sourceTask = assignments.length > 0
+      ? buildTaskFromAssignment(assignments.find(a => a.personaId === d.persona?.id))
+      : null;
+    if (!sourceTask) {
+      setErr("Couldn't rebuild this task for retry — assignment may have been edited since dispatch.");
+      return;
+    }
+    setRetrying(prev => ({ ...prev, [d.jobId]: true }));
+    try {
+      const r = await api.team([sourceTask]);
+      const newDispatch = r.tasks?.[0];
+      if (!newDispatch?.jobId) {
+        setErr("Retry didn't return a new jobId — server may be overloaded. Try again in a moment.");
+        return;
+      }
+      // Swap the row's jobId so the poller picks up the new one.
+      setDispatched(prev => prev.map((p, i) => i === rowIndex ? { ...p, jobId: newDispatch.jobId } : p));
+      setRetryHistory(prev => ({ ...prev, [newDispatch.jobId]: [...(prev[d.jobId] ?? []), d.jobId] }));
+    } catch (e: any) {
+      setErr(`Retry failed: ${e?.message ?? String(e)}`);
+    } finally {
+      setRetrying(prev => ({ ...prev, [d.jobId]: false }));
+    }
+  }
+
+  // Rebuild a /api/team task payload from a single assignment — used by
+  // retryRow so we re-send exactly the same content the original dispatch
+  // sent.
+  function buildTaskFromAssignment(a: Assignment | undefined) {
+    if (!a) return null;
+    const persona = personas.find(p => p.id === a.personaId);
+    const personaTag = persona ? `[${persona.name} · ${persona.role}]` : `[${a.personaId}]`;
+    const perRole = a.perRole.trim();
+    const content = [
+      `Team brief:\n${brief.trim() || "(no shared brief — work from the per-role instructions only)"}`,
+      perRole ? `\nYour part as ${personaTag}:\n${perRole}` : `\nYour part as ${personaTag}: contribute the slice your role would naturally own.`,
+    ].join("\n");
+    return {
+      persona: a.personaId,
+      content,
+      attachments: pendingAttachments.map(p => ({ contextId: p.contextId })),
+    };
   }
 
   return (
@@ -238,7 +298,7 @@ export function Team() {
             </div>
           )}
           <div className="flex items-center gap-2">
-            <input ref={fileInputRef} type="file" className="hidden" onChange={handleFile} />
+            <input ref={fileInputRef} type="file" className="hidden" onChange={handleFile} aria-label="Attach a document to share with every employee on this team task" />
             <button type="button" onClick={() => fileInputRef.current?.click()} disabled={uploadState.status === "uploading"} className="bg-ink-900 hover:bg-ink-850 border border-ink-800 hover:border-violet-500/40 text-cream-100 px-3 py-1.5 rounded-lg text-xs disabled:opacity-40">
               📎 Attach a document
             </button>
@@ -298,10 +358,14 @@ export function Team() {
             Click a row to open the full result.
           </p>
           <div className="space-y-3">
-            {dispatched.map(d => {
+            {dispatched.map((d, rowIndex) => {
               const job = jobs[d.jobId];
               const status = job?.status ?? "pending";
               const answer = job?.result?.answer ?? "";
+              const terminalFail = status === "failed" || status === "rejected";
+              const completedButEmpty = status === "succeeded" && answer.length < 100;
+              const canRetry = (terminalFail || completedButEmpty) && !retrying[d.jobId];
+              const history = retryHistory[d.jobId] ?? [];
               return (
                 <div key={d.jobId || d.taskIndex} className="bg-ink-900 border border-ink-800 rounded-lg p-3">
                   <div className="flex items-center justify-between gap-3 mb-2">
@@ -310,13 +374,36 @@ export function Team() {
                         <span className="font-medium">{d.persona?.name ?? "Generalist"}</span>
                         <span className="text-cream-300/60 text-[11px] ml-2">{d.persona?.role ?? "primary"}</span>
                         {d.personaAutoRouted && <span className="ml-2 text-[10px] text-violet-300 bg-violet-500/10 px-1.5 py-0.5 rounded">auto-routed</span>}
+                        {history.length > 0 && (
+                          <span className="ml-2 text-[10px] text-flame-300 bg-flame-500/10 px-1.5 py-0.5 rounded" title={`Earlier attempts: ${history.map(h => h.slice(0, 8)).join(", ")}`}>
+                            retry #{history.length}
+                          </span>
+                        )}
                       </div>
                       <div className="text-[10px] text-cream-300/40 font-mono">
                         {d.jobId.slice(0, 8)} · route={d.route}
                       </div>
                     </div>
-                    <StatusPill status={status} />
+                    <div className="flex items-center gap-2">
+                      <StatusPill status={status} />
+                      {retrying[d.jobId] && <span className="text-[10px] text-violet-300 animate-pulse">retrying…</span>}
+                      {canRetry && (
+                        <button
+                          type="button"
+                          onClick={() => retryRow(rowIndex)}
+                          className="text-[11px] px-2 py-1 rounded border border-flame-500/40 text-flame-200 hover:bg-flame-500/10"
+                          title={terminalFail ? "Job failed — re-dispatch the same task" : "Job returned an empty answer — re-dispatch the same task"}
+                        >
+                          ↻ Retry
+                        </button>
+                      )}
+                    </div>
                   </div>
+                  {completedButEmpty && (
+                    <div className="text-[11px] text-flame-300 bg-flame-500/10 border border-flame-500/30 rounded px-2 py-1 mb-2">
+                      Returned an empty answer — likely an upstream LLM hiccup. Retry usually works.
+                    </div>
+                  )}
                   {job && Array.isArray(job.log) && job.log.length > 0 && (
                     <details className="mb-2">
                       <summary className="text-[11px] text-cream-300/70 cursor-pointer hover:text-cream-100">Activity ({job.log.length})</summary>
@@ -369,6 +456,8 @@ function AddEmployee({ personas, onAdd, assigned }: { personas: Persona[]; onAdd
       <select
         value={pick}
         onChange={e => setPick(e.target.value)}
+        aria-label="Pick an employee to add to the team"
+        title="Pick an employee to add to the team"
         className="bg-ink-900 border border-ink-800 text-xs text-cream-100 rounded px-2 py-1 hover:border-violet-500/40 focus:outline-none focus:border-violet-500/60 cursor-pointer max-w-[260px]"
       >
         <option value="">— Pick an employee —</option>

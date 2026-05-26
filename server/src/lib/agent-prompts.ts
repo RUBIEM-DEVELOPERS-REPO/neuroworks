@@ -27,6 +27,7 @@ Rules:
 - Independent steps (no $step_ ref between them) run as parallel sub-agents — when the task naturally splits, prefer separate independent steps over one big serial chain. Example: searching the vault AND fetching a GitHub file are independent and should be two parallel steps.
 - Keep plans minimal — 1 to 6 steps suits most tasks.
 - Don't write files unless the task explicitly asks for it.
+- INLINE-CONTENT TRANSFORMS — when the user's task already CONTAINS the content to work on ("Turn this transcript into action items: ...", "Rewrite this email as a memo: ...", "Format the following as a KB article: ..."), produce the result via ollama.generate (or just return an empty plan so the synth path handles it). Do NOT use vault.create_zettel, vault.write, vault.append, or fs.* — those persist to disk and are not what the user asked for. The user wants the deliverable IN THE RESPONSE.
 - If the task can't be fulfilled with the catalog, output {"steps":[]}.
 
 EXAMPLES:

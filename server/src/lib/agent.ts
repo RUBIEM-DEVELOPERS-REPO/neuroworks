@@ -2197,6 +2197,19 @@ function humanizeAllFail(task: string, failed: StepRun[]): string {
     return `I'm not authorised to access that resource — looks like the token / key is missing, expired, or doesn't have permission. Check the relevant entry in your \`.env\` (GitHub PAT, API keys, etc.) and try again.`;
   }
 
+  // 5a. VAULT-WRITE ENOENT — the vault drive isn't mounted (Windows D:
+  //    unplugged, Linux mount missing, path renamed). Without this branch
+  //    the customer got the generic "couldn't find what you were pointing
+  //    me at" message, which sounds like a SEARCH miss but actually means
+  //    "your vault disk isn't reachable so I can't WRITE to it".
+  const isVaultWriteTool = /^(?:vault\.(?:write|append|create_zettel|import_binary)|fs\.(?:write|append|copy))/.test(tool);
+  const isMkdirError = /\b(?:mkdir|ENOENT.*(?:mkdir|writeFile))\b/i.test(err);
+  if ((isVaultWriteTool || isMkdirError) && /\bENOENT\b/i.test(err)) {
+    const driveMatch = err.match(/['"]?([A-Z]:[\\/][^'"\n)]+|\/[\w/.-]+)['"]?/);
+    const where = driveMatch ? ` (path: \`${driveMatch[1].slice(0, 80)}\`)` : "";
+    return `I can't write to your vault${where} — the configured path doesn't resolve on this machine. Common causes: the drive is unmounted (e.g. D: was unplugged on Windows), the folder was renamed, or VAULT_PATH in \`.env\` doesn't match your actual vault. Mount the drive (or fix the path) and try again, or rephrase the task so I produce the answer inline without writing to disk.`;
+  }
+
   // 5. NOT FOUND — file or repo doesn't exist where I looked.
   if (/\b(?:file not found|no such file|ENOENT|404|not found)\b/i.test(err)) {
     if (targetPath) return `I couldn't find anything at \`${targetPath}\`. Could the path be slightly different (typo, wrong folder), or should I look somewhere else?`;
