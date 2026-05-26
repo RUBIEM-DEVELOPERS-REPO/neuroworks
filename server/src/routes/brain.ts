@@ -1,19 +1,43 @@
 import { Router } from "express";
 import { existsSync, renameSync } from "node:fs";
 import { resolve, basename } from "node:path";
-import { listVault, readVaultFile, searchVault, writeVaultFile } from "../lib/vault.js";
+import { listVault, readVaultFile, searchVault, writeVaultFile, getVaultHealth } from "../lib/vault.js";
 import { enqueueVaultCommit } from "../lib/commit-queue.js";
 import { config } from "../config.js";
 
 export const brainRouter = Router();
 
+// Pre-flight health check used by every read endpoint below. When the vault
+// path is unreachable (drive unmounted, path renamed, env misconfigured),
+// return 503 with a structured `vaultMissing` payload so the UI can show
+// a clear banner instead of pretending the vault is empty.
+function requireVault(res: any): boolean {
+  const h = getVaultHealth();
+  if (h.exists) return true;
+  res.status(503).json({
+    error: h.reason ?? "vault unreachable",
+    vaultMissing: true,
+    vaultPath: h.vaultPath,
+    health: h,
+  });
+  return false;
+}
+
+// Lightweight health probe — UI uses this to render the banner on the
+// Knowledge page and the Admin dashboard.
+brainRouter.get("/health", (_req, res) => {
+  res.json(getVaultHealth());
+});
+
 brainRouter.get("/tree", (req, res) => {
+  if (!requireVault(res)) return;
   const path = String(req.query.path ?? "");
   try { res.json({ path, entries: listVault(path) }); }
   catch (e: any) { res.status(400).json({ error: e.message }); }
 });
 
 brainRouter.get("/file", (req, res) => {
+  if (!requireVault(res)) return;
   const path = String(req.query.path ?? "");
   if (!path) return res.status(400).json({ error: "path required" });
   try { res.json({ path, content: readVaultFile(path) }); }
@@ -21,12 +45,14 @@ brainRouter.get("/file", (req, res) => {
 });
 
 brainRouter.get("/search", (req, res) => {
+  if (!requireVault(res)) return;
   const q = String(req.query.q ?? "").trim();
   if (!q) return res.json({ q, results: [] });
   res.json({ q, results: searchVault(q) });
 });
 
 brainRouter.get("/digest/latest", (req, res) => {
+  if (!requireVault(res)) return;
   try { res.json({ content: readVaultFile("_clawbot/latest.md") }); }
   catch (e: any) { res.status(404).json({ error: e.message }); }
 });

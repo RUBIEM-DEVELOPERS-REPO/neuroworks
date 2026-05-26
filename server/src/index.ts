@@ -12,7 +12,7 @@ import { localInflightCount } from "./lib/peers.js";
 import { modelsRouter } from "./routes/models.js";
 import { ollamaGenerate } from "./lib/ollama.js";
 import { shutdownCommitQueue } from "./lib/commit-queue.js";
-import { startVaultWatcher, stopVaultWatcher, startVaultPullScheduler, stopVaultPullScheduler } from "./lib/vault.js";
+import { startVaultWatcher, stopVaultWatcher, startVaultPullScheduler, stopVaultPullScheduler, getVaultHealth } from "./lib/vault.js";
 import { autodiscoverLocalPeers } from "./lib/peer-registry.js";
 import { ensureWorker, shutdownManagedWorker } from "./lib/worker-manager.js";
 import { loadPersonas } from "./lib/personas.js";
@@ -60,6 +60,9 @@ app.get("/api/health", (_req, res) => res.json({
   missing: config.missing,
   inflightJobs: localInflightCount(),
   peers: config.peers,
+  // Vault reachability — surfaced here so EVERY dashboard surface can show
+  // "vault unreachable" without an extra round-trip. Banner-friendly shape.
+  vault: getVaultHealth(),
 }));
 app.use("/api/status", statusRouter);
 app.use("/api/repos", reposRouter);

@@ -13,6 +13,15 @@ export function Knowledge() {
   const [search, setSearch] = useState("");
   const [results, setResults] = useState<any[] | null>(null);
   const [err, setErr] = useState("");
+  // Vault-reachability probe — when the path on the server doesn't resolve
+  // (drive unmounted, path renamed, env misconfigured) every brain endpoint
+  // 503s. We probe once on mount and re-probe after each navigation so the
+  // user sees the situation clearly instead of an empty tree.
+  const [vaultHealth, setVaultHealth] = useState<{ ok: boolean; vaultPath: string; exists: boolean; gitRepo: boolean; reason?: string } | null>(null);
+
+  useEffect(() => {
+    api.brainHealth().then(setVaultHealth).catch(() => setVaultHealth(null));
+  }, [subPath]);
 
   useEffect(() => {
     setErr(""); setContent(null);
@@ -28,6 +37,10 @@ export function Knowledge() {
     if (!search.trim()) { setResults(null); return; }
     try { const r = await api.brainSearch(search.trim()); setResults(r.results); }
     catch (e: any) { setErr(e.message); }
+  }
+  async function retryVaultHealth() {
+    try { const h = await api.brainHealth(); setVaultHealth(h); if (h.exists) { setErr(""); /* re-trigger the tree load */ if (!subPath) { const r = await api.brainTree(""); setTree(r.entries); } } }
+    catch { /* tolerate */ }
   }
 
   const segments = subPath ? subPath.split("/") : [];
@@ -46,6 +59,40 @@ export function Knowledge() {
           ))}
         </div>
       </div>
+
+      {vaultHealth && !vaultHealth.exists && (
+        <div className="bg-coral-500/10 border border-coral-500/30 rounded-lg px-4 py-3">
+          <div className="flex items-start gap-3">
+            <span aria-hidden className="text-coral-400 mt-0.5">⚠</span>
+            <div className="flex-1 min-w-0">
+              <div className="text-sm text-coral-300 font-medium">Vault is not reachable.</div>
+              <div className="text-xs text-cream-300/70 mt-1">
+                Configured path: <span className="font-mono text-cream-100">{vaultHealth.vaultPath}</span>
+              </div>
+              <div className="text-xs text-cream-300/70 mt-1">
+                {vaultHealth.reason ?? "The path does not resolve on this machine."}
+              </div>
+              <div className="text-[11px] text-cream-300/60 mt-2">
+                Fix: mount the drive, restore the folder, or update <span className="font-mono">VAULT_PATH</span> in <span className="font-mono">.env</span> and restart the server. Until then, the knowledge tree, search, and capture endpoints will return 503.
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={retryVaultHealth}
+              className="text-xs px-3 py-1 rounded border border-coral-500/40 text-coral-200 hover:bg-coral-500/10"
+            >
+              Retry
+            </button>
+          </div>
+        </div>
+      )}
+      {vaultHealth && vaultHealth.exists && !vaultHealth.gitRepo && (
+        <div className="bg-flame-500/10 border border-flame-500/30 rounded-lg px-4 py-2">
+          <div className="text-xs text-flame-300">
+            Vault folder exists but has no <span className="font-mono">.git</span> — Obsidian sync over git won't work until you initialise the repo (run <span className="font-mono">git init</span> in <span className="font-mono">{vaultHealth.vaultPath}</span> and push to <span className="font-mono">origin</span>).
+          </div>
+        </div>
+      )}
 
       <div className="flex gap-2">
         <input

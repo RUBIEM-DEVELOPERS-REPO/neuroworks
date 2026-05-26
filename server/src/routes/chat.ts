@@ -1387,6 +1387,33 @@ function buildEnrichedTask(
   if (intent?.formatHint) {
     parts.push(intent.formatHint);
   }
+
+  // ─── Alignment directive ───
+  // The quality harness (q1) found 7/14 probes at B+ floor. Most misses were
+  // alignment misses: the LLM dropped concrete elements the user explicitly
+  // requested (named counts like "5 steps" / "top 3 risks", named people,
+  // specific dates, named SOP steps, scale numbers like "1200 employees").
+  // The synth was treating these as soft hints. This block makes them
+  // mandatory: scan the user's text for concrete asks and cross-check the
+  // final answer against each one.
+  //
+  // Skipped for short tasks (< 80 chars) — there's nothing to cross-check.
+  // The retry path returns early above, so this only applies to first-turn
+  // and continuation tasks.
+  if (text.length >= 80 && !detectRetryIntent(text, !!lastAssistantTurn)) {
+    parts.push(
+      `**Alignment check — required before responding.** Before producing the final answer, scan the user's request for CONCRETE elements and make sure each one is addressed in the output:\n` +
+      `- Named counts ("5 steps", "top 3 risks", "4-stage loop", "3 social variants") → produce exactly that many items.\n` +
+      `- Named people, roles, accounts, vendors → reference each by name.\n` +
+      `- Specific dates, deadlines, scale numbers ("by 2026-06-15", "1200 employees", "$99/mo") → echo verbatim.\n` +
+      `- Named sections / deliverable shape ("Title, Symptoms, Root cause, Resolution, Prevention" or "must-haves vs nice-to-haves") → produce each named section.\n` +
+      `- Named steps in a process ("paging on-call → scoping impact → status page → comms → escalation → post-mortem") → cover every step.\n` +
+      `- Output format directives ("numbered list", "table", "≤4 bullets") → honour exactly.\n` +
+      `\n` +
+      `If the user asked for N items, produce N items. If they named items A/B/C, the output must reference A, B, AND C. Do NOT silently drop or substitute. If you cannot address one, say so explicitly with the reason — never omit silently.`,
+    );
+  }
+
   // Single-part = just bare text. Skip the join overhead.
   if (parts.length === 1) return text;
   return parts.join("\n\n");

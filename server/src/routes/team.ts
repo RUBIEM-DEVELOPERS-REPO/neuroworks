@@ -120,9 +120,17 @@ teamRouter.post("/", async (req, res) => {
         }
       }
 
+      // Alignment directive — same as buildEnrichedTask in routes/chat.ts.
+      // Team tasks regularly carry per-role deliverable lists ("Your part:
+      // produce A, B, C with X, Y, Z"); without this directive the synth
+      // treats those as soft hints and drops items (q1 harness saw recruiter
+      // skip "must-haves / nice-to-haves / 4-stage loop" entirely).
+      const alignmentDirective = text.length >= 80
+        ? `\n\n**Alignment check — required before responding.** The user's request names concrete elements (counts, people, dates, scale numbers, named sections, named steps, deliverable shape). The final answer MUST address each one. If N items are asked for, produce N. If A/B/C are named, reference A, B, AND C. Honor format directives exactly. Never silently drop or substitute — if you cannot address one, say so explicitly.`
+        : "";
       const enrichedTask = (persona
-        ? `(You are operating as ${persona.name}, the ${persona.role}. Bias tool choices, output shape, and depth toward this role's conventions.)\n\n${text}`
-        : text) + attachmentBlock;
+        ? `(You are operating as ${persona.name}, the ${persona.role}. Bias tool choices, output shape, and depth toward this role's conventions.)\n\n${text}${alignmentDirective}`
+        : `${text}${alignmentDirective}`) + attachmentBlock;
 
       const tpl = templates.find(x => x.id === "general-task")!;
       const job = newJob(`insights:general-task`);

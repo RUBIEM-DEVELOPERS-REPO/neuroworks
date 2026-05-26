@@ -63,6 +63,48 @@ export function clearStaleVaultLock(): { cleared: boolean; reason?: string; ageM
   }
 }
 
+// Quick vault-health probe — used by the brain routes + /api/health to tell
+// the UI whether the vault path resolves on disk. Without this, an unmounted
+// VAULT_PATH (e.g. D: drive on Windows) made listVault silently return [],
+// which looks identical to "your vault is empty" — the user has no idea
+// the drive is just missing. This helper surfaces the truth so the
+// Knowledge page can show "vault unreachable" instead of an empty tree.
+export type VaultHealth = {
+  ok: boolean;
+  vaultPath: string;
+  exists: boolean;
+  gitRepo: boolean;
+  reason?: string;
+};
+
+export function getVaultHealth(): VaultHealth {
+  const vaultPath = VAULT;
+  let exists = false;
+  let gitRepo = false;
+  let reason: string | undefined;
+  try {
+    exists = existsSync(vaultPath);
+    if (!exists) {
+      reason = `vault path "${vaultPath}" not found (drive unmounted, path renamed, or VAULT_PATH misconfigured)`;
+    } else {
+      // Confirm it's a directory and that the .git subdirectory exists — that
+      // tells us this is a real vault repo, not just a coincidental folder
+      // with the same name.
+      const st = statSync(vaultPath);
+      if (!st.isDirectory()) {
+        exists = false;
+        reason = `vault path "${vaultPath}" exists but is not a directory`;
+      } else {
+        gitRepo = existsSync(resolve(vaultPath, ".git"));
+        if (!gitRepo) reason = "vault directory exists but contains no .git — Obsidian sync will not work until you initialise git in this folder";
+      }
+    }
+  } catch (e: any) {
+    reason = `vault health probe failed: ${e?.message ?? e}`;
+  }
+  return { ok: exists && (gitRepo || !!process.env.CLAWBOT_VAULT_ALLOW_NO_GIT), vaultPath, exists, gitRepo, reason };
+}
+
 export function listVault(rel = ""): VaultNode[] {
   const full = resolve(VAULT, rel);
   ensureInsideVault(full);
