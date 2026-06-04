@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import { simpleGit } from "simple-git";
 import { config } from "../config.js";
 import { scanForSecurityRisks } from "./security.js";
+import { buildIndex, invalidateIndex, searchIndex, indexStats, isBuildInProgress } from "./vault-index.js";
 
 const VAULT = config.vaultPath;
 
@@ -75,6 +76,7 @@ export type VaultHealth = {
   exists: boolean;
   gitRepo: boolean;
   reason?: string;
+  index?: { ready: boolean; docs: number; ageMs: number; built: boolean };
 };
 
 export function getVaultHealth(): VaultHealth {
@@ -102,10 +104,11 @@ export function getVaultHealth(): VaultHealth {
   } catch (e: any) {
     reason = `vault health probe failed: ${e?.message ?? e}`;
   }
-  return { ok: exists && (gitRepo || !!process.env.CLAWBOT_VAULT_ALLOW_NO_GIT), vaultPath, exists, gitRepo, reason };
+  return { ok: exists && (gitRepo || !!process.env.CLAWBOT_VAULT_ALLOW_NO_GIT), vaultPath, exists, gitRepo, reason, index: indexStats() };
 }
 
 export function listVault(rel = ""): VaultNode[] {
+  assertVaultExists();
   const full = resolve(VAULT, rel);
   ensureInsideVault(full);
   if (!existsSync(full)) return [];
@@ -121,9 +124,31 @@ export function listVault(rel = ""): VaultNode[] {
 }
 
 export function readVaultFile(rel: string): string {
+  assertVaultExists();
   const full = resolve(VAULT, rel);
   ensureInsideVault(full);
   return readFileSync(full, "utf8");
+}
+
+// Thrown by every read/write entrypoint when the vault root doesn't
+// resolve on this machine (drive unmounted, path renamed, env wrong).
+// Without this, searchVault() silently returns [] and downstream code
+// reports "No matches" — masking the real failure behind a result that
+// looks like an empty vault. Surfacing it lets the template runner,
+// the agent primitive, and brain.ts all give the user the actual cause.
+export class VaultUnreachable extends Error {
+  vaultPath: string;
+  constructor(vaultPath: string, reason?: string) {
+    super(reason ?? `vault path "${vaultPath}" is unreachable (drive unmounted, path renamed, or VAULT_PATH misconfigured)`);
+    this.vaultPath = vaultPath;
+    this.name = "VaultUnreachable";
+  }
+}
+
+// Cheap existence check. Centralised so any future change (e.g. allow a
+// secondary fallback path) lands in one place.
+function assertVaultExists(): void {
+  if (!existsSync(VAULT)) throw new VaultUnreachable(VAULT);
 }
 
 export class VaultSecurityRefusal extends Error {
@@ -136,6 +161,7 @@ export class VaultSecurityRefusal extends Error {
 }
 
 export function writeVaultFile(rel: string, content: string) {
+  assertVaultExists();
   const full = resolve(VAULT, rel);
   ensureInsideVault(full);
   if (VAULT_SCAN_ENABLED) {
@@ -370,6 +396,10 @@ const SEARCH_CACHE_MAX = 200;
 
 function invalidateSearchCache() {
   SEARCH_CACHE.clear();
+  // Inverted index is independent of the SEARCH_CACHE; bust both on the
+  // same signal so vault.search and the MiniSearch path can't disagree
+  // about what's in the vault.
+  invalidateIndex();
 }
 
 // External-edit detection. The cache is invalidated whenever
@@ -409,6 +439,13 @@ export function startVaultWatcher(): void {
       if (watchInvalidateTimer) clearTimeout(watchInvalidateTimer);
       watchInvalidateTimer = setTimeout(() => {
         watchInvalidateTimer = null;
+        // Skip invalidation while the index is mid-build. Subst-mapped D:
+        // on Windows fires spurious events for files we're reading, which
+        // creates an invalidation/build loop where the index never
+        // stabilises. Real external writes still come through after the
+        // build window closes — chokidar would mark them but our debounce
+        // window already coalesces near-simultaneous events.
+        if (isBuildInProgress()) return;
         invalidateSearchCache();
       }, WATCH_COALESCE_MS);
     });
@@ -416,6 +453,9 @@ export function startVaultWatcher(): void {
       console.warn(`[vault] watcher error: ${e?.message ?? e}`);
     });
     console.log(`[vault] watching ${VAULT} for external edits`);
+    // Kick off an initial index build in the background so the FIRST
+    // search after startup doesn't pay the build cost on the request path.
+    void buildIndex(VAULT);
   } catch (e: any) {
     console.warn(`[vault] could not start watcher (${e?.message ?? e}) — falling back to ${SEARCH_CACHE_TTL_MS}ms TTL`);
     vaultWatcher = null;
@@ -507,6 +547,10 @@ export function getVaultPullStatus(): { lastPullAt: number; lastPullResult: type
 // is present in the vault. Content search is overkill there; the slow walk
 // was the root cause of the 11s gap measured before this fix.
 export function searchVaultFilenames(query: string, limit = 5): SearchHit[] {
+  // Triage path — silently return [] when the vault is unreachable so we
+  // don't break the planner's "do we have notes on X?" probe. The actual
+  // search path (searchVault) still throws so the user sees the cause.
+  if (!existsSync(VAULT)) return [];
   const q = query.toLowerCase();
   // Normalise hyphens/underscores in filenames so "vault edit" matches
   // "vault-edit.md" / "vault_edit.md". Multi-token queries require every
@@ -539,11 +583,29 @@ export function searchVaultFilenames(query: string, limit = 5): SearchHit[] {
 }
 
 export function searchVault(query: string, limit = 50): SearchHit[] {
+  assertVaultExists();
   const q = query.toLowerCase();
   const key = `${q}|${limit}`;
   const hit = SEARCH_CACHE.get(key);
   if (hit && Date.now() - hit.at < SEARCH_CACHE_TTL_MS) {
     return hit.results;
+  }
+  // Fast path — MiniSearch inverted index. Falls back to the legacy walk
+  // when the index hasn't built yet (cold start) or when MiniSearch declines
+  // a query. Index builds lazily; first call after a cache invalidation
+  // rebuilds it before serving.
+  if (!indexStats().ready) {
+    void buildIndex(VAULT);
+  } else {
+    const indexed = searchIndex(query, VAULT, limit);
+    if (indexed && indexed.length > 0) {
+      const results = indexed.map(h => ({ path: h.path, line: h.line, preview: h.preview }));
+      SEARCH_CACHE.set(key, { at: Date.now(), results });
+      return results;
+    }
+    // Index returned [] — let the legacy walk run too, since MiniSearch's
+    // AND combiner can be stricter than substring matching. If the walk
+    // also returns nothing the user gets the same answer either way.
   }
   const out: SearchHit[] = [];
   function walk(dir: string) {

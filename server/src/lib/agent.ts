@@ -5,6 +5,7 @@ import { searchVault, searchVaultFilenames } from "./vault.js";
 import { suggestSkillsForIntent, suggestSkillsForTask, topSkillScoreForTask } from "./skills.js";
 import { config } from "../config.js";
 import { PLAN_SYSTEM, POLISHED_DIRECT, POLISHED_SYNTH, TRIVIAL_DIRECT } from "./agent-prompts.js";
+import { classifyDeliverable, taskWantsResearch } from "./deliverable.js";
 
 // Parse the "Interpretation: intent=foo, target=..." line that chat.ts
 // appends to enriched tasks. Returns the intent label when present, or
@@ -209,8 +210,91 @@ export async function plan(task: string, _personaSystemSuffix?: string, push?: (
   const researchContext = researchHint
     ? `\n\nResearch required: the task contains "${researchHint}" — the customer expects you to FETCH external sources, not answer from memory. Your plan MUST include at least one of: research.deep, research.multiperspective, web.search + smartFetch chain, or web.scrape. If you also need to synthesise persona-flavored output afterward, chain a final ollama.generate that takes the research result as evidence. Do NOT skip the fetch step.\n`
     : "";
+  // Explicit-tool hint: when the user's task literally names a registered
+  // primitive (e.g. "use fs.list_external", "with vault.read"), respect it.
+  // Without this, the planner regularly ignored direct tool mentions and
+  // routed every local-doc / external-fs request through research.deep — a
+  // 30-90s detour that often answered "I couldn't find that" because the
+  // wrong tool was reached for. Word-boundary match against the registered
+  // catalog avoids false positives from substrings of unrelated words.
+  const namedTools: string[] = [];
+  for (const p of primitives) {
+    const re = new RegExp(`\\b${p.name.replace(/\./g, "\\.")}\\b`);
+    if (re.test(task)) namedTools.push(p.name);
+  }
+  // Cap the override-honoring set so a chat message that happened to list
+  // many tool names can't outweigh the rest of the task brief. The research
+  // override above still applies — when both signals fire, the planner has
+  // both hints and can balance them.
+  const explicitToolContext = namedTools.length > 0
+    ? `\n\nExplicit tool request: the user's task literally names tool${namedTools.length === 1 ? "" : "s"} ${namedTools.slice(0, 5).map(t => `\`${t}\``).join(", ")}. Honor that — include the named tool${namedTools.length === 1 ? "" : "s"} as the FIRST step(s) in your plan with the most direct, minimal arguments the task implies. Only chain other tools afterward (e.g. a synth step) if the named tool's output needs further shaping. Do NOT silently substitute research.deep for a directly-named fs.* / vault.* / web.* primitive — the user already chose.\n`
+    : "";
+  // Company data hint: when the operator has registered a database
+  // connection OR seeded the _company/ knowledge folder, surface that in
+  // the planner's context. Without this nudge the planner reaches for
+  // research.deep (web search) on questions like "what's our revenue this
+  // quarter" — when the answer is sitting in the operator's own CRM DB
+  // or company KB. Cheap to check: read registry sync + one folder stat.
+  let companyDataContext = "";
+  try {
+    const { listSources } = await import("./data-sources.js");
+    const sources = listSources();
+    const { existsSync: fsExistsSync } = await import("node:fs");
+    const { resolve: rresolve } = await import("node:path");
+    const { config: cfg } = await import("../config.js");
+    const hasCompanyFolder = fsExistsSync(rresolve(cfg.vaultPath, "_company"));
+    const hints: string[] = [];
+    if (sources.length > 0) {
+      const summary = sources.slice(0, 4).map(s => `"${s.label}" (${s.kind}, id=${s.id})`).join(", ");
+      hints.push(`The operator has ${sources.length} registered company database${sources.length === 1 ? "" : "s"} (${summary}). Use db.list_sources to discover them, db.schema(source_id) to learn tables/columns, then db.query(source_id, sql) for read-only SELECT/WITH queries. Prefer this over research.deep for questions about sales, customers, deals, employees, orders, inventory, or any data the operator's business already owns.`);
+    }
+    if (hasCompanyFolder) {
+      hints.push(`Company knowledge lives in the vault under _company/. Use vault.search for company-specific facts (policies, playbooks, decks, contracts) BEFORE reaching for the web.`);
+    }
+    if (hints.length > 0) {
+      companyDataContext = `\n\nCompany data context:\n- ${hints.join("\n- ")}\n`;
+    }
+  } catch { /* tolerate — bad import shouldn't break planning */ }
+  // Local-fs hint — when the task mentions Downloads / Desktop / Documents
+  // / "my PC" / "my computer", route to fs.find_in (NOT research.deep,
+  // which can't see the operator's filesystem). Without this, the small
+  // planner often picks research.deep, then narrates a fabricated "I
+  // searched your Downloads" answer.
+  let localFsContext = "";
+  if (/\b(downloads?|desktop|documents?|my\s+pc|my\s+computer|on\s+disk|local\s+file|file\s+(called|named))\b/i.test(task)) {
+    localFsContext = `\n\nLocal filesystem context: the task mentions a file on the operator's PC (Downloads / Desktop / Documents / "my PC"). The FIRST step MUST be fs.find_in with folder='downloads'|'desktop'|'documents'|'all' and the filename substring. Do NOT use research.deep — it cannot see the operator's local filesystem. Chain fs.read_external (for the absolute path returned) or fs.import_to_vault afterward as the task requires.\n`;
+  }
+  // Email-send hint — when the task is about sending email, use the
+  // dedicated email.send primitive that routes through Mailjet. Without
+  // this nudge, small planners reach for web.interact and try to drive
+  // Gmail's UI in a headless browser that isn't logged in — the step
+  // returns ok but no actual email is sent, leaving the synth to
+  // fabricate a "looks delivered" response. email.send returns a real
+  // delivery confirmation the synth can quote.
+  let emailContext = "";
+  if (/\b(send\s+(an?\s+)?email|email\s+\S+@|reply\s+(to|via)\s+email|mail\s+\S+@|send.*to\s+\S+@)\b/i.test(task)) {
+    emailContext = `\n\nEmail-send context: the task asks for an actual email to be sent. The plan MUST use email.send (NOT web.interact, NOT fs.* — those don't send mail). Required args: to (the @ address), subject, body (markdown ok). The body should be drafted INLINE in the args.body string, not as a separate ollama.generate step unless the body needs evidence-gathering first. Chain pattern when the body needs evidence: research/vault step → ollama.generate to draft the body → email.send with {body: "$step_N.text"}. When the body is self-contained from the task, ONE email.send step is the whole plan.\n`;
+  }
+  // Activity-report hint — when the task asks about the agent's OWN completed
+  // work/tasks over a time window ("report on the tasks I did yesterday", "what
+  // shipped this week", "yesterday's task completion"), route to calendar.activity.
+  // Without this, the planner runs vault.search/research.deep, finds nothing
+  // (completed-task records live in the job history, NOT vault notes), and
+  // reports "no records" — exactly the failure we saw. We also compute the
+  // concrete dates because the small planner doesn't reliably know "today".
+  let activityContext = "";
+  const timeWindowRe = /\b(yesterday|today|this\s+week|last\s+week|this\s+month|last\s+month|past\s+\d+\s+(day|week)s?|last\s+(mon|tues|wednes|thurs|fri|satur|sun)day)\b/i;
+  const activityIntentRe = /\b(tasks?|did|done|complete[d]?|finish(ed)?|accomplish(ed)?|work(ed)?|shipp(ed)?|activit|progress|report)\b/i;
+  if (timeWindowRe.test(task) && activityIntentRe.test(task)) {
+    const now = new Date();
+    const iso = (d: Date) => d.toISOString().slice(0, 10);
+    const today = iso(now);
+    const yesterday = iso(new Date(now.getTime() - 864e5));
+    const weekAgo = iso(new Date(now.getTime() - 7 * 864e5));
+    activityContext = `\n\nActivity-report context: the task asks about the agent's OWN completed work/tasks over a time window. The FIRST step MUST be calendar.activity (NOT vault.search / research.deep — completed-task records live in the job history, not vault notes; searching the vault returns "no records" and produces a false empty report). Scope it with from/to. Reference dates from the server clock: today=${today}, yesterday=${yesterday}, this-week-start=${weekAgo}. Use from=${yesterday} to=${yesterday} for "yesterday", from=${today} to=${today} for "today", from=${weekAgo} to=${today} for "this week". Then synthesise the report from the returned jobs (each has title, template, kind, status, score). If the task also asks to email/send it, chain email.send AFTER the synth with the report as the body.\n`;
+  }
   // Compact catalog: ~40% smaller prompt → faster planning on small models.
-  const sys = PLAN_SYSTEM + primitivesPromptCatalog({ compact: true }) + vaultContext + researchContext;
+  const sys = PLAN_SYSTEM + primitivesPromptCatalog({ compact: true }) + vaultContext + researchContext + companyDataContext + localFsContext + emailContext + activityContext + explicitToolContext;
 
   // Race the planner LLM call against PLAN_TIMEOUT_MS. If the LLM stalls,
   // we fall back to an empty plan; the caller then uses defaultVaultPlan
@@ -654,6 +738,19 @@ export async function planAndExecute(
   const bareTask = parseUserRequestFromTask(task);
   const fromTemplate = taskWasTemplated(task);
 
+  // Governance prefix — admin-curated policies under _governance/ in the
+  // vault get prepended to the persona suffix so every downstream LLM call
+  // (planner, synth, direct-answer, rescue retries) sees them as system
+  // constraints. Cached for 60s on the governance side so this is cheap.
+  // Empty string when no policies exist, so the concat is safe either way.
+  try {
+    const { loadGovernancePrefix } = await import("./governance.js");
+    const govPrefix = loadGovernancePrefix();
+    if (govPrefix) {
+      opts = { ...opts, personaSystemSuffix: govPrefix + (opts.personaSystemSuffix ?? "") };
+    }
+  } catch { /* governance is non-fatal — never block a task on its absence */ }
+
   // Pre-planned execution. Custom templates ship with a saved plan that was
   // verified the first time it ran via the agent. When the caller supplies
   // `opts.preplan`, skip all triage / heuristic / LLM planning and jump
@@ -675,6 +772,35 @@ export async function planAndExecute(
       onProgress?.({ partialAnswer: partial });
     }, { push });
     return { task, plan: p, runs, answer: synth.answer, hadWrites };
+  }
+
+  // Creative / procedural deliverables (marketing copy, runbooks, how-tos)
+  // draw on the persona's own knowledge — they have nothing external to cite.
+  // Route them straight to a persona-knowledge direct answer instead of running
+  // speculative web research that yields thin "sources" (which then drag the
+  // citation grader down) and wastes 1-3 minutes. Honour explicit research
+  // signals ("latest", "search", "our docs", a URL) — those mean the user
+  // wants grounding — and never override a template-driven run.
+  const deliverableClass = classifyDeliverable(bareTask);
+  const forceDirect = !fromTemplate
+    && (deliverableClass === "creative" || deliverableClass === "procedural")
+    && !taskWantsResearch(bareTask);
+  if (forceDirect) {
+    // Marketing copy / runbooks / how-tos draw on the persona's own knowledge,
+    // not external sources. Synthesize the deliverable directly — no research
+    // steps that would yield thin "sources" (which then drag the citation
+    // grader down) and waste 1-3 minutes. Routed through synthesize() with an
+    // empty plan, which has a knowledge-deliverable branch that uses the full
+    // deliverable prompt + a generous token budget (POLISHED_DIRECT's brevity
+    // + anti-hallucination framing would truncate a runbook or make the model
+    // ask questions instead of drafting the copy).
+    push(`This is a ${deliverableClass} deliverable — drafting it directly from professional knowledge (no web research needed for this shape).`);
+    const emptyPlan: Plan = { steps: [], summary: `${deliverableClass} deliverable — drafted from professional knowledge`, waves: [] };
+    onProgress?.({ phase: "synthesizing", plan: emptyPlan, runs: [] });
+    const synth = await synthesize(task, emptyPlan, [], opts.personaSystemSuffix, (partial) => {
+      onProgress?.({ partialAnswer: partial });
+    }, { push });
+    return { task, plan: emptyPlan, runs: [], answer: synth.answer, hadWrites: false };
   }
 
   // Triage first — the cheapest possible path is skipping the planner entirely
@@ -744,7 +870,7 @@ export async function planAndExecute(
     // directly. Without this guard, "what is 2+2" would needlessly route
     // to research.deep.
     if (direct && !isTriviallyDirectAnswer(bareTask, priorContext)) {
-      const speculativeHeuristic = heuristicPlan(bareTask);
+      const speculativeHeuristic = heuristicPlan(bareTask, { hasAttachments: /\nAttached documents \(user uploaded as context/.test(task) });
       const wantsResearch = speculativeHeuristic && speculativeHeuristic.steps.length > 0
         && speculativeHeuristic.steps.some(s => s.tool === "research.deep" || s.tool === "web.search" || s.tool === "vault.search");
       // Short-definitional override: when the query is a definitional
@@ -860,7 +986,7 @@ export async function planAndExecute(
   // bareTask (computed at top) strips persona framing so URL / path / verb
   // anchors match from line-start.
   onProgress?.({ phase: "planning" });
-  let p = heuristicPlan(bareTask) ?? { steps: [], summary: undefined, waves: [] };
+  let p = heuristicPlan(bareTask, { hasAttachments: /\nAttached documents \(user uploaded as context/.test(task) }) ?? { steps: [], summary: undefined, waves: [] };
   if (p.steps.length > 0) {
     // Customer-facing context-tier badge based on what the plan touches.
     // Helps the customer see "this answer drew on your vault" vs "this
@@ -886,7 +1012,30 @@ export async function planAndExecute(
     // research.deep run measured in the wild). This IS the default cascade:
     // vault search inside research.deep, then web if the vault is thin.
     push(`Couldn't draft a tight plan in time — falling back to the standard cascade: your second brain first, then the web.`);
-    p = defaultVaultPlan(bareTask);
+    p = defaultVaultPlan(bareTask, { hasAttachments: /\nAttached documents \(user uploaded as context/.test(task) });
+  }
+  // PLAN REPAIR — local-fs intent. Small planner LLMs sometimes pick
+  // research.deep even when the task clearly says "in my downloads /
+  // desktop / documents". research.deep cannot read the operator's
+  // local PC, so the resulting answer is always "no matches found".
+  // When the task mentions a local folder AND the plan has no fs.* /
+  // vault.* step, swap the first research.deep / web.* step for a
+  // proper local-fs chain. Idempotent: skipped when the planner already
+  // included fs.find_in / fs.read_external.
+  const localFsTaskHint = bareTask.match(/\b(downloads?|desktop|documents?|my\s+pc|my\s+computer|on\s+disk|local\s+file|file\s+(called|named))\b/i);
+  if (localFsTaskHint) {
+    const planTools = new Set(p.steps.map(s => s.tool));
+    const hasLocalFs = ["fs.find_in", "fs.read_external", "fs.list_external"].some(t => planTools.has(t));
+    if (!hasLocalFs) {
+      const repaired = defaultVaultPlan(bareTask, { hasAttachments: /\nAttached documents \(user uploaded as context/.test(task) });
+      // Only override if defaultVaultPlan produced an fs.find_in plan
+      // (i.e. our local-fs branch fired). Avoids replacing with the
+      // research.deep default.
+      if (repaired.steps[0]?.tool === "fs.find_in") {
+        push(`Plan repair: rerouting from web/vault search to local-PC search — task mentions ${localFsTaskHint[1]}.`);
+        p = repaired;
+      }
+    }
   }
   push(`Plan ready: ${p.steps.length} step${p.steps.length === 1 ? "" : "s"}${p.summary ? ` — ${p.summary}` : ""}.`);
   onProgress?.({ phase: "executing", plan: p, runs: [] });
@@ -1292,9 +1441,17 @@ export function extractTopic(task: string): string {
 //   • "tell me about X" / "explain X" / "what is X" → research.deep
 //   • Bare vault-path mention ("read 2-Permanent/x.md") → vault.read
 //   • "search the web for X" → research.deep
-export function heuristicPlan(task: string): Plan | null {
+export function heuristicPlan(task: string, opts: { hasAttachments?: boolean } = {}): Plan | null {
   const t = task.trim();
   if (!t) return null;
+  // When attachments are present, suppress the shape shortcuts that
+  // funnel summarize/explain/research onto vault.search or research.deep.
+  // The actual source material is already inline as an "Attached documents"
+  // block — the LLM planner (or empty-plan + direct synth) handles it
+  // correctly. Without this gate "summarize this" on a 2 KB attached doc
+  // planned `research.deep` for the literal word "this" and produced a
+  // dictionary definition.
+  const hasAttachments = opts.hasAttachments === true;
 
   // Import-to-vault: "move/copy/import/save/file/add X to my vault" /
   // "save X to my knowledge" / "put X in neuroworks". Chains fs.find_in
@@ -1685,7 +1842,7 @@ export function heuristicPlan(task: string): Plan | null {
   // virus'" came from. Longer / open-ended explanations keep depth=3 and
   // still capture, because they tend to be non-trivial research notes.
   const aboutMatch = t.match(/^\s*(?:tell\s+me\s+about|explain|what(?:'?s|\s+is|\s+are|\s+does)|describe|how\s+does|how\s+do|summari[sz]e|recap|brief\s+me\s+on|tldr)\s+(.+?)[?.!]?\s*$/i);
-  if (aboutMatch && aboutMatch[1].length >= 2 && aboutMatch[1].length <= 80) {
+  if (aboutMatch && !hasAttachments && aboutMatch[1].length >= 2 && aboutMatch[1].length <= 80) {
     const query = aboutMatch[1].trim();
     const isQuickLookup = query.length <= 40;
     const depth = isQuickLookup ? 2 : 3;
@@ -1829,12 +1986,158 @@ export function heuristicPlan(task: string): Plan | null {
   return null;
 }
 
-function defaultVaultPlan(task: string): Plan {
+// Pull the tightest plausible topic from a free-form task. Used to seed
+// fs.find_in's needle when the task is "look through my downloads and
+// summarize what you see about AIIA" — the raw noise-strip pipeline leaves
+// too many tokens, every one of which must match a filename for fs.find_in
+// to hit. Returns the first hit from a priority ladder, or null if nothing
+// strong stands out (caller falls back to the noise-strip pipeline).
+function extractAnchorTopic(taskHead: string): string | null {
+  // 1) Quoted phrase ("the foo bar doc") — most reliable.
+  const quoted = taskHead.match(/["'`]([^"'`\n]{2,80})["'`]/);
+  if (quoted) {
+    const q = quoted[1].trim().replace(/\s+/g, " ");
+    if (q.length >= 2) return q;
+  }
+  // 2) "about / regarding / concerning / related to / on the topic of X".
+  //    We stop the capture at conjunctions ("and what they do") and
+  //    punctuation so "about AIIA and what they do" gives just "AIIA".
+  const aboutMatch = taskHead.match(
+    /\b(?:about|regarding|concerning|related\s+to|on\s+the\s+(?:topic|subject)\s+of)\s+(?:an?\s+|the\s+)?([A-Za-z0-9][A-Za-z0-9 _\-]{1,60}?)(?=\s+(?:and|or|then|to|in|on|for|so|but|with|that|which|who|whose)\b|[.,;:?!]|$)/i,
+  );
+  if (aboutMatch) {
+    let candidate = aboutMatch[1].trim().replace(/\s*[\/|]\s*/g, " ");
+    // Dedupe ("AIIA AIIA" → "AIIA") and drop pure-noise tokens.
+    const STOP = new Set(["a", "an", "the", "what", "they", "do", "does", "is", "are", "was", "were"]);
+    const seen = new Set<string>();
+    const tokens = candidate.split(/\s+/).filter(t => {
+      const k = t.toLowerCase();
+      if (STOP.has(k)) return false;
+      if (seen.has(k)) return false;
+      seen.add(k);
+      return true;
+    });
+    candidate = tokens.join(" ").trim();
+    if (candidate.length >= 2 && candidate.length <= 80) return candidate;
+  }
+  // 3) "called / named / titled X" — explicit naming.
+  const calledMatch = taskHead.match(
+    /\b(?:called|named|titled|labelled|labeled)\s+(?:an?\s+|the\s+)?([A-Za-z0-9][A-Za-z0-9 _\-\.]{1,60}?)(?=\s+(?:and|or|then|to|in|on|for|so|but|with)\b|[.,;:?!]|$)/i,
+  );
+  if (calledMatch) {
+    const c = calledMatch[1].trim();
+    if (c.length >= 2) return c;
+  }
+  // 4) ALL-CAPS acronyms (2–6 chars). Common topic shape in this corpus
+  //    (AIIA, ZB, AFC, ADRS, POSB…). Skip generic tech acronyms.
+  const GENERIC = new Set([
+    "I", "PC", "AI", "ID", "URL", "API", "PDF", "DOC", "DOCX", "OK", "TL", "DR",
+    "FYI", "ASAP", "EOD", "EOM", "USA", "UK", "EU",
+  ]);
+  const acronyms: string[] = [];
+  const seen = new Set<string>();
+  for (const m of taskHead.matchAll(/\b([A-Z]{2,6})\b/g)) {
+    const a = m[1];
+    if (GENERIC.has(a) || seen.has(a)) continue;
+    seen.add(a);
+    acronyms.push(a);
+  }
+  if (acronyms.length >= 1 && acronyms.length <= 3) return acronyms.join(" ");
+  return null;
+}
+
+function defaultVaultPlan(task: string, opts: { hasAttachments?: boolean } = {}): Plan {
+  // Attachments present → don't research.deep on a pronoun. The user
+  // already pasted the source material into the task; the synth has it
+  // inline as an "Attached documents" block and will produce an answer
+  // from that content directly. An empty plan is the right answer.
+  if (opts.hasAttachments === true) {
+    return { steps: [], summary: "Direct synth from attached documents", waves: [] };
+  }
   // Last-line-of-defense URL detection — if the bare task is "fetch <url>"
   // or just a URL, route to web.scrape instead of pushing the URL through
   // research.deep as a search query (which would search for the URL string,
   // not fetch it, wasting minutes for zero value). The SSRF gate inside
   // web.scrape will reject dangerous targets in milliseconds.
+  // LOCAL-FS detection — when the task is about a file that lives on the
+  // user's PC ("in my downloads", "on my desktop", "from my documents",
+  // "the file called X on my computer"), research.deep cannot answer it.
+  // It searches the web and the vault, never the operator's Downloads /
+  // Desktop / Documents. If the planner didn't reach for fs.find_in, do
+  // it here so the default plan can still resolve a local file request.
+  const localFsHint = task.match(/\b(downloads?|desktop|documents?|my\s+pc|my\s+computer|on\s+disk|local\s+file|file\s+(called|named))\b/i);
+  if (localFsHint) {
+    const folderWord = (localFsHint[1] ?? "").toLowerCase();
+    const folder = folderWord.startsWith("download") ? "downloads"
+      : folderWord.startsWith("desktop")  ? "desktop"
+      : folderWord.startsWith("document") ? "documents"
+      :                                     "all";
+    // Trim the task to the first paragraph/sentence — governance prefixes
+    // ("Alignment check — required before responding...") and chat-history
+    // boilerplate can pollute a multi-line task. The user's actual ask
+    // sits in the first chunk, before the first blank-line break.
+    const taskHead = task.split(/\n\s*\n/)[0].split("\n")[0].slice(0, 300);
+    // Tightest topic first: prefer a quoted phrase, an "about/regarding X"
+    // anchor, a "called/named X" anchor, or an ALL-CAPS acronym. Without this,
+    // open-ended asks like "look through my downloads and summarize what you
+    // see about AIIA" leave the noise-strip pipeline below with a needle like
+    // "look through and what you see about aiia AIIA and what they do" — every
+    // token must appear in the filename for fs.find_in to hit, so 0 matches.
+    // Using just "AIIA" recovers the obvious match set.
+    const anchorTopic = extractAnchorTopic(taskHead);
+    // Pull a likely filename phrase from the head. Common shapes:
+    //   "find X in my downloads", "the doc called X", "search for X on my PC".
+    let needle = anchorTopic ?? taskHead
+      .replace(/\b(please\s+)?(find|search\s+for|look\s+(for|in|up)|check|read|open|summari[sz]e|locate|grab|fetch|browse|view|show)\b/gi, " ")
+      // Strip "<preposition> my <folder>" — covers "in/on/from/at/inside/
+      // within/under/into my downloads". Without this, "on" leaks into the
+      // needle and "Master Tender on" never matches "Master Tender".
+      .replace(/\b(?:in|on|from|at|inside|within|under|into|to|via)\s+my\s+(downloads?|desktop|documents?|pc|computer)\b/gi, " ")
+      .replace(/\bmy\s+(downloads?|desktop|documents?|pc|computer)\b/gi, " ")
+      .replace(/\b(file|doc|document|pdf|docx?|xlsx?|pptx?)\s+(called|named)\b/gi, " ")
+      .replace(/\bcalled\b/gi, " ")
+      .replace(/\band\s+(summari[sz]e|read|review|analy[sz]e|tell\s+me\s+about|describe)\b.*$/gi, " ") // drop "and summarize the document" tail
+      .replace(/[\"'\.\?\!\:,]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    // Strip trailing fluff like "thanks", "for me", common verbs left over.
+    // Also strip dangling single prepositions/articles left at the edges.
+    needle = needle
+      .replace(/\b(for\s+me|please|thanks?|now|the\s+document)\b/gi, " ")
+      .replace(/^(?:the|a|an|on|in|of|for|with|and|or|to|from|at)\s+/i, "")
+      .replace(/\s+(?:the|a|an|on|in|of|for|with|and|or|to|from|at)$/i, "")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (needle.length >= 2 && needle.length <= 120) {
+      const wantsContent = /\b(summari[sz]e|summary|read|open|extract|analy[sz]e|tell\s+me\s+about|what.+(says?|contains?)|review)\b/i.test(task);
+      const steps: PlanStep[] = [
+        {
+          tool: "fs.find_in",
+          args: { folder, name: needle },
+          rationale: `default fallback: task mentions ${folderWord} — search the user's PC instead of the web`,
+          label: humanStepLabel("fs.find_in", { folder, name: needle }),
+        },
+      ];
+      const waves: number[][] = [[0]];
+      if (wantsContent) {
+        // Chain a read + a synth so the user gets the actual content,
+        // not just "I found the file, please paste the text" — which is
+        // the failure mode when the planner over-stops at fs.find_in.
+        steps.push({
+          tool: "fs.read_external",
+          args: { path: "$step_0.matches.0.path" },
+          rationale: "task asks for content — read the top match",
+          label: humanStepLabel("fs.read_external", { path: needle }),
+        });
+        waves.push([1]);
+      }
+      return {
+        steps,
+        summary: wantsContent ? `Find "${needle}" in ${folder}, read it, summarise` : `Find "${needle}" in ${folder}`,
+        waves,
+      };
+    }
+  }
   const urlMatch = task.trim().match(/^\s*(?:(?:scrape|browse|open|fetch|read|visit|get)\s+)?(https?:\/\/\S+)\s*$/i);
   if (urlMatch) {
     const url = urlMatch[1];
@@ -1883,6 +2186,59 @@ async function synthesize(
   const succeeded = runs.filter(r => r.ok);
   const failed = runs.filter(r => !r.ok);
   if (succeeded.length === 0) {
+    // ATTACHMENT-ONLY SYNTH — when the plan was intentionally empty
+    // because attachments carry the source material, there are no runs
+    // to grade and humanizeAllFail's "nothing executed" message is the
+    // wrong response. Route the task (which contains the attached doc
+    // inline) through the direct synth path. The synth model reads the
+    // task body, sees the attached content, and answers from it.
+    const hasAttachments = /\nAttached documents \(user uploaded as context/.test(task);
+    const planWasEmptyByDesign = (p.steps?.length ?? 0) === 0 && hasAttachments;
+    if (planWasEmptyByDesign) {
+      opts.push?.("Synthesising directly from the attached document(s).");
+      // Reuse the polished-direct path. The task already has the deliverable
+      // shape hint + the attachment block; the synth model reads the
+      // attachment as primary evidence and produces the requested transform.
+      try {
+        const { POLISHED_DIRECT } = await import("./agent-prompts.js");
+        const system = personaSystemSuffix
+          ? `${POLISHED_DIRECT}\n\n${personaSystemSuffix}`
+          : POLISHED_DIRECT;
+        const answer = await ollamaGenerate(task, system, { profile: "synthesis", complexity: "high", maxTokens: 1024 } as any);
+        onPartial?.(answer.trim());
+        return { answer: answer.trim() };
+      } catch (e: any) {
+        opts.push?.(`Direct synth failed: ${String(e?.message ?? e).slice(0, 120)}`);
+        // Fall through to humanizeAllFail (empty failed[] → bare prompt).
+      }
+    }
+    // KNOWLEDGE-DELIVERABLE SYNTH — when the plan is intentionally empty
+    // because this is a creative / procedural / code deliverable that draws on
+    // the persona's own knowledge (no research to run, no attachments), the
+    // planner routed here on purpose. humanizeAllFail's "nothing executed"
+    // message is wrong. Produce the deliverable via the SYNTH prompt (its
+    // citation rule is inert with no evidence catalog) at a generous budget so
+    // a runbook or announcement isn't truncated.
+    const bareForClass = parseUserRequestFromTask(task);
+    const dClass = classifyDeliverable(bareForClass);
+    const knowledgeDeliverable = (p.steps?.length ?? 0) === 0 && !hasAttachments
+      && (dClass === "creative" || dClass === "procedural" || dClass === "code");
+    if (knowledgeDeliverable) {
+      opts.push?.(`Drafting the ${dClass} deliverable from professional knowledge.`);
+      try {
+        const system = personaSystemSuffix
+          ? `${POLISHED_SYNTH}\n\n${personaSystemSuffix}`
+          : POLISHED_SYNTH;
+        const answer = await ollamaGenerate(task, system, { profile: "synthesis", complexity: "high", maxTokens: 1024 } as any);
+        if (answer.trim().length > 0) {
+          onPartial?.(answer.trim());
+          return { answer: answer.trim() };
+        }
+      } catch (e: any) {
+        opts.push?.(`Knowledge-deliverable synth failed: ${String(e?.message ?? e).slice(0, 120)}`);
+        // Fall through to humanizeAllFail.
+      }
+    }
     return { answer: humanizeAllFail(task, failed) };
   }
 
@@ -2197,17 +2553,22 @@ function humanizeAllFail(task: string, failed: StepRun[]): string {
     return `I'm not authorised to access that resource — looks like the token / key is missing, expired, or doesn't have permission. Check the relevant entry in your \`.env\` (GitHub PAT, API keys, etc.) and try again.`;
   }
 
-  // 5a. VAULT-WRITE ENOENT — the vault drive isn't mounted (Windows D:
-  //    unplugged, Linux mount missing, path renamed). Without this branch
-  //    the customer got the generic "couldn't find what you were pointing
-  //    me at" message, which sounds like a SEARCH miss but actually means
-  //    "your vault disk isn't reachable so I can't WRITE to it".
+  // 5a. VAULT UNREACHABLE — the vault root itself doesn't exist. Hits
+  //    EVERY vault.* tool now that searchVault/listVault/readVaultFile
+  //    throw VaultUnreachable on a missing root. Without this branch the
+  //    user would see either "No matches" (if it's a read tool) or a
+  //    generic mkdir-ENOENT (if it's a write). Either way, the real
+  //    cause is "your vault drive isn't mounted" and the fix path is
+  //    the same.
+  const isVaultTool = /^vault\./.test(tool);
   const isVaultWriteTool = /^(?:vault\.(?:write|append|create_zettel|import_binary)|fs\.(?:write|append|copy))/.test(tool);
   const isMkdirError = /\b(?:mkdir|ENOENT.*(?:mkdir|writeFile))\b/i.test(err);
-  if ((isVaultWriteTool || isMkdirError) && /\bENOENT\b/i.test(err)) {
+  const isVaultUnreachable = /VaultUnreachable|vault path .* is unreachable|vault.*unreachable/i.test(err);
+  if (isVaultUnreachable || ((isVaultTool || isVaultWriteTool || isMkdirError) && /\bENOENT\b/i.test(err))) {
     const driveMatch = err.match(/['"]?([A-Z]:[\\/][^'"\n)]+|\/[\w/.-]+)['"]?/);
     const where = driveMatch ? ` (path: \`${driveMatch[1].slice(0, 80)}\`)` : "";
-    return `I can't write to your vault${where} — the configured path doesn't resolve on this machine. Common causes: the drive is unmounted (e.g. D: was unplugged on Windows), the folder was renamed, or VAULT_PATH in \`.env\` doesn't match your actual vault. Mount the drive (or fix the path) and try again, or rephrase the task so I produce the answer inline without writing to disk.`;
+    const verb = isVaultWriteTool || isMkdirError ? "write to" : "reach";
+    return `I can't ${verb} your vault${where} — the configured path doesn't resolve on this machine. Common causes: the drive is unmounted (e.g. D: was unplugged on Windows), the folder was renamed, or VAULT_PATH in \`.env\` doesn't match your actual vault. Mount the drive (or fix the path) and try again, or rephrase the task so I produce the answer inline without touching disk.`;
   }
 
   // 5. NOT FOUND — file or repo doesn't exist where I looked.
@@ -2370,14 +2731,53 @@ function resolveValue(v: any, runs: StepRun[]): any {
     const path = whole[2] ?? "";
     const base = runs[idx]?.result;
     if (base === undefined) return v;
-    return path ? deepGet(base, path) : base;
+    const direct = path ? deepGet(base, path) : base;
+    if (direct !== undefined) return direct;
+    // Planner-shape-error fallback. The planner sometimes writes
+    // "$step_0.path" or "$step_0.content" when the actual result is a
+    // collection-shaped object (matches[], results[], etc.). Without this
+    // fallback the substitution returns undefined and the next step gets
+    // an empty arg (e.g. fs.read_external sees path="" and errors).
+    // We try a small set of common shapes — first match wins.
+    if (path && base && typeof base === "object") {
+      const tail = path.replace(/^\./, "");
+      const candidates = [
+        ["matches", 0, tail],
+        ["results", 0, tail],
+        ["matches", 0],
+        ["results", 0],
+      ];
+      for (const c of candidates) {
+        let cur: any = base;
+        for (const seg of c) cur = cur?.[seg as any];
+        if (cur !== undefined) return cur;
+      }
+      // Top-level extraction: fs.find_in's first match's `path` is the most
+      // common target — if the planner asked for ANYTHING that doesn't exist
+      // and the base has a non-empty matches[0], hand back matches[0].path
+      // as the most useful default (works for fs.read_external chains).
+      const firstMatch = (base as any).matches?.[0];
+      if (firstMatch && typeof firstMatch === "object") {
+        const guess = firstMatch[tail] ?? firstMatch.path;
+        if (guess !== undefined) return guess;
+      }
+    }
+    return v;
   }
   // Embedded $step_N inside a longer string
   return v.replace(/\$step_(\d+)(\.[a-zA-Z0-9_.-]+)?/g, (_, n, p) => {
     const base = runs[Number(n)]?.result;
     if (base === undefined) return "";
     const target = p ? deepGet(base, p) : base;
-    return typeof target === "string" ? target : JSON.stringify(target).slice(0, 4000);
+    // Guard the undefined case explicitly. `JSON.stringify(undefined)`
+    // returns the JS value `undefined`, not the string "undefined", and
+    // calling `.slice()` on it throws "Cannot read properties of undefined
+    // (reading 'slice')". That was the recurring general-task crash where
+    // a plan referenced `$step_N.missingField` (B4 in the bug review).
+    if (target === undefined) return "";
+    if (typeof target === "string") return target;
+    const serialized = JSON.stringify(target);
+    return serialized === undefined ? "" : serialized.slice(0, 4000);
   });
 }
 

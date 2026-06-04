@@ -35,7 +35,7 @@ Competitor data goes stale within weeks. Pricing pages change, features ship, fu
 
 **Date:** <YYYY-MM-DD> · **Author:** <name>
 
-## TL;DR
+## Bottom line
 <3-5 sentences. Where we sit, where we win, where the real threat is, what to watch.>
 
 ## The competitive set

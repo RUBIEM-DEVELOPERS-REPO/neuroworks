@@ -125,14 +125,44 @@ export async function extractDocText(absPath: string): Promise<ExtractResult> {
 // PDF — pdf-parse-fork loads each page's text content. We DON'T preserve
 // layout; consuming the prose is what matters for the agent. Inline image
 // captions, tables, and form fields come through as best-effort plaintext.
+//
+// Auto-OCR fallback: when pdf-parse returns near-empty text (image-only
+// PDFs — scans, photos of documents), we transparently invoke the OCR
+// layer so the agent gets the actual content instead of an empty string.
+// Opt out with CLAWBOT_OCR_AUTO=0 or by passing an image-only PDF larger
+// than the OCR cap (handled inside ocrFile).
+const OCR_AUTO = process.env.CLAWBOT_OCR_AUTO !== "0";
+const OCR_MIN_TEXT_THRESHOLD = 100; // chars below which we suspect image-only
 async function extractPdf(path: string, meta: { ext: string; name: string; bytes: number; fromCache: boolean }): Promise<ExtractResult> {
   try {
     const mod: any = await import("pdf-parse-fork");
     const parser = mod.default ?? mod;
     const buf = readFileSync(path);
     const out = await parser(buf, { max: 200 }); // cap at 200 pages
-    const { text, truncated } = clampText(String(out?.text ?? "").trim());
-    return { ...meta, text, kind: "pdf", pages: out?.numpages ?? undefined, truncated };
+    const rawText = String(out?.text ?? "").trim();
+    const pages = out?.numpages ?? undefined;
+    // Image-only PDF? Fall back to OCR if enabled.
+    if (OCR_AUTO && rawText.length < OCR_MIN_TEXT_THRESHOLD) {
+      try {
+        const { ocrFile } = await import("./ocr.js");
+        const ocr = await ocrFile(path, "auto");
+        const { text: clamped, truncated } = clampText(ocr.text);
+        return {
+          ...meta,
+          text: clamped,
+          kind: "pdf",
+          pages,
+          truncated,
+        };
+      } catch (ocrErr: any) {
+        // OCR failed — return the original (empty) text with a hint in the
+        // text body so the synth model knows what happened.
+        const note = `(no text extractable from this PDF; OCR fallback failed: ${String(ocrErr?.message ?? ocrErr).slice(0, 200)})`;
+        return { ...meta, text: rawText.length > 0 ? rawText : note, kind: "pdf", pages, truncated: false };
+      }
+    }
+    const { text, truncated } = clampText(rawText);
+    return { ...meta, text, kind: "pdf", pages, truncated };
   } catch (e: any) {
     return { ...meta, text: `(PDF extraction failed: ${String(e?.message ?? e).slice(0, 200)})`, kind: "pdf" };
   }

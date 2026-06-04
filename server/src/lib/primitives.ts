@@ -8,9 +8,10 @@ import { extractDocText, extractDocsParallel } from "./doc-extractor.js";
 import { listOwnedRepos, recentCommits, openPRs, openIssues, readme, octokit } from "./github.js";
 import { delegateToBestPeer, reviewWithPeer } from "./peers.js";
 import { scanForSecurityRisks, redactHighSeverity, type SecurityKind } from "./security.js";
-import { scrape } from "./browser.js";
+import { scrape, interact, renderMarkdownToPdf, type InteractAction } from "./browser.js";
 import { enqueueVaultCommit } from "./commit-queue.js";
 import { searchWeb, smartFetch } from "./web-client.js";
+import { classifyDeliverable } from "./deliverable.js";
 
 export type ArgSpec = { name: string; type: "string" | "number" | "boolean"; required: boolean; description: string };
 
@@ -421,6 +422,26 @@ export const primitives: Primitive[] = [
     },
   },
   {
+    name: "web.interact",
+    description: "Multi-step headless-browser session. Navigate, fill form fields, click, wait, take screenshots, extract text — up to 8 steps per call, 90s total wall budget. Use for tasks that need real browser actions (a search box + submit, a multi-step wizard, a JS-only page that only renders after a button click). Each step is structured so the planner never has to generate Playwright code.",
+    readonly: false,
+    args: [
+      { name: "url", type: "string", required: true, description: "Initial URL to navigate to" },
+      { name: "steps", type: "string", required: true, description: "JSON array (or already-parsed array) of step actions. Each is { type: 'navigate'|'fill'|'click'|'wait_for'|'wait_ms'|'extract'|'screenshot', ...params }. navigate {url}, fill {selector, value}, click {selector}, wait_for {selector, timeoutMs?}, wait_ms {ms}, extract {selector?}, screenshot {name?}." },
+      { name: "totalTimeoutMs", type: "number", required: false, description: "Overall wall budget for the whole session (default 90000, max 120000)" },
+    ],
+    handler: async (args) => {
+      let rawSteps: unknown = args.steps;
+      if (typeof rawSteps === "string") { try { rawSteps = JSON.parse(rawSteps); } catch { rawSteps = []; } }
+      const steps: InteractAction[] = Array.isArray(rawSteps) ? (rawSteps as InteractAction[]) : [];
+      return await interact({
+        startUrl: String(args.url),
+        steps,
+        totalTimeoutMs: args.totalTimeoutMs ? Number(args.totalTimeoutMs) : undefined,
+      });
+    },
+  },
+  {
     name: "web.firecrawl",
     description: "Scrape a URL via the Firecrawl hosted service (returns clean markdown of the main content). Use this when a site is gated behind Cloudflare / anti-bot challenges that defeat local Playwright, or when you need consistent main-content extraction without HTML parsing. Requires FIRECRAWL_API_KEY in .env — refuses with a clear message when missing.",
     readonly: true,
@@ -537,7 +558,31 @@ export const primitives: Primitive[] = [
         );
       }
       const st = statSync(full);
-      if (!st.isFile()) throw new Error(`path is a directory, not a file: ${full}. Use fs.list_external or vault.search to enumerate.`);
+      if (!st.isFile()) {
+        // Directory passed in — give back a structured listing instead of
+        // erroring. The synth model can then report "the folder contains X,
+        // Y, Z" rather than the chain dead-ending. We surface the doc files
+        // first (PDF/DOCX/MD/...), then everything else.
+        const DOC_EXTS_R = new Set([".pdf", ".docx", ".doc", ".xlsx", ".xls", ".pptx", ".ppt", ".md", ".markdown", ".txt", ".rtf", ".odt", ".ods", ".odp", ".csv"]);
+        const entries = readdirSync(full, { withFileTypes: true });
+        const docs: { name: string; path: string; ext: string }[] = [];
+        const other: { name: string; path: string; ext: string }[] = [];
+        for (const e of entries) {
+          if (e.name.startsWith(".")) continue;
+          const inner = resolve(full, e.name);
+          const innerExt = extname(e.name).toLowerCase();
+          (DOC_EXTS_R.has(innerExt) ? docs : other).push({ name: e.name, path: inner, ext: innerExt });
+        }
+        return {
+          content: `Directory listing for ${full}:\n\nDocuments (${docs.length}):\n${docs.map(d => `- ${d.name}`).join("\n")}\n\nOther entries (${other.length}):\n${other.slice(0, 20).map(d => `- ${d.name}`).join("\n")}\n\nHint: call fs.read_external again with one of the document paths above (e.g. "${docs[0]?.path ?? other[0]?.path ?? full}") to read its content.`,
+          kind: "directory",
+          isDirectory: true,
+          entries: [...docs, ...other.slice(0, 20)],
+          documentCount: docs.length,
+          resolvedFrom: raw,
+          resolvedTo: full,
+        };
+      }
       // Binary docs (PDF/DOCX/XLSX) get extracted via the doc-extractor so
       // the agent can read what's actually inside, not just see "Untitled.docx"
       // as a filename. Plain text follows the original 200 KB cap to avoid
@@ -615,12 +660,49 @@ export const primitives: Primitive[] = [
         throw new Error(`fs.find_in: no folders exist at ${missingRoots.map(r => `"${r}"`).join(", ")} (resolved from "${folderArg}").`);
       }
       const livingRoots = roots.filter(r => existsSync(r));
-      const needle = nameArg.toLowerCase();
+      // Unicode normalisation — when the planner copies the user's task
+      // verbatim, the needle can contain non-breaking hyphens (U+2011),
+      // en/em dashes (U+2013/2014), smart quotes (U+2018/U+2019/U+201C/
+      // U+201D), nbsp (U+00A0), and ellipsis (U+2026). The filename on
+      // disk uses plain ASCII, so any of those characters in the needle
+      // would block every token from matching. Convert to ASCII first.
+      function asciifyForSearch(s: string): string {
+        return s
+          .replace(/[‐-―−]/g, "-")    // various dashes → ASCII hyphen
+          .replace(/[‘’‚‛]/g, "'") // smart single quotes → '
+          .replace(/[“”„‟]/g, '"') // smart double quotes → "
+          .replace(/ /g, " ")                    // nbsp → space
+          .replace(/…/g, "...");                  // ellipsis → ...
+      }
+      const needle = asciifyForSearch(nameArg).toLowerCase();
       // Allow simple wildcard support: spaces or hyphens are interchangeable
       // ("AIIA Reference Letter" matches "AIIA-Reference-Letter.pdf"), and
       // multiple needle tokens all need to be present somewhere in the name.
-      const needleTokens = needle.replace(/[-_\s]+/g, " ").split(" ").filter(Boolean);
-      type Hit = { path: string; name: string; ext: string; size: number; modified: string; folder: string };
+      // Strip common noise words so a planner-generated needle like "the
+      // CUT student offer letter" still finds "CUT_student_offer_letter.docx"
+      // — without this the "the" token blocks every match.
+      const NOISE_WORDS = new Set([
+        // articles / prepositions / conjunctions
+        "the", "a", "an", "of", "for", "with", "and", "or", "to", "in",
+        "from", "on", "at", "by", "as", "into", "about",
+        // file-meta words
+        "called", "named", "titled", "labelled", "labeled",
+        "file", "doc", "document", "pdf", "docx", "xlsx", "pptx", "txt", "markdown", "md",
+        // pronouns / fillers
+        "my", "your", "this", "that", "those", "these", "any", "some",
+        "please", "kindly", "just", "also", "then", "now",
+        // action verbs the planner often drags into the needle
+        "find", "search", "look", "locate", "fetch", "grab", "get", "show",
+        "list", "check", "view", "browse", "open", "read", "give", "send",
+        "share", "summarize", "summarise", "summary", "summarized", "summarise",
+        "review", "scan", "tell", "describe", "analyze", "analyse",
+      ]);
+      const rawTokens = needle.replace(/[-_\s]+/g, " ").split(" ").filter(Boolean);
+      const filtered = rawTokens.filter(t => !NOISE_WORDS.has(t));
+      // If filtering removed EVERY token (e.g. needle was "the doc"), keep
+      // the raw tokens — better to over-match than to silently match all.
+      const needleTokens = filtered.length > 0 ? filtered : rawTokens;
+      type Hit = { path: string; name: string; ext: string; size: number; modified: string; folder: string; type?: "file" | "dir"; matchedFolder?: string };
       // Per-root listing cache. Many calls in a row hit the same root
       // ("look in my downloads for X", then "ok now find Y", then "find
       // Z") and re-walking Downloads (10k+ files for some users) on
@@ -642,7 +724,26 @@ export const primitives: Primitive[] = [
           for (const e of entries) {
             if (e.name.startsWith(".")) continue; // skip hidden / dotfiles
             const full = join(dir, e.name);
-            if (e.isDirectory()) { walk(full, d + 1); continue; }
+            if (e.isDirectory()) {
+              // Directories are now candidate matches too — "summarize
+              // Master Tender on my desktop" wants the folder, not a file.
+              // We still recurse so files inside also become candidates.
+              let dst: any;
+              try { dst = statSync(full); } catch { /* tolerate */ }
+              if (dst) {
+                collected.push({
+                  path: full,
+                  name: e.name,
+                  ext: "",
+                  size: 0,
+                  modified: dst.mtime.toISOString(),
+                  folder: dir,
+                  type: "dir",
+                });
+              }
+              walk(full, d + 1);
+              continue;
+            }
             let st: any;
             try { st = statSync(full); } catch { continue; }
             if (!st.isFile()) continue;
@@ -653,6 +754,7 @@ export const primitives: Primitive[] = [
               size: st.size,
               modified: st.mtime.toISOString(),
               folder: dir,
+              type: "file",
             });
           }
         }
@@ -663,11 +765,132 @@ export const primitives: Primitive[] = [
       // Filter by needle tokens against the cached listing. Matching
       // logic preserved verbatim: every token must appear in the
       // basename with separators normalised to spaces.
-      const hits: Hit[] = [];
-      for (const h of allFiles) {
-        if (hits.length >= limit) break;
-        const normalised = h.name.toLowerCase().replace(/[-_]+/g, " ");
-        if (needleTokens.every(t => normalised.includes(t))) hits.push(h);
+      function filterHits(files: Hit[]): Hit[] {
+        const out: Hit[] = [];
+        for (const h of files) {
+          if (out.length >= limit) break;
+          const normalised = asciifyForSearch(h.name).toLowerCase().replace(/[-_]+/g, " ");
+          if (needleTokens.every(t => normalised.includes(t))) out.push(h);
+        }
+        return out;
+      }
+      // Fuzzy fallback — when strict ALL-tokens match yields nothing AND
+      // the needle has 4+ content tokens, accept filenames where ≥70% of
+      // the tokens match. Guards against the planner sneaking one stray
+      // action-verb into a otherwise-good needle (e.g. "summarize CUT
+      // student offer letter" → "summarize" missing from filename, but
+      // the other 4 tokens hit). Conservative threshold + token-count
+      // floor stops it firing on short needles where 1/2 match is noise.
+      function fuzzyHits(files: Hit[], minMatch: number): Hit[] {
+        const scored: { h: Hit; score: number }[] = [];
+        for (const h of files) {
+          const normalised = asciifyForSearch(h.name).toLowerCase().replace(/[-_]+/g, " ");
+          let matched = 0;
+          for (const t of needleTokens) if (normalised.includes(t)) matched += 1;
+          if (matched >= minMatch) scored.push({ h, score: matched });
+        }
+        scored.sort((a, b) => b.score - a.score);
+        return scored.slice(0, limit).map(s => s.h);
+      }
+      let hits = filterHits(allFiles);
+      if (hits.length === 0 && needleTokens.length >= 4) {
+        const minMatch = Math.max(2, Math.ceil(needleTokens.length * 0.7));
+        hits = fuzzyHits(allFiles, minMatch);
+      }
+      // Directory-aware expansion. If the strongest matches are DIRECTORIES
+      // (e.g. "Master Tender" is a folder, not a file), expand each into the
+      // documents it contains so a downstream fs.read_external chain hits an
+      // actual document. The directory itself stays in the results as the
+      // FIRST entry so the agent can still report what folder it found. We
+      // expand at most 2 dirs and 10 inner docs to keep the response bounded.
+      const DOC_EXTS = new Set([".pdf", ".docx", ".doc", ".xlsx", ".xls", ".pptx", ".ppt", ".md", ".markdown", ".txt", ".rtf", ".odt", ".ods", ".odp", ".csv"]);
+      const dirHits = hits.filter(h => h.type === "dir").slice(0, 2);
+      if (dirHits.length > 0) {
+        const expanded: Hit[] = [];
+        for (const dh of dirHits) {
+          try {
+            const inner = readdirSync(dh.path, { withFileTypes: true });
+            const docs: Hit[] = [];
+            for (const e of inner) {
+              if (e.name.startsWith(".")) continue;
+              if (!e.isFile()) continue;
+              const innerExt = extname(e.name).toLowerCase();
+              if (!DOC_EXTS.has(innerExt)) continue;
+              const innerFull = join(dh.path, e.name);
+              let innerSt: any;
+              try { innerSt = statSync(innerFull); } catch { continue; }
+              docs.push({
+                path: innerFull,
+                name: e.name,
+                ext: innerExt,
+                size: innerSt.size,
+                modified: innerSt.mtime.toISOString(),
+                folder: dh.path,
+                type: "file",
+                matchedFolder: dh.name,
+              });
+            }
+            docs.sort((a, b) => (a.modified < b.modified ? 1 : -1));
+            expanded.push(...docs.slice(0, 10));
+          } catch { /* tolerate per-dir read failure */ }
+        }
+        // Files inside matched folders go BEFORE the folder itself so
+        // fs.read_external picks a real document via matches[0].path.
+        const fileHits = hits.filter(h => h.type !== "dir");
+        hits = [...expanded, ...fileHits, ...dirHits].slice(0, limit);
+      }
+      // Zero-hit safety net — Windows NTFS doesn't always bump the
+      // parent folder's mtime when a file lands inside it, so the cache
+      // freshness check can miss a newly-downloaded file. If the search
+      // returned NOTHING and we were reading from cache, re-walk once
+      // (uncached) to make sure the absence is real.
+      if (hits.length === 0 && cached) {
+        const fresh: Hit[] = [];
+        function walkFresh(dir: string, d: number) {
+          if (d > depth) return;
+          let entries: any[] = [];
+          try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return; }
+          for (const e of entries) {
+            if (e.name.startsWith(".")) continue;
+            const full = join(dir, e.name);
+            if (e.isDirectory()) {
+              let dst: any;
+              try { dst = statSync(full); } catch { /* tolerate */ }
+              if (dst) {
+                fresh.push({
+                  path: full,
+                  name: e.name,
+                  ext: "",
+                  size: 0,
+                  modified: dst.mtime.toISOString(),
+                  folder: dir,
+                  type: "dir",
+                });
+              }
+              walkFresh(full, d + 1);
+              continue;
+            }
+            let st: any;
+            try { st = statSync(full); } catch { continue; }
+            if (!st.isFile()) continue;
+            fresh.push({
+              path: full,
+              name: e.name,
+              ext: extname(e.name).toLowerCase(),
+              size: st.size,
+              modified: st.mtime.toISOString(),
+              folder: dir,
+              type: "file",
+            });
+          }
+        }
+        for (const r of livingRoots) walkFresh(r, 1);
+        cacheListing(livingRoots, depth, fresh);
+        hits = filterHits(fresh);
+        if (hits.length === 0 && needleTokens.length >= 4) {
+          const minMatch = Math.max(2, Math.ceil(needleTokens.length * 0.7));
+          hits = fuzzyHits(fresh, minMatch);
+        }
       }
       // Newest first — "the X I just downloaded" is the most likely match.
       hits.sort((a, b) => (a.modified < b.modified ? 1 : -1));
@@ -688,7 +911,7 @@ export const primitives: Primitive[] = [
     readonly: false,
     args: [
       { name: "path", type: "string", required: true, description: "Absolute path to the source file on the user's PC (chain from $step_0.matches.0.path after fs.find_in)" },
-      { name: "vaultFolder", type: "string", required: false, description: "Vault destination folder (default '0-Inbox'). Allowed: '0-Inbox', '1-Literature', '1-projects', '2-Permanent'. Use 0-Inbox for fleeting captures, 1-Literature for reference material, 1-projects for project artifacts." },
+      { name: "vaultFolder", type: "string", required: false, description: "Vault destination folder (default '0-Inbox'). Standard Zettel folders: '0-Inbox' for fleeting captures, '1-Literature' for reference material, '1-projects' for project artifacts, '2-Permanent' for promoted notes. Custom folders (e.g. 'meetings', '2024-Q3/wins', 'team/sales') are auto-created. System folders ('_clawbot', '_archive', '_neuroworks', '.git', '.obsidian') and absolute or traversal paths are rejected — falls back to '0-Inbox' if unsafe." },
       { name: "title", type: "string", required: false, description: "Override the sidecar note title (default: extract from filename)" },
       { name: "removeOriginal", type: "boolean", required: false, description: "Delete the source file after import (default false — copy semantics). Set true when the user literally says 'move and delete' or 'remove from downloads'." },
       { name: "summarise", type: "boolean", required: false, description: "Extract a short auto-summary of the doc's text into the sidecar (default true for binary docs)" },
@@ -708,11 +931,28 @@ export const primitives: Primitive[] = [
       const st = statSync(fullSrc);
       if (!st.isFile()) throw new Error(`fs.import_to_vault: "${fullSrc}" is a directory, not a file. Loop over its contents and import individually.`);
 
-      // Choose vault folder. Allow-list the four standard top-level folders;
-      // reject anything weird so the agent can't pollute _clawbot/ etc.
-      const requested = String(args.vaultFolder ?? "0-Inbox").trim().replace(/^\/+|\/+$/g, "");
-      const allowedFolders = ["0-Inbox", "1-Literature", "1-projects", "2-Permanent"];
-      const vaultFolder = allowedFolders.includes(requested) ? requested : "0-Inbox";
+      // Choose vault folder. The four standard Zettelkasten folders pass
+      // through verbatim. ANY OTHER user-named folder ("meetings", "2024-Q3",
+      // "projects/atlas") is accepted as long as it's a safe relative path —
+      // mkdirSync inside importBinaryIntoVault will auto-create it on first
+      // use. Previously the allow-list silently rewrote unknown folders to
+      // 0-Inbox, which surprised users who asked to file uploads under their
+      // own categories.
+      // Guard rails — reject anything that could escape the vault, hit a
+      // system-managed folder (where NeuroWorks tooling assumes ownership),
+      // or look like an absolute path.
+      const requested = String(args.vaultFolder ?? "0-Inbox").trim().replace(/^\/+|\/+$/g, "").replace(/\\/g, "/");
+      const SYSTEM_PREFIXES = ["_clawbot", "_archive", "_neuroworks", ".git", ".obsidian"];
+      const isSafeUserFolder = (p: string): boolean => {
+        if (!p || p.length > 200) return false;
+        if (/^[A-Za-z]:|^[/\\]/.test(p)) return false;            // no absolute paths
+        if (p.split("/").some(seg => seg === "" || seg === "." || seg === "..")) return false; // no traversal
+        if (!/^[A-Za-z0-9_./-]+$/.test(p)) return false;          // safe chars only
+        const top = p.split("/")[0];
+        if (SYSTEM_PREFIXES.some(prefix => top === prefix)) return false;
+        return true;
+      };
+      const vaultFolder = isSafeUserFolder(requested) ? requested : "0-Inbox";
 
       const srcName = basename(fullSrc);
       const ext = extname(srcName).toLowerCase();
@@ -868,7 +1108,16 @@ export const primitives: Primitive[] = [
       // network round-trip with the regex pass.
       const [vaultHits, webResults] = await Promise.all([
         Promise.resolve().then(() => {
-          try { return searchVault(query, 20); }
+          try {
+            // Exclude agent-internal job-tracker files (_neuroworks/jobs/*) —
+            // those are scratch records of past runs, not real user knowledge.
+            // Without this filter, research.deep cites its own past outputs as
+            // "vault sources", which inflates citation_coverage with
+            // self-referential noise and degrades grounding. Chat already
+            // applies the same exclusion in agent.ts. Matches the path style
+            // searchVault returns (forward-slash).
+            return searchVault(query, 20).filter(h => !/^_neuroworks\/jobs\//i.test(h.path));
+          }
           catch { return [] as ReturnType<typeof searchVault>; }
         }),
         searchWeb(query, depth).then(s => s.results).catch(() => [] as { title: string; url: string; snippet: string }[]),
@@ -877,26 +1126,69 @@ export const primitives: Primitive[] = [
       // 3. Fetch the top N web pages in parallel via the smart client —
       //    cheap HTTP first, Playwright fallback when blocked/JS-only. Per-URL
       //    cache means a re-search across perspectives hits memory.
-      const fetched: { url: string; title: string; text: string; ok: boolean; error?: string; usedBrowser?: boolean }[] = await Promise.all(
+      const fetched: { url: string; title: string; text: string; ok: boolean; error?: string; usedBrowser?: boolean; status?: number; engine?: "http" | "browser" | "firecrawl" | "unknown" }[] = await Promise.all(
         webResults.map(async (w) => {
           try {
             const r = await smartFetch(w.url, { maxBytes: 80_000, timeoutMs: 8_000 });
-            return { url: w.url, title: r.title ?? w.title, text: r.text.slice(0, 6_000), ok: true, usedBrowser: r.usedBrowser };
+            return {
+              url: w.url,
+              title: r.title ?? w.title,
+              text: r.text.slice(0, 6_000),
+              ok: true,
+              usedBrowser: r.usedBrowser,
+              status: (r as any).status,
+              engine: ((r as any).engine ?? (r.usedBrowser ? "browser" : "http")) as any,
+            };
           } catch (e: any) {
             return { url: w.url, title: w.title, text: "", ok: false, error: String(e?.message ?? e) };
           }
         })
       );
 
-      // 4. Synthesise. Combined evidence in, cited answer out.
+      // 3b. SOURCE VALIDATION — strict mode. Drops auth walls, captcha
+      //     pages, 4xx/5xx, thin extractions, AND zero-relevance sources;
+      //     ranks the survivors by query-term density. This is the layer
+      //     that closes the "Denmark hotel page" + "Page not found" failure
+      //     modes that historically polluted the synth's evidence catalog.
+      const { validateSources } = await import("./source-validator.js");
+      const validation = validateSources(
+        fetched.map(f => ({
+          url: f.url,
+          title: f.title,
+          text: f.text,
+          ok: f.ok,
+          error: f.error,
+          status: f.status,
+          engine: f.engine ?? "unknown",
+          usedBrowser: f.usedBrowser,
+        })),
+        { mode: "strict", query, minRetainedSources: 2 },
+      );
+      const validSources = validation.kept;
+
+      // 4. Synthesise. Combined evidence in, cited answer out. Only the
+      //    validator-approved sources reach the synth; the audit catalog
+      //    still records what was dropped so the captured note can
+      //    explain a thin result.
       const evidence = [
         vaultHits.length > 0 ? `## Vault notes (${vaultHits.length})\n${vaultHits.slice(0, 8).map(h => `- ${h.path}:${h.line} — ${h.preview}`).join("\n")}` : "## Vault notes\n_(none — this topic is new to the vault)_",
-        fetched.filter(f => f.ok && f.text).length > 0
-          ? `## Web sources\n${fetched.filter(f => f.ok && f.text).map((f, i) => `### [${i + 1}] ${f.title}\n${f.url}\n\n${f.text}`).join("\n\n")}`
-          : "## Web sources\n_(none reachable)_",
+        validSources.length > 0
+          ? `## Web sources (validated)\n${validSources.map((f, i) => `### [${i + 1}] ${f.title} _(relevance: ${f.score})_\n${f.url}\n\n${f.text}`).join("\n\n")}`
+          : "## Web sources\n_(no sources survived validation — fetched " + fetched.length + ", all dropped as " + Object.entries(validation.summary.reasons).map(([k,v]) => `${v} × ${k}`).join(", ") + ")_",
       ].join("\n\n");
 
-      const sysSynth = "You are clawbot's research synthesiser. Write a concise, evidence-grounded answer to the user's question using ONLY the supplied evidence. Cite sources inline as [vault:path] or [N] (where N matches the web source). If the evidence is thin or contradictory, say so plainly. Keep it under 350 words. Markdown allowed.";
+      // Governance-aware synthesis. A single research.deep step's answer is
+      // passed straight through by the outer synth (passthrough), so THIS is
+      // the prompt that actually produces the answer — it must carry the
+      // governance guardrails or wrong-entity web content (e.g. the Natus EEG
+      // "NeuroWorks") slips through. Load the prefix and make obeying it a hard
+      // rule, with an explicit instruction to drop wrong-entity sources.
+      let govPrefix = "";
+      try { const { loadGovernancePrefix } = await import("./governance.js"); govPrefix = loadGovernancePrefix(); } catch { /* governance optional */ }
+      const sysSynth = (govPrefix ? govPrefix + "\n\n" : "") +
+        "You are clawbot's research synthesiser. Write a concise, evidence-grounded answer to the user's question using ONLY the supplied evidence. Cite sources inline as [vault:path] or [N] (where N matches the web source). " +
+        "HARD RULE: obey any GOVERNANCE POLICIES above as the highest priority. If a source describes a different product or entity than the governance defines (same name, wrong product), DROP it entirely — do not quote, summarize, or let it shape the answer. Prefer vault notes over web sources when they conflict. " +
+        "If the evidence is thin or contradictory, say so plainly. Keep it under 350 words. Markdown allowed.";
       // Synth in a try/catch so a transient LLM failure doesn't throw away
       // all the web evidence we just fetched. On failure we build a usable
       // fallback from the gathered sources rather than returning an error.
@@ -924,8 +1216,18 @@ export const primitives: Primitive[] = [
         const slug = query.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60) || "research";
         const path = `0-Inbox/${stamp}-research-${slug}.md`;
         const today = new Date().toISOString().slice(0, 10);
-        const sourcesBlock = fetched.filter(f => f.ok).map((f, i) => `${i + 1}. [${f.title}](${f.url})`).join("\n") || "_(no reachable web sources)_";
-        const md = `---\ntitle: "Research: ${query.replace(/"/g, "'").slice(0, 120)}"\ncreated: ${today}\nsource: clawbot-research\n---\n\n# Research: ${query}\n\n${synth.trim()}\n\n## Web sources\n${sourcesBlock}\n\n## Vault hits at time of research\n${vaultHits.slice(0, 8).map(h => `- [[${h.path}]] (line ${h.line})`).join("\n") || "_(none)_"}\n`;
+        // Only validated sources are listed as "Web sources" in the
+        // captured note — junk URLs (login pages, 404s, off-topic SERPs)
+        // are recorded in a "Filtered sources" block so the audit trail
+        // is preserved without poisoning future re-reads.
+        const sourcesBlock = validSources.length > 0
+          ? validSources.map((f, i) => `${i + 1}. [${f.title}](${f.url}) _(relevance ${f.score}${f.engine ? `, ${f.engine}` : ""})_`).join("\n")
+          : "_(no sources survived validation)_";
+        const dropped = validation.dropped;
+        const filteredBlock = dropped.length > 0
+          ? `\n\n## Filtered sources _(${dropped.length} dropped by validator)_\n` + dropped.map(d => `- ~~[${d.title || d.url}](${d.url})~~ — ${d.verdict.reason}${d.verdict.detail ? ` (${d.verdict.detail})` : ""}`).join("\n")
+          : "";
+        const md = `---\ntitle: "Research: ${query.replace(/"/g, "'").slice(0, 120)}"\ncreated: ${today}\nsource: clawbot-research\nvalidator: strict\nsources_kept: ${validSources.length}\nsources_dropped: ${dropped.length}\n---\n\n# Research: ${query}\n\n${synth.trim()}\n\n## Web sources\n${sourcesBlock}${filteredBlock}\n\n## Vault hits at time of research\n${vaultHits.slice(0, 8).map(h => `- [[${h.path}]] (line ${h.line})`).join("\n") || "_(none)_"}\n`;
         try {
           writeVaultFile(path, md);
           captured = { path };
@@ -937,7 +1239,9 @@ export const primitives: Primitive[] = [
         query,
         answer: synth.trim(),
         vaultHits: vaultHits.slice(0, 8),
-        webSources: fetched.map(f => ({ url: f.url, title: f.title, ok: f.ok, error: f.error })),
+        webSources: validSources.map(f => ({ url: f.url, title: f.title, ok: true, score: f.score, engine: f.engine })),
+        webSourcesDropped: validation.dropped.map(d => ({ url: d.url, title: d.title, reason: d.verdict.reason, detail: d.verdict.detail })),
+        validation: validation.summary,
         captured,
       };
     },
@@ -1147,6 +1451,82 @@ ${vaultHits.slice(0, 8).map(h => `- [[${h.path}]] (line ${h.line})`).join("\n") 
     },
   },
   {
+    name: "email.send",
+    description: "Send an actual email via the configured outbound transport (Mailjet HTTPS API, with SMTP fallback). Use this for ANY 'send an email to X', 'email X about Y', 'reply to Z' task — do NOT use web.interact to drive Gmail's web UI, that's not a real send path. Returns { ok, transport, from, to, subject, sentAt } so the synth can confirm actual delivery instead of fabricating one. Body accepts markdown — converted to plaintext + HTML automatically.",
+    readonly: false,
+    args: [
+      { name: "to", type: "string", required: true, description: "Recipient email address (e.g. 'jane@example.com')" },
+      { name: "subject", type: "string", required: true, description: "Email subject line (no Re: prefix unless replying)" },
+      { name: "body", type: "string", required: true, description: "Email body in markdown — headings, bullets, links all rendered to HTML AND plaintext" },
+      { name: "in_reply_to", type: "string", required: false, description: "Optional Message-ID of the message being replied to" },
+    ],
+    handler: async (args) => {
+      const { sendEmail } = await import("./email.js");
+      const to = String(args.to ?? "").trim();
+      const subject = String(args.subject ?? "").trim();
+      const body = String(args.body ?? "").trim();
+      const inReplyTo = args.in_reply_to ? String(args.in_reply_to).trim() : undefined;
+      return await sendEmail({ to, subject, body, inReplyTo });
+    },
+  },
+  {
+    name: "doc.ocr",
+    description: "Extract text from an IMAGE-ONLY document (scanned PDF, photo of a doc, .png/.jpg/.jpeg etc.) when fs.read_external returned empty or near-empty content. Two engines: 'auto' (default — local tesseract for images, cloud for PDFs), 'local' (offline tesseract.js, images only), 'cloud' (OpenRouter multimodal — accepts PDFs natively). Path MUST be an absolute path returned by fs.find_in. Returns { text, engine, model?, pages?, truncated }. Chain this AFTER fs.read_external when its content is short and the file is a PDF / image.",
+    readonly: true,
+    args: [
+      { name: "path", type: "string", required: true, description: "Absolute path to the document (typically $step_N.resolvedTo from a prior fs.read_external, or $step_N.matches.0.path from fs.find_in)" },
+      { name: "engine", type: "string", required: false, description: "'auto' (default) | 'local' | 'cloud'" },
+    ],
+    handler: async (args) => {
+      const { ocrFile } = await import("./ocr.js");
+      const raw = String(args.path ?? "").trim();
+      if (!raw) throw new Error("doc.ocr: path required");
+      const engine = (String(args.engine ?? "auto").toLowerCase() as "auto" | "local" | "cloud");
+      if (!["auto", "local", "cloud"].includes(engine)) throw new Error(`doc.ocr: unknown engine "${engine}"`);
+      const { assertSafeExternalPath } = await import("./security-gates.js");
+      assertSafeExternalPath(raw);
+      const result = await ocrFile(raw, engine);
+      return { content: result.text, ...result, resolvedTo: raw };
+    },
+  },
+  {
+    name: "db.list_sources",
+    description: "List company database connections the operator has registered. Returns { id, label, kind, notes } — pass the id to db.schema or db.query. Use this first to find out what databases the user has connected.",
+    readonly: true,
+    args: [],
+    handler: async () => {
+      const { listSources } = await import("./data-sources.js");
+      return { sources: listSources().map(s => ({ id: s.id, label: s.label, kind: s.kind, notes: s.notes, readonly: s.readonly })) };
+    },
+  },
+  {
+    name: "db.schema",
+    description: "Get the schema (tables + columns) for a registered company database. Pass source_id from db.list_sources. Returns { tables: [{ name, columns: [{ name, type }] }] }.",
+    readonly: true,
+    args: [{ name: "source_id", type: "string", required: true, description: "id from db.list_sources" }],
+    handler: async (args) => {
+      const { getSource, describeSource } = await import("./data-sources.js");
+      const src = getSource(String(args.source_id));
+      if (!src) throw new Error(`unknown source id: ${args.source_id}`);
+      return await describeSource(src);
+    },
+  },
+  {
+    name: "db.query",
+    description: "Run a read-only SQL query (SELECT / WITH / SHOW / EXPLAIN / DESCRIBE / PRAGMA) against a registered company database. Pass source_id from db.list_sources. Returns { rows, columns, rowCount, truncated } — first 200 rows.",
+    readonly: true,
+    args: [
+      { name: "source_id", type: "string", required: true, description: "id from db.list_sources" },
+      { name: "sql", type: "string", required: true, description: "Read-only SQL query" },
+    ],
+    handler: async (args) => {
+      const { getSource, runQuery } = await import("./data-sources.js");
+      const src = getSource(String(args.source_id));
+      if (!src) throw new Error(`unknown source id: ${args.source_id}`);
+      return await runQuery(src, String(args.sql), 200);
+    },
+  },
+  {
     name: "peer.delegate",
     description: "Hand a task off to a peer clawbot (the lightest-loaded one). Returns the peer's final answer once the peer's job completes. Use when the local clawbot is overloaded or when you want a second model's perspective.",
     readonly: true,
@@ -1182,36 +1562,160 @@ ${vaultHits.slice(0, 8).map(h => `- [[${h.path}]] (line ${h.line})`).join("\n") 
       { name: "task", type: "string", required: true, description: "The original task / question" },
       { name: "answer", type: "string", required: true, description: "The draft answer to check" },
       { name: "sources", type: "string", required: false, description: "Optional sources/evidence text (comma-separated paths or free text)" },
+      { name: "context", type: "string", required: false, description: "Optional framing for what the asker actually wanted (role, title/summary, deliverable intent). Lets the grader judge persona_fit and completeness against real intent instead of a terse task line." },
     ],
     handler: async (args) => {
       const task = String(args.task);
       const answer = String(args.answer);
       const sources = args.sources ? String(args.sources) : "";
+      const context = args.context ? String(args.context) : "";
+
+      // Deterministic counts the grader uses to bound the LLM verdict.
+      // Citations in this system come in three forms the synth is taught to
+      // emit: inline numbered markers [1] [2], vault-path markers
+      // [vault:notes/path.md], and bare URLs in references-only blocks.
+      // Counting them upfront prevents the LLM scorer from giving a 0 when
+      // the answer is well-cited but the scorer didn't recognise the format.
+      const numberedMarkers = (answer.match(/\[\d+\]/g) ?? []).length;
+      const vaultMarkers = (answer.match(/\[vault:[^\]]+\]/g) ?? []).length;
+      const urlMatches = (answer.match(/https?:\/\/[^\s)<>"']+/g) ?? []).length;
+      const totalCitations = numberedMarkers + vaultMarkers + urlMatches;
+      // Substantive sentences: rough heuristic — split on sentence punctuation,
+      // count those >= 40 chars. Avoids counting bullet leads ("- bullet")
+      // and one-word fragments.
+      const substantiveSentences = answer
+        .split(/(?<=[.!?])\s+/)
+        .map(s => s.trim())
+        .filter(s => s.length >= 40).length;
+      const sourcesProvided = sources.trim().length > 0;
+      // Citation floor: when sources WERE provided, we expect at least one
+      // citation per ~3 substantive sentences. When NO sources were given,
+      // citation_coverage doesn't apply (set floor to 1.0).
+      const citationFloor = !sourcesProvided
+        ? 1.0
+        : substantiveSentences === 0
+          ? 1.0
+          : Math.min(1.0, totalCitations / Math.max(1, substantiveSentences / 3));
+
+      // Deliverable-aware grading. The citation + strict-factuality rubric
+      // fits research/analysis answers, but mis-scores other deliverables:
+      // marketing copy is aspirational (no sources to cite), a runbook draws
+      // on operational know-how (not citations), and code is judged on
+      // correctness. Classify the deliverable from the task so the rubric and
+      // weights match what was actually asked for. Shared with the planner
+      // (deliverable.ts) so both agree on the deliverable type.
+      // Classify against task + context: the context (title/summary/intent)
+      // often carries the deliverable signal a terse task line omits.
+      const deliverableClass = classifyDeliverable(context ? `${task}\n${context}` : task);
+      const citationApplies = deliverableClass === "research";
+      // For non-research deliverables, citation_coverage doesn't apply — floor
+      // it to 1.0 so it can't drag the score, and let persona_fit carry weight.
+      const effectiveFloor = citationApplies ? citationFloor : 1.0;
+      const classNote =
+        deliverableClass === "creative"
+          ? `\n\nDELIVERABLE TYPE: creative / marketing copy. This is aspirational product or marketing writing — it is EXPECTED to make forward-looking claims and carry NO citations. Do NOT raise factuality_risk for uncited or aspirational claims; raise it only for internal contradictions or clearly implausible statements. Report citation_coverage as 1.0 (not applicable). Judge mainly on persona_fit: tone, format adherence (e.g. requested bullet count), and persuasiveness.`
+          : deliverableClass === "procedural"
+          ? `\n\nDELIVERABLE TYPE: procedural / how-to / runbook. This draws on operational know-how, not external sources — it is EXPECTED to carry NO citations. Report citation_coverage as 1.0 (not applicable). Raise factuality_risk only for incorrect or unsafe steps. Judge mainly on persona_fit: completeness, correct ordering, and whether it honors the requested structure (e.g. number of steps).`
+          : deliverableClass === "code"
+          ? `\n\nDELIVERABLE TYPE: code / technical artifact. Citations are not applicable — report citation_coverage as 1.0. Raise factuality_risk only for incorrect or non-functional code. Judge mainly on persona_fit: correctness, completeness, and adherence to the requested form.`
+          : `\n\nDELIVERABLE TYPE: research / analysis. Inline citations matter — score citation_coverage honestly against the evidence and raise factuality_risk for unsupported claims.`;
+
       const sys = `You are a quality scorer for an agent's draft answer. Score the draft on three axes from 0.0 (worst) to 1.0 (best):
 1. factuality_risk — likelihood the answer contains hallucinated or unsupported claims (1.0 means high risk; lower is better).
-2. citation_coverage — fraction of substantive claims backed by a cited source (paths, URLs, or clearly attributed quotes).
+2. citation_coverage — fraction of substantive claims backed by an inline citation. In this system, citations look like [1] [2] (numbered, matching the evidence catalog), [vault:path/to/note.md] (vault-path markers), or bare URLs. Count an answer as well-cited when it carries these markers. If NO sources are provided, citation_coverage MUST be 1.0 — there's nothing to cite against.
 3. persona_fit — match between the answer's tone/structure and what the task asked for.
 
 Output ONLY a JSON object, no prose, no fences:
 {"factuality_risk":<0..1>,"citation_coverage":<0..1>,"persona_fit":<0..1>,"issues":["<short>",...],"pass":<true|false>}
 
-Pass is true when factuality_risk < 0.4 AND citation_coverage > 0.4 AND persona_fit > 0.5.`;
+Pass is true when factuality_risk < 0.4 AND citation_coverage > 0.4 AND persona_fit > 0.5.
+
+When you're uncertain about citation_coverage, lean higher when you see [N] or [vault:...] markers in the answer.`;
+      // When the caller supplies context (the asker's role, the request
+      // title/summary, deliverable intent), tell the scorer to judge against
+      // that stated intent rather than a literal reading of a terse task line —
+      // this is what lifts persona_fit/completeness scores on requests whose
+      // one-line task underspecifies what a good answer looks like.
+      const contextNote = context
+        ? `\n\nTASK CONTEXT: the asker's intent is described in the "Task context" block of the prompt. Judge persona_fit and completeness against that intent (the role, the request's title/summary, and what a good deliverable for it looks like) — not against a narrow literal reading of the one-line task. Do not penalise an answer for omitting things the context did not actually ask for.`
+        : "";
       // The output is a small JSON blob (~80-200 tokens). 256 tokens is a
       // generous cap that stops the model from rambling and shaves 3-8s off
       // this call on local Ollama versus the default 1024-token budget.
-      const raw = await ollamaGenerate(`Task: ${task}\n\nDraft answer:\n${answer}${sources ? `\n\nSources:\n${sources.slice(0, 4000)}` : ""}`, sys, { profile: "extraction", maxTokens: 256 });
+      const scorePrompt = `Task: ${task}${context ? `\n\nTask context (what the asker actually wanted):\n${context.slice(0, 1500)}` : ""}\n\nDraft answer:\n${answer}${sources ? `\n\nSources:\n${sources.slice(0, 4000)}` : ""}`;
+      // Resilient scoring: try the extraction profile (may route to OpenRouter)
+      // first, but on a transient cloud failure (429 / rate limit / transport)
+      // fall back to LOCAL Ollama so the QA gate never hard-fails. Without this
+      // a bulk grading pass 500s on every OR rate-limit hit. profile=undefined
+      // forces local generation (shouldRouteToOpenRouter is false with no profile).
+      // temperature:0 pins the scorer's output so run-to-run grader noise
+      // (run1 0.822 / run2 0.817 / run3 0.824 swings — all within sampling
+      // noise) stops masquerading as quality regressions. 300s wall-time cap
+      // kills the recurring pathological tail (5464s quality.check outlier in
+      // the 2026-05-29 reflection, ~91 min on one job) — on timeout we
+      // return a non-passing verdict rather than letting the QA gate hang.
+      let raw: string = "";
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        raw = await Promise.race<string>([
+          (async () => {
+            try {
+              return await ollamaGenerate(scorePrompt, sys + classNote + contextNote, { profile: "extraction", maxTokens: 256, temperature: 0 });
+            } catch (e: any) {
+              const msg = String(e?.message ?? e);
+              if (!/429|rate[\s-]?limit|fetch\s+failed|terminated|ECONNRESET|HTTP\s+5\d\d|timeout|other\s+side\s+closed/i.test(msg)) throw e;
+              return await ollamaGenerate(scorePrompt, sys + classNote + contextNote, { profile: undefined, maxTokens: 256, temperature: 0 });
+            }
+          })(),
+          new Promise<string>((_, rej) => { timer = setTimeout(() => rej(new Error("quality.check wall-time cap (300s) exceeded")), 300_000); }),
+        ]);
+      } catch (e: any) {
+        return { pass: false, factuality_risk: 1, citation_coverage: 0, persona_fit: 0, score: 0, issues: [`scorer failed: ${String(e?.message ?? e).slice(0, 160)}`], deliverableClass };
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
       const m = raw.match(/\{[\s\S]*\}/);
       if (!m) return { pass: false, factuality_risk: 1, citation_coverage: 0, persona_fit: 0, issues: ["scorer returned no JSON"], raw };
       try {
         const parsed = JSON.parse(m[0]);
-        const score = (1 - clamp01(parsed.factuality_risk)) * 0.4 + clamp01(parsed.citation_coverage) * 0.3 + clamp01(parsed.persona_fit) * 0.3;
+        // Use the higher of the LLM's verdict and the deterministic floor for
+        // citation_coverage. Stops the scorer from punishing answers that
+        // are clearly well-cited but whose format it didn't recognise.
+        const llmCitation = clamp01(parsed.citation_coverage);
+        const citationCoverage = Math.max(llmCitation, effectiveFloor);
+        const factualityRisk = clamp01(parsed.factuality_risk);
+        const personaFit = clamp01(parsed.persona_fit);
+        // Per-class scoring. Research weights factuality + citations heavily.
+        // Non-research deliverables (creative / procedural / code) are carried
+        // by persona_fit — citations don't apply and factuality is relaxed
+        // (aspirational marketing copy and how-to steps shouldn't be punished
+        // as "hallucinations"), so the rubric matches what was asked for.
+        const score = citationApplies
+          ? (1 - factualityRisk) * 0.4 + citationCoverage * 0.3 + personaFit * 0.3
+          : (1 - factualityRisk) * 0.3 + citationCoverage * 0.2 + personaFit * 0.5;
+        // Re-derive pass per class. Non-research drops the citation gate and
+        // relaxes the factuality threshold; persona_fit becomes the bar.
+        const pass = citationApplies
+          ? (factualityRisk < 0.4 && citationCoverage > 0.4 && personaFit > 0.5)
+          : (factualityRisk < 0.5 && personaFit > 0.5);
+        const issues = Array.isArray(parsed.issues) ? parsed.issues.slice(0, 6).map((s: any) => String(s).slice(0, 200)) : [];
+        // If the floor lifted the verdict over the LLM's call, note that
+        // openly so the operator can see when the deterministic guard fired.
+        if (citationCoverage > llmCitation + 0.05) {
+          issues.push(citationApplies
+            ? `citation_coverage adjusted from ${llmCitation.toFixed(2)} to ${citationCoverage.toFixed(2)} (found ${totalCitations} citation markers in ${substantiveSentences} substantive sentences)`
+            : `citation_coverage not applicable for ${deliverableClass} deliverable — set to 1.0`);
+        }
         return {
-          pass: parsed.pass === true,
-          factuality_risk: clamp01(parsed.factuality_risk),
-          citation_coverage: clamp01(parsed.citation_coverage),
-          persona_fit: clamp01(parsed.persona_fit),
+          pass,
+          factuality_risk: factualityRisk,
+          citation_coverage: citationCoverage,
+          persona_fit: personaFit,
           score: Math.round(score * 100) / 100,
-          issues: Array.isArray(parsed.issues) ? parsed.issues.slice(0, 6).map((s: any) => String(s).slice(0, 200)) : [],
+          issues,
+          deliverableClass,
+          // Diagnostic counters so the UI / journal can show why a score moved.
+          citationCounts: { numbered: numberedMarkers, vault: vaultMarkers, url: urlMatches, total: totalCitations, substantiveSentences, sourcesProvided },
         };
       } catch {
         return { pass: false, factuality_risk: 1, citation_coverage: 0, persona_fit: 0, issues: ["scorer JSON unparseable"], raw };
@@ -1379,6 +1883,367 @@ Pass is true when factuality_risk < 0.4 AND citation_coverage > 0.4 AND persona_
     handler: async () => {
       const d = new Date();
       return { iso: d.toISOString(), local: d.toString(), date: d.toISOString().slice(0, 10), unix: Math.floor(d.getTime() / 1000) };
+    },
+  },
+  {
+    name: "vault.write_pdf",
+    description: "Render a markdown answer into a polished PDF (system typography, generous margins, GFM tables) and save it to the vault. Use when the deliverable is a board pack, customer-facing memo, or anything an operator will email out. Returns { path, bytes }.",
+    readonly: false,
+    args: [
+      { name: "markdown", type: "string", required: true, description: "Markdown content to render" },
+      { name: "title", type: "string", required: false, description: "Document title (used in <title>, no visible heading — your markdown's first H1 owns the on-page heading)" },
+      { name: "filename", type: "string", required: true, description: "Filename WITHOUT directory, e.g. 'board-pack-q3.pdf'. Saved under `_neuroworks/exports/` in the vault. `.pdf` appended if missing." },
+      { name: "landscape", type: "boolean", required: false, description: "Landscape orientation (default false — portrait Letter)" },
+    ],
+    handler: async (args) => {
+      let filename = String(args.filename ?? "document.pdf").replace(/[/\\]/g, "-").replace(/^\.+/, "");
+      if (!/\.pdf$/i.test(filename)) filename += ".pdf";
+      const stamp = new Date().toISOString().slice(0, 10);
+      const rel = `_neuroworks/exports/${stamp}-${filename}`;
+      return await renderMarkdownToPdf({
+        markdown: String(args.markdown ?? ""),
+        title: args.title ? String(args.title) : undefined,
+        vaultRelPath: rel,
+        landscape: args.landscape === true,
+      });
+    },
+  },
+  {
+    name: "calendar.activity",
+    description: "Return the agents' own activity (jobs that ran) grouped by day across [from, to]. Use when the user asks 'what did I do last Tuesday' / 'what shipped this week' / 'summarise the team's output for the month'. Merges the in-memory job table with the persisted `_neuroworks/jobs/` JSONL files. Default window: the last 14 days.",
+    readonly: true,
+    args: [
+      { name: "from", type: "string", required: false, description: "Window start YYYY-MM-DD (default: 13 days ago)" },
+      { name: "to", type: "string", required: false, description: "Window end YYYY-MM-DD inclusive (default: today)" },
+    ],
+    handler: async (args) => {
+      const { loadJobsInWindow } = await import("./job-store.js");
+      const { listJobs } = await import("./jobs.js");
+      const today = new Date();
+      const defTo = today.toISOString().slice(0, 10);
+      const def = new Date(today.getTime() - 13 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+      const from = String(args.from ?? def);
+      const to = String(args.to ?? defTo);
+      const fromMs = Date.parse(from + "T00:00:00.000Z");
+      const toMs = Date.parse(to + "T23:59:59.999Z");
+      const merged = new Map<string, any>();
+      for (const j of loadJobsInWindow(fromMs, toMs)) merged.set(j.id, j);
+      for (const j of listJobs()) {
+        const at = Date.parse(j.finishedAt ?? j.startedAt);
+        if (at >= fromMs && at <= toMs) merged.set(j.id, j);
+      }
+      const days = new Map<string, any[]>();
+      for (const j of merged.values()) {
+        const k = (j.finishedAt ?? j.startedAt).slice(0, 10);
+        if (!days.has(k)) days.set(k, []);
+        days.get(k)!.push({
+          id: j.id, kind: j.kind, template: j.template, title: j.title,
+          personaName: j.personaName, status: j.status,
+          startedAt: j.startedAt, finishedAt: j.finishedAt,
+          score: (j.result as any)?.quality?.score ?? null,
+        });
+      }
+      return { from, to, days: [...days.entries()].map(([date, jobs]) => ({ date, jobs })).sort((a, b) => a.date.localeCompare(b.date)) };
+    },
+  },
+  {
+    name: "calendar.plan_day",
+    description: "Synthesise a day plan for a date: today's meetings (from CLAWBOT_CALENDAR_ICAL_URL if configured), scheduled clawbot tasks for that day-of-week, and any open follow-ups carried over from yesterday's activity. Returns the structured pieces; the planner is expected to feed them through the `daily-briefing` skill to produce the prose briefing.",
+    readonly: true,
+    args: [
+      { name: "date", type: "string", required: false, description: "Target date YYYY-MM-DD (default: today)" },
+    ],
+    handler: async (args) => {
+      const date = String(args.date ?? new Date().toISOString().slice(0, 10));
+      const fromMs = Date.parse(date + "T00:00:00.000Z");
+      const toMs = Date.parse(date + "T23:59:59.999Z");
+      const { loadJobsInWindow } = await import("./job-store.js");
+      const { listJobs } = await import("./jobs.js");
+      const merged = new Map<string, any>();
+      for (const j of loadJobsInWindow(fromMs, toMs)) merged.set(j.id, j);
+      for (const j of listJobs()) {
+        const at = Date.parse(j.finishedAt ?? j.startedAt);
+        if (at >= fromMs && at <= toMs) merged.set(j.id, j);
+      }
+      const activity = [...merged.values()].map(j => ({ id: j.id, title: j.title ?? j.kind, status: j.status, finishedAt: j.finishedAt, personaName: j.personaName }));
+
+      // Yesterday's carryover — jobs that failed / awaited approval and may
+      // still need attention. Same JOB_STORE window, one day back.
+      const yFromMs = fromMs - 24 * 60 * 60 * 1000;
+      const carryover: any[] = [];
+      for (const j of loadJobsInWindow(yFromMs, fromMs)) {
+        if (j.status === "failed" || j.status === "awaiting-approval" || j.status === "rejected") {
+          carryover.push({ id: j.id, title: j.title ?? j.kind, status: j.status, finishedAt: j.finishedAt });
+        }
+      }
+
+      let meetings: any[] = [];
+      let meetingsError: string | undefined;
+      const src = process.env.CLAWBOT_CALENDAR_ICAL_URL;
+      if (src) {
+        try {
+          const { readICalSource } = await import("./calendar-ical.js");
+          const all = await readICalSource(src);
+          meetings = all.filter(e => e.start.slice(0, 10) === date).sort((a, b) => a.start.localeCompare(b.start));
+        } catch (e: any) { meetingsError = String(e?.message ?? e).slice(0, 200); }
+      }
+
+      let schedules: any[] = [];
+      try {
+        const { listSchedules } = await import("./schedules.js");
+        const targetDow = new Date(date + "T12:00:00").getDay();
+        schedules = (listSchedules() as any[]).filter(s => {
+          const d = s.cadence?.daysOfWeek ?? [];
+          return s.enabled && (d.length === 0 || d.includes(targetDow));
+        }).map(s => ({ id: s.id, templateId: s.templateId, label: s.label, cadence: s.cadence }));
+      } catch { /* schedules optional */ }
+
+      return { date, meetings, meetingsError, schedules, activity, carryover };
+    },
+  },
+  {
+    name: "calendar.read_today",
+    description: "Read today's events from an iCal feed (URL) or local .ics file. Returns [{ summary, start, end?, location?, description? }]. Source defaults to CLAWBOT_CALENDAR_ICAL_URL in env — pass `source` to override per call. Use as the first step of a daily-briefing skill or whenever the persona needs to know what's on the calendar.",
+    readonly: true,
+    args: [
+      { name: "source", type: "string", required: false, description: "iCal URL or .ics file path. Defaults to CLAWBOT_CALENDAR_ICAL_URL." },
+    ],
+    handler: async (args) => {
+      const src = String(args.source ?? process.env.CLAWBOT_CALENDAR_ICAL_URL ?? "").trim();
+      if (!src) return { error: "no source — pass `source` or set CLAWBOT_CALENDAR_ICAL_URL in clawbot/.env (public Google Calendar 'secret iCal' URL or an Outlook publish link)" };
+      try {
+        const { readICalSource, todaysEvents } = await import("./calendar-ical.js");
+        const all = await readICalSource(src);
+        return { events: todaysEvents(all), totalParsed: all.length };
+      } catch (e: any) {
+        return { error: String(e?.message ?? e).slice(0, 300) };
+      }
+    },
+  },
+  {
+    name: "inbox.read_unread",
+    description: "Read recent unseen messages from the clawbot mailbox. Returns [{ from, subject, date, preview }]. Uses the existing CLAWBOT_EMAIL_USER / CLAWBOT_EMAIL_APP_PASSWORD credentials. Does NOT mark messages as seen — read-only. Use to surface what needs the operator's attention this morning.",
+    readonly: true,
+    args: [
+      { name: "limit", type: "number", required: false, description: "Max messages to return (default 10, max 50)" },
+    ],
+    handler: async (args) => {
+      const user = process.env.CLAWBOT_EMAIL_USER;
+      const pass = (process.env.CLAWBOT_EMAIL_APP_PASSWORD ?? "").replace(/\s/g, "");
+      if (!user || !pass) return { error: "email not configured — set CLAWBOT_EMAIL_USER + CLAWBOT_EMAIL_APP_PASSWORD in clawbot/.env" };
+      const limit = Math.min(50, Math.max(1, Number(args.limit ?? 10)));
+      const { ImapFlow } = await import("imapflow");
+      const client = new ImapFlow({
+        host: process.env.CLAWBOT_EMAIL_IMAP_HOST ?? "imap.gmail.com",
+        port: Number(process.env.CLAWBOT_EMAIL_IMAP_PORT ?? 993),
+        secure: true,
+        auth: { user, pass },
+        logger: false as any,
+      });
+      try {
+        await client.connect();
+        await client.mailboxOpen("INBOX");
+        const uids = await client.search({ seen: false }) as number[];
+        const recent = uids.slice(-limit).reverse();
+        const out: { from?: string; subject?: string; date?: string; preview?: string }[] = [];
+        for await (const msg of client.fetch(recent, { envelope: true, source: true, uid: true }, { uid: true })) {
+          const env = msg.envelope;
+          let preview = "";
+          try {
+            if (msg.source) {
+              const { simpleParser } = await import("mailparser");
+              const p = await simpleParser(msg.source);
+              preview = (p.text ?? "").trim().replace(/\s+/g, " ").slice(0, 240);
+            }
+          } catch { /* tolerate */ }
+          out.push({
+            from: env?.from?.[0]?.address ?? undefined,
+            subject: env?.subject ?? undefined,
+            date: env?.date?.toISOString?.() ?? undefined,
+            preview,
+          });
+        }
+        return { messages: out, fetched: out.length };
+      } catch (e: any) {
+        return { error: String(e?.message ?? e).slice(0, 300) };
+      } finally {
+        try { await client.logout(); } catch { /* tolerate */ }
+      }
+    },
+  },
+  {
+    name: "hermes.delegate",
+    description: "Delegate a task to the Hermes Agent CLI (Nous Research) and return its answer. Use when the task needs one of Hermes's bundled skills (Linear / Notion / Slack / Google Workspace / Polymarket / arxiv / OCR / many others) that clawbot doesn't have a native primitive for. Spawns `hermes -z 'task' --yolo` as a subprocess, capped at 240 s. Requires Hermes installed locally and OPENROUTER_API_KEY in the clawbot environment (passed through to Hermes).",
+    readonly: false,
+    args: [
+      { name: "task", type: "string", required: true, description: "The full task to send to Hermes — phrase it as you would to any agent." },
+      { name: "timeoutMs", type: "number", required: false, description: "Wall budget for the Hermes call (default 240000, max 600000)" },
+    ],
+    handler: async (args) => {
+      const { existsSync } = await import("node:fs");
+      const path = await import("node:path");
+      const { spawn } = await import("node:child_process");
+      const home = process.env.HERMES_HOME ?? (process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, "hermes") : null) ?? (process.env.HOME ? path.join(process.env.HOME, ".hermes") : null);
+      let bin: string | null = null;
+      if (home) {
+        for (const rel of ["hermes-agent/venv/Scripts/hermes.exe", "hermes-agent/venv/bin/hermes"]) {
+          const p = path.join(home, rel);
+          if (existsSync(p)) { bin = p; break; }
+        }
+      }
+      if (!bin) return { error: "Hermes Agent not installed (looked under $HERMES_HOME / $LOCALAPPDATA/hermes). Install via the Nous Research installer." };
+      // Scrub the parent Node/Python env so Hermes' venv bootstraps cleanly —
+      // same fix the stress harness needed (without this, hermes died on
+      // "init_import_site" in <1s).
+      const env: Record<string, string> = { ...process.env } as any;
+      for (const k of ["PYTHONHOME", "PYTHONPATH", "VIRTUAL_ENV", "PYTHONSTARTUP", "PYTHONNOUSERSITE", "PYTHONEXECUTABLE", "__PYVENV_LAUNCHER__"]) {
+        delete env[k];
+      }
+      const timeoutMs = Math.min(600_000, Math.max(5_000, Number(args.timeoutMs ?? 240_000)));
+      const task = String(args.task ?? "").trim();
+      if (!task) return { error: "task is required" };
+      return await new Promise<any>((resolve) => {
+        const t0 = Date.now();
+        const proc = spawn(bin!, ["-z", task, "--yolo"], { env, stdio: ["ignore", "pipe", "pipe"] });
+        let stdout = ""; let stderr = "";
+        proc.stdout.on("data", (chunk: Buffer) => { stdout += chunk.toString("utf8"); if (stdout.length > 200_000) stdout = stdout.slice(0, 200_000); });
+        proc.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString("utf8"); if (stderr.length > 20_000) stderr = stderr.slice(0, 20_000); });
+        const timer = setTimeout(() => { try { proc.kill("SIGKILL"); } catch {} }, timeoutMs);
+        proc.on("close", (code) => {
+          clearTimeout(timer);
+          const elapsedMs = Date.now() - t0;
+          resolve({
+            answer: stdout.trim(),
+            stderr: stderr.trim().slice(0, 2000) || undefined,
+            exitCode: code,
+            agent: "hermes",
+            elapsedMs,
+          });
+        });
+        proc.on("error", (e) => {
+          clearTimeout(timer);
+          resolve({ error: `hermes spawn failed: ${e.message}` });
+        });
+      });
+    },
+  },
+  {
+    name: "code.exec",
+    description: "Run a short Python or Node.js snippet in a subprocess with a 30 s timeout. Output is captured (stdout + stderr) and returned to the planner. For data shaping, parsing, quick computation — anything you'd otherwise have to make the LLM imagine. GATED: requires CLAWBOT_CODE_EXEC=1 in clawbot/.env (off by default — the host has no sandbox; treat code as trusted-author).",
+    readonly: false,
+    args: [
+      { name: "language", type: "string", required: true, description: "'python' or 'node'" },
+      { name: "code", type: "string", required: true, description: "Source. For Python, prefer stdlib (no pip on the fly). For Node, prefer pure JS (no npm)." },
+      { name: "timeoutMs", type: "number", required: false, description: "Wall budget (default 30000, max 120000)" },
+    ],
+    handler: async (args) => {
+      if (process.env.CLAWBOT_CODE_EXEC !== "1") {
+        return { error: "code.exec disabled — set CLAWBOT_CODE_EXEC=1 in clawbot/.env and restart to enable. This primitive runs code in the host process; only enable in trusted environments." };
+      }
+      const lang = String(args.language ?? "").toLowerCase();
+      if (lang !== "python" && lang !== "node") return { error: "language must be 'python' or 'node'" };
+      const code = String(args.code ?? "");
+      if (!code.trim()) return { error: "code is required" };
+      const timeoutMs = Math.min(120_000, Math.max(1_000, Number(args.timeoutMs ?? 30_000)));
+      const { spawn } = await import("node:child_process");
+      const bin = lang === "python" ? (process.env.CLAWBOT_PYTHON ?? "python") : "node";
+      const flags = lang === "python" ? ["-c", code] : ["-e", code];
+      return await new Promise<any>((resolve) => {
+        const t0 = Date.now();
+        const proc = spawn(bin, flags, { stdio: ["ignore", "pipe", "pipe"] });
+        let stdout = ""; let stderr = "";
+        proc.stdout.on("data", (chunk: Buffer) => { stdout += chunk.toString("utf8"); if (stdout.length > 32_000) stdout = stdout.slice(0, 32_000); });
+        proc.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString("utf8"); if (stderr.length > 8_000) stderr = stderr.slice(0, 8_000); });
+        const timer = setTimeout(() => { try { proc.kill("SIGKILL"); } catch {} }, timeoutMs);
+        proc.on("close", (code) => {
+          clearTimeout(timer);
+          resolve({ language: lang, exitCode: code, stdout: stdout.slice(0, 32_000), stderr: stderr.slice(0, 8_000), elapsedMs: Date.now() - t0 });
+        });
+        proc.on("error", (e) => { clearTimeout(timer); resolve({ error: `spawn failed: ${e.message}` }); });
+      });
+    },
+  },
+  {
+    name: "memory.note",
+    description: "Persist a single fact about a subject (a person, project, or topic) into the agent's long-term memory. Use to remember things like 'Priya prefers async over meetings', 'the auth migration is owned by Sam', 'the customer mentioned X budget'. Stored at `_neuroworks/memory/<slug>.jsonl` and available to future sessions via `memory.recall`.",
+    readonly: false,
+    args: [
+      { name: "subject", type: "string", required: true, description: "Who or what the fact is about — a name, project, or topic. Reused as the file key, so prefer canonical forms." },
+      { name: "fact", type: "string", required: true, description: "The fact to remember. Short, declarative, attribution-free if possible." },
+      { name: "source", type: "string", required: false, description: "Optional pointer (URL / vault path / jobId) so the fact can be re-verified later." },
+    ],
+    handler: async (args) => {
+      const { noteFact } = await import("./memory.js");
+      return noteFact({ subject: String(args.subject), fact: String(args.fact), source: args.source ? String(args.source) : undefined });
+    },
+  },
+  {
+    name: "memory.recall",
+    description: "Return the last N facts persisted about a subject (latest first). Use at the start of any chat or team task to load context the agent should already know about the person / project being asked about.",
+    readonly: true,
+    args: [
+      { name: "subject", type: "string", required: true, description: "Subject key — typically the same string you passed to `memory.note` earlier." },
+      { name: "limit", type: "number", required: false, description: "Max facts to return (default 20)" },
+    ],
+    handler: async (args) => {
+      const { recallSubject } = await import("./memory.js");
+      const limit = Math.min(100, Math.max(1, Number(args.limit ?? 20)));
+      return { facts: recallSubject(String(args.subject), limit) };
+    },
+  },
+  {
+    name: "memory.search",
+    description: "Free-text search across every memory file. Use when you're not sure which subject a fact was filed under — searches subject, fact, and source fields.",
+    readonly: true,
+    args: [
+      { name: "query", type: "string", required: true, description: "Search string (case-insensitive substring match)" },
+      { name: "limit", type: "number", required: false, description: "Max hits (default 20)" },
+    ],
+    handler: async (args) => {
+      const { searchMemory } = await import("./memory.js");
+      const limit = Math.min(100, Math.max(1, Number(args.limit ?? 20)));
+      return { facts: searchMemory(String(args.query), limit) };
+    },
+  },
+  {
+    name: "org.lookup",
+    description: "Look up a person on the org chart (`_governance/people.md`) by id, display name, or persona_id. Returns title, manager, peers, reports. Use when a task names someone and you need to know who they are.",
+    readonly: true,
+    args: [{ name: "query", type: "string", required: true, description: "Person id, name, or persona_id" }],
+    handler: async (args) => {
+      const { lookupPerson } = await import("./org-chart.js");
+      const p = lookupPerson(String(args.query ?? ""));
+      return p ?? { error: `no person matching ${String(args.query)}` };
+    },
+  },
+  {
+    name: "org.escalation_path",
+    description: "Return the manager chain for a person (id / name / persona_id), root last. Walks `manager` until it hits a person with no manager set (a human, by convention).",
+    readonly: true,
+    args: [{ name: "query", type: "string", required: true, description: "Person id, name, or persona_id" }],
+    handler: async (args) => {
+      const { escalationPath } = await import("./org-chart.js");
+      return { chain: escalationPath(String(args.query ?? "")) };
+    },
+  },
+  {
+    name: "org.peers",
+    description: "Return a person's peers (lateral teammates) from the org chart. Use for lateral handoffs — when a request lands on the wrong persona but a peer can cover it.",
+    readonly: true,
+    args: [{ name: "query", type: "string", required: true, description: "Person id, name, or persona_id" }],
+    handler: async (args) => {
+      const { peersOf } = await import("./org-chart.js");
+      return { peers: peersOf(String(args.query ?? "")) };
+    },
+  },
+  {
+    name: "org.reports",
+    description: "Return a person's direct reports from the org chart. Useful for status-report or team-digest tasks aimed at a team lead.",
+    readonly: true,
+    args: [{ name: "query", type: "string", required: true, description: "Person id, name, or persona_id" }],
+    handler: async (args) => {
+      const { reportsOf } = await import("./org-chart.js");
+      return { reports: reportsOf(String(args.query ?? "")) };
     },
   },
 ];

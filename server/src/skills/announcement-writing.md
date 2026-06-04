@@ -15,7 +15,7 @@ An announcement is read by people in mixed contexts, on mixed devices, in mixed 
 ```
 # <Headline — the news itself, in one specific sentence>
 
-**TL;DR:** <One sentence — the thing the reader should walk away with. Same as the headline but with the key context.>
+**Bottom line:** <One sentence — the thing the reader should walk away with. Same as the headline but with the key context.>
 
 ## What's happening
 <2-4 sentences. The change, in plain English. No jargon. No corporate-speak. State the FACT before any spin.>

@@ -1,17 +1,19 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
+import { ArrowRight } from "lucide-react";
 import { api } from "../lib/api";
-import { Card } from "../components/Card";
+import { Card, SkeletonList } from "../components/Card";
 import { ResultPanel } from "../components/ResultPanel";
 
 export function Tasks() {
   const [params, setParams] = useSearchParams();
   const focusId = params.get("focus");
   const [jobs, setJobs] = useState<any[]>([]);
+  const [loaded, setLoaded] = useState(false);
   const [filter, setFilter] = useState<"all" | "running" | "succeeded" | "failed">("all");
 
   async function load() {
-    try { const r = await api.listJobs(); setJobs(r.jobs); } catch {}
+    try { const r = await api.listJobs(); setJobs(r.jobs); } catch {} finally { setLoaded(true); }
   }
   useEffect(() => { load(); const i = setInterval(load, 3000); return () => clearInterval(i); }, []);
 
@@ -23,8 +25,8 @@ export function Tasks() {
     <div className="space-y-6">
       <div className="flex items-baseline justify-between gap-4 flex-wrap">
         <div>
-          <h1 className="font-display text-3xl text-cream-50">Tasks</h1>
-          <p className="text-sm text-cream-300/70 mt-1">Everything the workforce is doing — live.</p>
+          <h1 className="text-2xl font-semibold tracking-tight text-cream-50">Tasks</h1>
+          <p className="text-sm text-cream-300/70 mt-1">Everything the workforce is doing, live.</p>
         </div>
         <div className="flex gap-1">
           {(["all", "running", "succeeded", "failed"] as const).map(f => (
@@ -42,8 +44,9 @@ export function Tasks() {
 
       <div className="grid grid-cols-5 gap-5">
         <div className="col-span-2 space-y-2">
-          {filtered.length === 0 && <Card><div className="text-sm text-cream-300/60 text-center py-8">No tasks {filter !== "all" && `with status "${filter}"`}.</div></Card>}
-          {filtered.map(j => <TaskRow key={j.id} job={j} focused={focusId === j.id} onClick={() => { params.set("focus", j.id); setParams(params); }} />)}
+          {!loaded && <Card><SkeletonList rows={6} /></Card>}
+          {loaded && filtered.length === 0 && <Card><div className="text-sm text-cream-300/60 text-center py-8">No tasks {filter !== "all" && `with status "${filter}"`}.</div></Card>}
+          {filtered.map((j, i) => <div key={j.id} className={`nw-fade-up nw-delay-${Math.min(7, i + 1)}`}><TaskRow job={j} focused={focusId === j.id} onClick={() => { params.set("focus", j.id); setParams(params); }} /></div>)}
         </div>
 
         <div className="col-span-3">
@@ -60,7 +63,23 @@ export function Tasks() {
 // into something a customer would say if they were doing the work themselves.
 function friendlyPhase(job: any): string {
   if (job.status === "succeeded") return "Done";
-  if (job.status === "failed") return "Hit a snag";
+  if (job.status === "failed") {
+    // Classify the failure shape from the error text so the user sees what
+    // KIND of problem it was (transient vs auth vs vault-unreachable vs
+    // unsupported) rather than the cryptic "Hit a snag". The full error
+    // stays below in the technical view; this label scopes the retry choice.
+    const e = String(job.error ?? "").toLowerCase();
+    const hasPartial = typeof job.result?.answer === "string" && job.result.answer.trim().length > 0;
+    if (hasPartial) return "Finished with partial results";
+    if (!e) return "Couldn't complete this task";
+    if (/vault.*unreach|vaultpath|mkdir.*enoent|d:\\\\main brain/.test(e)) return "Couldn't reach your vault";
+    if (/\b(?:401|403|unauthori[sz]ed|forbidden|api key|missing.*token)\b/.test(e)) return "Authorisation problem";
+    if (/\b(?:econnreset|etimedout|enotfound|eai_again|fetch failed|socket hang up|timeout)\b/.test(e)) return "Network hiccup, retry";
+    if (/\b(?:429|rate.?limit|too many requests)\b/.test(e)) return "Rate-limited";
+    if (/cannot read properties of undefined/.test(e)) return "Internal error, retry";
+    if (/no such tool|invalid tool|unknown tool/.test(e)) return "Couldn't route this, try rephrasing";
+    return "Couldn't complete this task";
+  }
   if (job.status === "rejected") return "Rejected";
   if (job.status === "awaiting-approval") return "Waiting for your approval";
   if (job.status !== "running" && job.status !== "pending") return job.status;
@@ -112,7 +131,7 @@ function friendlyTitle(job: any): string {
 function LiveActivityStrip({ jobs }: { jobs: any[] }) {
   const [, setParams] = useSearchParams();
   return (
-    <div className="bg-violet-500/5 border border-violet-500/30 rounded-xl p-4">
+    <div className="bg-violet-500/10 border border-violet-500/30 rounded-xl p-4">
       <div className="flex items-center gap-2 mb-3">
         <span className="inline-block w-1.5 h-1.5 rounded-full bg-violet-500 animate-pulse" />
         <span className="text-[10px] uppercase tracking-wider text-violet-300/80">Working now</span>
@@ -187,7 +206,9 @@ function TaskRow({ job, focused, onClick }: { job: any; focused: boolean; onClic
           </div>
         </div>
         {!isRunning && isGeneral && job.status === "succeeded" && (
-          <Link to={`/results/${job.id}`} onClick={e => e.stopPropagation()} className="text-[11px] text-violet-400 hover:text-violet-500 shrink-0 mt-0.5">Report →</Link>
+          <Link to={`/results/${job.id}`} onClick={e => e.stopPropagation()} className="inline-flex items-center gap-1 text-[11px] text-violet-400 hover:text-violet-500 shrink-0 mt-0.5">
+            Report <ArrowRight size={11} />
+          </Link>
         )}
       </div>
     </button>

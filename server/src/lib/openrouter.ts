@@ -7,6 +7,27 @@ export type OpenRouterCallOptions = {
   maxTokens?: number;
 };
 
+// Transient = worth retrying / falling back, NOT a config problem. 429 is the
+// big one for free-tier models ("temporarily rate-limited upstream"); 5xx are
+// provider hiccups. Errors carrying `transient: true` tell the llm-router it
+// may fall back to the local model instead of failing the whole task.
+const TRANSIENT_STATUS = new Set([429, 500, 502, 503, 504]);
+const MAX_ATTEMPTS = Math.max(1, Number(process.env.CLAWBOT_OR_MAX_ATTEMPTS ?? "3"));
+const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
+// Exponential backoff: ~0.5s, 1s, 2s … capped at 8s.
+const backoffMs = (attempt: number) => Math.min(8_000, 500 * 2 ** (attempt - 1));
+
+export function isTransientError(e: unknown): boolean {
+  return !!(e && typeof e === "object" && (e as { transient?: boolean }).transient === true);
+}
+function markTransient(e: Error): Error {
+  (e as { transient?: boolean }).transient = true;
+  return e;
+}
+function looksTransientMsg(msg: string): boolean {
+  return /\b429\b|rate.?limit|temporarily|provider returned error|overloaded|timed? ?out/i.test(msg);
+}
+
 // Streaming chat completion against OpenRouter's OpenAI-compatible endpoint.
 // Returns the full text and the resolved model name.
 //
@@ -26,28 +47,50 @@ export async function openrouterGenerateWithMeta(
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 15 * 60_000);
   try {
-    const res = await fetch(`${config.openrouterBaseUrl}/chat/completions`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${config.openrouterApiKey}`,
-        // OpenRouter uses these to track per-app usage on dashboards and to
-        // gate access to free-tier models. Required for production traffic.
-        "HTTP-Referer": config.openrouterAppUrl,
-        "X-Title": config.openrouterAppName,
-      },
-      body: JSON.stringify({
-        model,
-        messages,
-        stream: true,
-        temperature: opts.temperature ?? 0.3,
-        max_tokens: opts.maxTokens ?? 1024,
-      }),
-      signal: ctrl.signal,
-    });
-    if (!res.ok) {
-      const body = await res.text();
-      throw new Error(`OpenRouter ${res.status}: ${body.slice(0, 400)}`);
+    // Establish the streaming response with retry-on-transient. Retries happen
+    // BEFORE any token is emitted, so the consumer never sees partial output
+    // from a doomed attempt. Honours a Retry-After header when present.
+    let res: Response;
+    for (let attempt = 1; ; attempt++) {
+      let r: Response;
+      try {
+        r = await fetch(`${config.openrouterBaseUrl}/chat/completions`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${config.openrouterApiKey}`,
+            // OpenRouter uses these to track per-app usage on dashboards and to
+            // gate access to free-tier models. Required for production traffic.
+            "HTTP-Referer": config.openrouterAppUrl,
+            "X-Title": config.openrouterAppName,
+          },
+          body: JSON.stringify({
+            model,
+            messages,
+            stream: true,
+            temperature: opts.temperature ?? 0.3,
+            max_tokens: opts.maxTokens ?? 1024,
+          }),
+          signal: ctrl.signal,
+        });
+      } catch (e: any) {
+        // Network-level failure (DNS, reset, abort) — transient, retry.
+        if (attempt < MAX_ATTEMPTS) { await sleep(backoffMs(attempt)); continue; }
+        throw markTransient(new Error(`OpenRouter request failed after ${attempt} attempts: ${e?.message ?? e}`));
+      }
+      if (r.ok) { res = r; break; }
+      const body = await r.text();
+      if (TRANSIENT_STATUS.has(r.status) && attempt < MAX_ATTEMPTS) {
+        const retryAfter = Number(r.headers.get("retry-after"));
+        const wait = Number.isFinite(retryAfter) && retryAfter > 0 ? Math.min(retryAfter * 1000, 10_000) : backoffMs(attempt);
+        console.warn(`[openrouter] ${r.status} on ${model} (attempt ${attempt}/${MAX_ATTEMPTS}) — retrying in ${wait}ms`);
+        await sleep(wait);
+        continue;
+      }
+      // Exhausted retries or a non-transient status (401/403/400/404) — throw.
+      const err = new Error(`OpenRouter ${r.status}: ${body.slice(0, 400)}`);
+      if (TRANSIENT_STATUS.has(r.status)) markTransient(err);
+      throw err;
     }
     if (!res.body) throw new Error("OpenRouter: empty response body");
 
@@ -75,7 +118,12 @@ export async function openrouterGenerateWithMeta(
             model?: string;
             error?: { message: string };
           };
-          if (evt.error) throw new Error(`OpenRouter: ${evt.error.message}`);
+          if (evt.error) {
+            // Free models sometimes 200 then stream a rate-limit error object.
+            const e = new Error(`OpenRouter: ${evt.error.message}`);
+            if (looksTransientMsg(evt.error.message)) markTransient(e);
+            throw e;
+          }
           if (evt.model) resolvedModel = evt.model;
           const delta = evt.choices?.[0]?.delta?.content;
           if (delta) {

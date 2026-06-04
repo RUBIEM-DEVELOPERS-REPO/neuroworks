@@ -211,10 +211,28 @@ async function handleChat(req: any, res: any) {
   //      Combined with the existing detectAmbiguity for residual shape
   //      catches (bare pronouns, bare confirmations).
   const intentDetection = extractIntent(text, useThreadContext);
+  // Detect whether the request carries attached documents. The clarification
+  // gates below ask for a "target" slot when the verb is summarize/review/
+  // extract/etc. — but if the user uploaded a doc and said "summarize this",
+  // the target IS the attachment. Without this check the gate fires asking
+  // "what should I summarize?" while the upload sits unused, and (worse)
+  // when the user retries with the doc named, the planner falls back to
+  // vault.search because no attachment was ever folded into the task.
+  const hasAttachments = Array.isArray(req.body?.attachments) && req.body.attachments.some((a: any) => a?.contextId);
+  // Some intents are "transform inline content" by nature — summarize,
+  // review, extract, edit, translate. When an attachment is present these
+  // are already fully specified; skip the target-slot follow-up.
+  const transformIntents = new Set(["summarize", "review", "edit", "extract", "translate", "explain"]);
+  const skipTargetGate = hasAttachments && (
+    transformIntents.has(intentDetection.intent ?? "") ||
+    !intentDetection.intent ||
+    (intentDetection as any).followUpKind === "slot"
+  );
   // Skip the clarification gates entirely when the user is responding to
   // a prior "needs context" prompt — they have, by definition, already
-  // satisfied a slot we asked about, so re-asking would loop.
-  if (!useThreadContext && !isContinuation && intentDetection.followUp) {
+  // satisfied a slot we asked about, so re-asking would loop. Also skip
+  // them when an attachment fills the missing slot (see above).
+  if (!useThreadContext && !isContinuation && !skipTargetGate && intentDetection.followUp) {
     return res.json({
       kind: "message",
       text: intentDetection.followUp,
@@ -227,7 +245,7 @@ async function handleChat(req: any, res: any) {
       },
     });
   }
-  if (!useThreadContext && !isContinuation) {
+  if (!useThreadContext && !isContinuation && !hasAttachments) {
     const clarification = detectAmbiguity(text);
     if (clarification.ambiguous) {
       return res.json({
@@ -599,13 +617,17 @@ async function handleChat(req: any, res: any) {
   }
   const baseTask = isContinuation
     ? continuationBlock
-    : buildEnrichedTask(text, useThreadContext, recentUserTurns, lastAssistantTurn, persona, intentDetection);
+    : buildEnrichedTask(text, useThreadContext, recentUserTurns, lastAssistantTurn, persona, intentDetection, hasAttachments);
   const enrichedTask = baseTask + attachmentBlock;
   const job = newJob(`insights:general-task`);
   job.template = tpl.id;
   job.title = isContinuation
     ? `Continuation: ${(continuation!.summary ?? continuation!.originalText).slice(0, 60)}`
     : `Ad-hoc: ${text.slice(0, 60)}`;
+  // Stamp the dispatch-time persona so reflection.byPersona aggregates.
+  // Worker re-attribution still happens via personaIdUsed but this is
+  // the canonical name for the run.
+  if (persona) { job.personaId = persona.id; job.personaName = persona.name; }
   // `task` (what the planner consumes) is the enriched version. `userText`
   // (the bare user message) is kept on the job for UI display, retry, and
   // the journal record. The detected intent is stamped on inputs so the
@@ -1104,13 +1126,13 @@ function buildFormatHint(intent: Intent, tone?: string, scope?: string): string 
       shape = "One-page report. Use `## Overview`, `## Findings`, `## Recommendations` (and `## Next steps` if relevant). Each section 2-5 sentences or 3-6 bullets. No preamble.";
       break;
     case "draft-brief":
-      shape = "1-page brief. Start with a 1-line TL;DR (bold), then 3-5 short bulleted sections with clear subheadings. No preamble.";
+      shape = "1-page brief. Start with a 1-line **Bottom line:** (bold label, then the sentence), then 3-5 short bulleted sections with clear subheadings. Do NOT use the literal heading \"TL;DR\" — say what it actually IS. No preamble.";
       break;
     case "draft-other":
       shape = "Direct, finished prose. No \"Here's the draft\" preamble — output the content itself. Sign off with the persona's first name if it's correspondence.";
       break;
     case "summarize":
-      shape = "Summary format. Start with a 1-sentence TL;DR (bold), then 3-7 short bullets covering the key points, then a `## Sources` block if any sources were used. No preamble.";
+      shape = "Summary format. Start with a 1-sentence **Bottom line:** (bold label, then the sentence), then 3-7 short bullets covering the key points, then a `## Sources` block if any sources were used. Do NOT use the literal heading \"TL;DR\" — say what it actually IS. No preamble.";
       break;
     case "review":
       shape = "Review format. `## Verdict` (1-2 sentence judgement), `## Strengths` (3-5 bullets), `## Issues` (3-5 bullets, severity-ordered), `## Recommendations` (numbered actions). No preamble.";
@@ -1318,6 +1340,7 @@ function buildEnrichedTask(
   lastAssistantTurn: string,
   persona: { name: string; role: string } | null,
   intent?: IntentDetection,
+  hasAttachments: boolean = false,
 ): string {
   const parts: string[] = [];
   if (persona) {
@@ -1378,11 +1401,31 @@ function buildEnrichedTask(
   // context in the prompt window.
   if (intent && (intent.target || intent.recipient || intent.tone || intent.scope || intent.intent !== "answer")) {
     const intentBits: string[] = [`intent=${intent.intent}`];
-    if (intent.target) intentBits.push(`target="${intent.target.slice(0, 120)}"`);
+    if (intent.target) {
+      // If the target is a bare pronoun ("this", "that", "it") AND we have
+      // an attachment, rewrite to point AT the attachment so the planner
+      // doesn't take "this" as a literal research topic. Without this fix
+      // "summarize this" + uploaded doc planned research.deep on the word
+      // "this" — exactly the failure mode the user reported.
+      const bareReferent = /^\s*(?:this|that|it|the(?:\s+(?:above|attached|document|doc|file|pdf|note))?)\s*$/i.test(intent.target);
+      if (bareReferent && hasAttachments) {
+        intentBits.push(`target="the attached document(s) below"`);
+      } else {
+        intentBits.push(`target="${intent.target.slice(0, 120)}"`);
+      }
+    } else if (hasAttachments) {
+      intentBits.push(`target="the attached document(s) below"`);
+    }
     if (intent.recipient) intentBits.push(`recipient="${intent.recipient.slice(0, 60)}"`);
     if (intent.tone) intentBits.push(`tone=${intent.tone}`);
     if (intent.scope) intentBits.push(`scope=${intent.scope}`);
     parts.push(`Interpretation: ${intentBits.join(", ")}.`);
+  }
+  // Strong directive when attachments are present — sits closest to the
+  // planner's read of the request so it overrides the default "search
+  // first" instinct.
+  if (hasAttachments) {
+    parts.push(`**Source-of-truth notice.** Attached documents follow this block. They are the SOURCE for this task. Do NOT plan vault.search / vault.read / fs.find_in / fs.read_text — the content is already inline below. Operate directly on the attached text.`);
   }
   if (intent?.formatHint) {
     parts.push(intent.formatHint);

@@ -19,9 +19,21 @@ export type Job = {
   requiresApproval?: boolean;
   approvedAt?: string;
   rejectedAt?: string;
+  // Persona attribution at dispatch time. Populated by callers (chat, team)
+  // so the reflection's byPersona bucket has a stable name to aggregate on.
+  // Previously the reflection had to reach into result.activePersona.name
+  // which nobody was setting, leaving byPersona empty for every run.
+  personaId?: string;
+  personaName?: string;
 };
 
 const jobs = new Map<string, Job>();
+// Boot timestamp of the in-memory state. Survives nothing — recorded
+// at module load, reset whenever tsx watch restarts the server. We
+// surface it on every job-not-found response so a client polling a
+// stale jobId can tell the difference between "job ran, was evicted"
+// (rare) and "server restarted under you" (common in dev / hot reload).
+export const SERVER_BOOT_AT = new Date().toISOString();
 // Bumped from 50 → 200 because team-dispatch can fire 12 parallel jobs that
 // each spawn sub-jobs (peer.delegate, peer.review), and at 50 the eviction
 // would kick out still-running team-task jobs before the harness could poll
@@ -88,6 +100,27 @@ export function newJob(kind: string): Job {
 
 export function getJob(id: string) { return jobs.get(id); }
 export function listJobs() { return [...jobs.values()].sort((a, b) => b.startedAt.localeCompare(a.startedAt)); }
+
+// Mark every still-running / pending job as failed with a clear
+// abort message and persist it to the JSONL store. Called from the
+// graceful shutdown handler so a tsx-watch restart (or any other
+// shutdown that interrupts in-flight work) leaves the journal in a
+// consistent state — the reflection sees the abort rather than a
+// silent disappearance, and the client can show a clear "server
+// restarted" message instead of an opaque 404.
+export function abortInflightJobs(reason: string): { aborted: number } {
+  let aborted = 0;
+  for (const j of jobs.values()) {
+    if (j.status !== "pending" && j.status !== "running" && j.status !== "awaiting-approval") continue;
+    j.status = "failed";
+    j.error = reason;
+    j.finishedAt = new Date().toISOString();
+    j.log.push(`[${j.finishedAt}] ${reason}`);
+    try { persistJobRecord(j); } catch { /* tolerate */ }
+    aborted += 1;
+  }
+  return { aborted };
+}
 
 export type ProgressUpdater = (patch: Record<string, unknown>) => void;
 

@@ -242,6 +242,13 @@ export async function delegateToPeer(peer: PeerInfo, args: {
         review: j.result?.review,
         quality: j.result?.quality,
         security: j.result?.security,
+        // Persona verification trail — the worker stamps personaIdUsed /
+        // personaNameUsed on its return so the primary's chat handler can
+        // confirm the snapshot was honored. Without forwarding these here,
+        // the primary reads null and warns "ran as <none>" even when the
+        // worker actually scoped the run correctly.
+        personaIdUsed: j.result?.personaIdUsed ?? null,
+        personaNameUsed: j.result?.personaNameUsed ?? null,
         error: j.error,
         elapsedMs: Date.now() - t0,
       };

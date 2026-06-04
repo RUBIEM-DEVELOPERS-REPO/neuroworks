@@ -88,7 +88,7 @@ function BotChip({ bot }: { bot: Peer }) {
   const dot = dead ? "bg-coral-500" : busy ? "bg-violet-500 animate-pulse" : "bg-leaf-500";
   return (
     <div className={`flex items-center gap-3 bg-ink-950 border ${ring} rounded-lg px-3.5 py-2.5`}>
-      <div className="relative">
+      <div className={`relative ${busy && !dead ? "nw-avatar-active" : ""}`}>
         {/* Stylized clawbot mark — small triangle stack */}
         <svg width="28" height="28" viewBox="0 0 28 28" className="block">
           <polygon points="14,4 24,22 4,22" fill="#c9a227" />

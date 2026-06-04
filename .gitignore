@@ -15,3 +15,14 @@ web/dist/
 # User-fetched skill .md files (skill.fetch_remote drops them here, gated by
 # CLAWBOT_REMOTE_SKILLS=1). Per-machine, not shared.
 server/src/skills/_user/
+
+# Tunnel binary (downloaded per-machine) + operational logs
+.tools/
+_devlog.txt
+_weblog.txt
+_tunnel.log
+# Test/scratch harness artifacts
+server/_*-harness*
+server/_*.out
+server/eng.traineddata
+server/page1.png

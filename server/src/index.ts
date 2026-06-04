@@ -13,15 +13,30 @@ import { modelsRouter } from "./routes/models.js";
 import { ollamaGenerate } from "./lib/ollama.js";
 import { shutdownCommitQueue } from "./lib/commit-queue.js";
 import { startVaultWatcher, stopVaultWatcher, startVaultPullScheduler, stopVaultPullScheduler, getVaultHealth } from "./lib/vault.js";
+import { buildIndex } from "./lib/vault-index.js";
 import { autodiscoverLocalPeers } from "./lib/peer-registry.js";
 import { ensureWorker, shutdownManagedWorker } from "./lib/worker-manager.js";
 import { loadPersonas } from "./lib/personas.js";
 import { ensureAllPersonasHaveTemplates } from "./lib/persona-templates.js";
 import { startReflectionScheduler, stopReflectionScheduler } from "./lib/reflection.js";
+import { abortInflightJobs } from "./lib/jobs.js";
 import { reflectionRouter } from "./routes/reflection.js";
 import { skillsRouter } from "./routes/skills.js";
 import { uploadsRouter } from "./routes/uploads.js";
 import { teamRouter } from "./routes/team.js";
+import { teamsRouter } from "./routes/teams.js";
+import { schedulesRouter } from "./routes/schedules.js";
+import { startScheduleScheduler, stopScheduleScheduler } from "./lib/schedules.js";
+import { governanceRouter } from "./routes/governance.js";
+import { emailRouter } from "./routes/email.js";
+import { externalAgentsRouter } from "./routes/external-agents.js";
+import { feedbackRouter } from "./routes/feedback.js";
+import { exportsRouter } from "./routes/exports.js";
+import { calendarRouter } from "./routes/calendar.js";
+import { dataSourcesRouter } from "./routes/data-sources.js";
+import { terminalRouter } from "./routes/terminal.js";
+import { sttRouter } from "./routes/stt.js";
+import { startEmailBridge, stopEmailBridge } from "./lib/email.js";
 import { originGuard } from "./lib/origin-guard.js";
 
 const app = express();
@@ -77,6 +92,17 @@ app.use("/api/reflection", reflectionRouter);
 app.use("/api/skills", skillsRouter);
 app.use("/api/uploads", uploadsRouter);
 app.use("/api/team", teamRouter);
+app.use("/api/teams", teamsRouter);
+app.use("/api/schedules", schedulesRouter);
+app.use("/api/governance", governanceRouter);
+app.use("/api/email", emailRouter);
+app.use("/api/external-agents", externalAgentsRouter);
+app.use("/api/feedback", feedbackRouter);
+app.use("/api/exports", exportsRouter);
+app.use("/api/calendar", calendarRouter);
+app.use("/api/data-sources", dataSourcesRouter);
+app.use("/api/terminal", terminalRouter);
+app.use("/api/stt", sttRouter);
 
 // Global error handler — every route mounts before this so any throw bubbles
 // up here. We log the request method+url for debugability and return a
@@ -190,6 +216,18 @@ app.listen(config.port, "127.0.0.1", () => {
   // watcher misbehaves. Fall-back behaviour is the 60s search cache TTL.
   startVaultWatcher();
 
+  // Warm the MiniSearch index at boot so the first vault.search hits a
+  // populated index instead of returning zero matches while the build
+  // races a 60s lazy timer. Fire-and-forget — the build is idempotent
+  // and the search code falls back to grep if the index isn't ready yet.
+  // Primary-only because workers proxy vault search through the primary.
+  if (config.role === "primary") {
+    void buildIndex(config.vaultPath).catch(e =>
+      console.warn(`  ⚠ vault index warm-up failed (non-fatal): ${e?.message ?? e}`)
+    );
+    console.log(`  ⓘ vault index warming...`);
+  }
+
   // Periodic git pull from origin so Obsidian edits made on another machine
   // (or via Obsidian's git plugin) sync into the local vault that clawbot
   // reads. Default every 5m; opt out with CLAWBOT_VAULT_PULL=0.
@@ -201,6 +239,23 @@ app.listen(config.port, "127.0.0.1", () => {
   if (process.env.CLAWBOT_REFLECTION !== "0" && config.role === "primary") {
     startReflectionScheduler();
     console.log(`  ⓘ nightly reflection scheduler armed (hour=${process.env.CLAWBOT_REFLECTION_HOUR ?? "2"})`);
+  }
+
+  // User-defined schedules — fires template runs on a friendly day-of-week +
+  // time-of-day cadence. Primary-only so the same schedule doesn't run on
+  // every worker. Disable with CLAWBOT_SCHEDULES=0.
+  if (process.env.CLAWBOT_SCHEDULES !== "0" && config.role === "primary") {
+    startScheduleScheduler();
+    console.log(`  ⓘ schedule tick armed (30s interval)`);
+  }
+
+  // Email bridge — inbound IMAP poll + outbound SMTP so users can drive
+  // clawbot over email. Primary-only (one poller for the fleet). No-ops with
+  // a log when CLAWBOT_EMAIL_USER / CLAWBOT_EMAIL_APP_PASSWORD aren't set.
+  if (config.role === "primary") {
+    void startEmailBridge().catch(e =>
+      console.warn(`  ⚠ email bridge start failed: ${e?.message ?? e}`)
+    );
   }
 });
 
@@ -214,12 +269,27 @@ async function gracefulExit(signal: string) {
   if (shuttingDown) return;
   shuttingDown = true;
   console.log(`\n  ⏻ received ${signal} — flushing pending vault writes…`);
+  // Mark every in-flight job as failed BEFORE we let the process exit.
+  // Without this, a tsx-watch reload (very common in dev) would leave
+  // pending/running jobs in indeterminate state — the in-memory map dies
+  // with the process, the client sees a 404, and the reflection never
+  // records the abort. Persisting the abort to the JSONL store keeps the
+  // journal honest and lets the client surface a clear "server restarted"
+  // message rather than a generic "job not found".
+  try {
+    const { aborted } = abortInflightJobs(`aborted: server received ${signal}`);
+    if (aborted > 0) console.log(`  ⚠ aborted ${aborted} in-flight job(s)`);
+  } catch (e: any) { console.warn(`  ⚠ job abort failed: ${e?.message ?? e}`); }
   try { await shutdownCommitQueue(); console.log("  ✓ vault flush complete"); }
   catch (e: any) { console.warn(`  ⚠ vault flush failed: ${e?.message ?? e}`); }
   try { await shutdownManagedWorker(); }
   catch (e: any) { console.warn(`  ⚠ worker shutdown failed: ${e?.message ?? e}`); }
   try { stopReflectionScheduler(); }
   catch { /* never block shutdown on a scheduler stop */ }
+  try { stopScheduleScheduler(); }
+  catch { /* never block shutdown on a scheduler stop */ }
+  try { stopEmailBridge(); }
+  catch { /* never block shutdown on the email bridge */ }
   try { stopVaultWatcher(); }
   catch { /* never block shutdown on a watcher close */ }
   try { stopVaultPullScheduler(); }

@@ -25,7 +25,7 @@ Procurement / leadership scans one table, sees the totals + the risks, and gets 
 
 **Buyer:** <Team / use case> · **Horizon:** <12 months / 3 years>
 
-## TL;DR
+## Bottom line
 **Recommend: <Vendor X>.** <Two-sentence reason.>
 
 ## TCO (normalised, 12-month)

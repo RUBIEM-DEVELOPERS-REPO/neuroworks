@@ -1,9 +1,30 @@
+// Custom error class so 404s on job polls can be detected by callers
+// and surface a "server restarted" message instead of a bare "not found".
+export class ApiError extends Error {
+  status: number;
+  hint?: string;
+  serverBootAt?: string;
+  constructor(status: number, message: string, opts?: { hint?: string; serverBootAt?: string }) {
+    super(message);
+    this.status = status;
+    this.hint = opts?.hint;
+    this.serverBootAt = opts?.serverBootAt;
+  }
+}
+
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const r = await fetch(path, { ...init, headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) } });
   if (!r.ok) {
     let msg = `${r.status} ${r.statusText}`;
-    try { const body = await r.json(); msg = body.error ?? msg; } catch {}
-    throw new Error(msg);
+    let hint: string | undefined;
+    let serverBootAt: string | undefined;
+    try {
+      const body = await r.json();
+      msg = body.error ?? msg;
+      if (typeof body.hint === "string") hint = body.hint;
+      if (typeof body.serverBootAt === "string") serverBootAt = body.serverBootAt;
+    } catch {}
+    throw new ApiError(r.status, msg, { hint, serverBootAt });
   }
   return r.json() as Promise<T>;
 }
@@ -39,6 +60,8 @@ export const api = {
   brainSearch: (q: string) => req<{ q: string; results: { path: string; line: number; preview: string }[] }>(`/api/brain/search?q=${encodeURIComponent(q)}`),
   brainLatestDigest: () => req<{ content: string }>("/api/brain/digest/latest"),
   brainPromote: (path: string, opts?: { title?: string; tags?: string; keepOriginal?: boolean }) => req<{ promoted: true; from: string; to: string; archived: boolean }>("/api/brain/promote", { method: "POST", body: JSON.stringify({ path, ...opts }) }),
+  brainDiscard: (path: string) => req<{ deleted: string[]; count: number }>("/api/brain/discard", { method: "POST", body: JSON.stringify({ path }) }),
+  brainProcessImports: (folder = "_imports") => req<{ jobId: string }>("/api/brain/process-imports", { method: "POST", body: JSON.stringify({ folder }) }),
   vaultStats: () => req<{ lastCommit: any; totalCommits: number; coalescedSavings: number; pendingWrites: number; inFlight: boolean; debounceMs: number }>("/api/status/vault"),
   llmStatus: () => req<{
     ollama: { ok: boolean; model: string; error?: string };
@@ -91,7 +114,17 @@ export const api = {
       route: "primary" | "auto" | "explicit" | "active";
     }[];
   }>("/api/team", { method: "POST", body: JSON.stringify({ tasks }) }),
-  upload: (body: { filename: string; contentBase64: string; target: "context" | "vault"; vaultFolder?: string; mimeType?: string }) => req<{
+  listTeams: () => req<{
+    teams: { id: string; name: string; description: string; members: { personaId: string; role: string }[] }[];
+    templates: { id: string; name: string; description?: string; teamId?: string; builtin?: boolean; tasks: { persona: string; content: string }[] }[];
+  }>("/api/teams"),
+  dispatchTeam: (body: { teamId?: string; templateId?: string; objective?: string }) => req<{
+    kind: "team-dispatch";
+    label: string;
+    tasksDispatched: number;
+    tasks: { taskIndex: number; persona: { id: string; name: string; role: string } | null; personaAutoRouted: boolean; jobId: string; route: "primary" | "auto" | "explicit" | "active" }[];
+  }>("/api/teams/dispatch", { method: "POST", body: JSON.stringify(body) }),
+  upload: (body: { filename: string; contentBase64: string; target: "context" | "vault"; vaultFolder?: string; mimeType?: string; ttlSeconds?: number }) => req<{
     ok: true;
     target: "context" | "vault";
     contextId?: string;
@@ -114,6 +147,22 @@ export const api = {
   listPersonaTemplates: (id: string) => req<{ templates: any[] }>(`/api/personas/${id}/templates`),
   previewPersona: (jobDescription: string) => req<{ role: string; description: string; tone: string; responsibilities: string[] }>("/api/personas/preview", { method: "POST", body: JSON.stringify({ jobDescription }) }),
   peers: () => req<{ self: any; peers: any[]; registry?: any[] }>("/api/peers"),
+  externalAgents: () => req<{ agents: { id: string; name: string; kind: string; installed: boolean; configured: boolean; binPath?: string; recentJobs: { last1h: number; last24h: number; succeeded: number; failed: number; total: number }; lastRunAt?: string }[] }>("/api/external-agents"),
+  getFeedback: (jobId: string) => req<{ feedback: { rating: "up" | "down"; note?: string; ts: string } | null }>(`/api/feedback?jobId=${encodeURIComponent(jobId)}`),
+  postFeedback: (body: { jobId: string; rating: "up" | "down"; note?: string; persona?: string; template?: string; score?: number }) => req<{ ok: true; path: string }>("/api/feedback", { method: "POST", body: JSON.stringify(body) }),
+  retryFromFeedback: (jobId: string, note?: string) => req<{ newJobId: string; originalJobId: string }>("/api/feedback/retry", { method: "POST", body: JSON.stringify({ jobId, ...(note ? { note } : {}) }) }),
+  calendarActivity: (from?: string, to?: string) => req<{ from: string; to: string; days: { date: string; jobs: { id: string; kind: string; template?: string; title?: string; personaName?: string; status: string; startedAt: string; finishedAt?: string; durationSec?: number; scoreOrNull?: number | null }[] }[] }>(`/api/calendar/activity${from || to ? "?" + new URLSearchParams({ ...(from ? { from } : {}), ...(to ? { to } : {}) }).toString() : ""}`),
+  calendarAgenda: (date: string) => req<{ date: string; activity: any[]; meetings: { summary: string; start: string; end?: string; location?: string }[]; meetingsError?: string; schedules: any[] }>(`/api/calendar/agenda?date=${encodeURIComponent(date)}`),
+  brainSave: (path: string, content: string) => req<{ ok: true; path: string; bytes: number }>("/api/brain/file", { method: "POST", body: JSON.stringify({ path, content }) }),
+  brainEnsureSidecar: (path: string, force = false) => req<{ ok: true; sidecarPath: string; sourcePath: string; regenerated: boolean; reason?: string; bytes?: number }>("/api/brain/ensure-sidecar", { method: "POST", body: JSON.stringify({ path, force }) }),
+  listDataSources: () => req<{ sources: DataSource[] }>("/api/data-sources"),
+  addDataSource: (body: { label: string; kind: "postgres" | "mysql" | "sqlite"; connection: string; notes?: string; readonly: boolean }) =>
+    req<{ source: DataSource }>("/api/data-sources", { method: "POST", body: JSON.stringify(body) }),
+  removeDataSource: (id: string) => req<{ ok: true }>(`/api/data-sources/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  testDataSource: (id: string) => req<{ ok: boolean; rowCount?: number; error?: string }>(`/api/data-sources/${encodeURIComponent(id)}/test`, { method: "POST" }),
+  queryDataSource: (id: string, sql: string, limit?: number) => req<{ rows: any[]; columns: string[]; rowCount: number; truncated: boolean }>(`/api/data-sources/${encodeURIComponent(id)}/query`, { method: "POST", body: JSON.stringify({ sql, ...(limit ? { limit } : {}) }) }),
+  describeDataSource: (id: string) => req<{ tables: { name: string; columns: { name: string; type: string }[] }[] }>(`/api/data-sources/${encodeURIComponent(id)}/schema`),
+  listCompanyFiles: () => req<{ entries: { name: string; path: string; type: "dir" | "file" }[]; note?: string }>("/api/data-sources/company-files"),
   registerPeer: (url: string) => req<{ added: boolean; url: string }>("/api/peers/register", { method: "POST", body: JSON.stringify({ url }) }),
   deregisterPeer: (url: string) => req<{ removed: boolean }>(`/api/peers/register?url=${encodeURIComponent(url)}`, { method: "DELETE" }),
   discoverPeers: () => req<{ found: number; tried: number }>("/api/peers/discover", { method: "POST" }),
@@ -144,4 +193,70 @@ export const api = {
     path: string;
     body: string;
   }>(`/api/skills/${encodeURIComponent(name)}`),
+  listGovernance: () => req<{ policies: GovernancePolicy[]; prefixBytes: number; prefixActive: boolean }>("/api/governance"),
+  getGovernance: (name: string) => req<{ name: string; path: string; body: string }>(`/api/governance/${encodeURIComponent(name)}`),
+  deleteGovernance: (name: string) => req<{ ok: true; deleted: string }>(`/api/governance/${encodeURIComponent(name)}`, { method: "DELETE" }),
+  invalidateGovernance: () => req<{ ok: true }>("/api/governance/invalidate", { method: "POST" }),
+  listSchedules: () => req<{ schedules: Schedule[] }>("/api/schedules"),
+  createSchedule: (body: {
+    name: string;
+    templateId: string;
+    inputs?: Record<string, unknown>;
+    cadence: Cadence;
+    enabled?: boolean;
+  }) => req<{ schedule: Schedule }>("/api/schedules", { method: "POST", body: JSON.stringify(body) }),
+  updateSchedule: (id: string, patch: Partial<Pick<Schedule, "name" | "templateId" | "inputs" | "cadence" | "enabled">>) =>
+    req<{ schedule: Schedule }>(`/api/schedules/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(patch) }),
+  deleteSchedule: (id: string) => req<{ ok: true }>(`/api/schedules/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  sttStatus: () => req<{ enabled: boolean; provider: string; hint?: string }>("/api/stt/status"),
+  transcribe: (audioBase64: string) => req<{ ok: true; text: string; language: string | null }>("/api/stt", { method: "POST", body: JSON.stringify({ audioBase64 }) }),
+  terminalStatus: () => req<{ enabled: boolean; cwd: string; shell: "powershell" | "bash"; platform: string; hint?: string }>("/api/terminal/status"),
+  terminalExec: (command: string, cwd?: string) => req<{
+    ok: true;
+    command: string;
+    exitCode: number | null;
+    timedOut: boolean;
+    stdout: string;
+    stderr: string;
+    cwd: string;
+    elapsedMs: number;
+  }>("/api/terminal/exec", { method: "POST", body: JSON.stringify({ command, ...(cwd ? { cwd } : {}) }) }),
+};
+
+export type DataSource = {
+  id: string;
+  label: string;
+  kind: "postgres" | "mysql" | "sqlite";
+  connection: string;
+  notes?: string;
+  readonly: boolean;
+  createdAt: string;
+};
+
+export type GovernancePolicy = {
+  path: string;
+  name: string;
+  bytes: number;
+  lastModified: string;
+};
+
+export type Cadence = {
+  daysOfWeek: number[];
+  hour: number;
+  minute: number;
+};
+
+export type Schedule = {
+  id: string;
+  name: string;
+  templateId: string;
+  inputs: Record<string, unknown>;
+  cadence: Cadence;
+  enabled: boolean;
+  createdAt: string;
+  lastFiredAt?: string;
+  lastJobId?: string;
+  lastError?: string;
+  fireCount: number;
+  nextFireAt?: number | null;
 };

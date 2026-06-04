@@ -40,6 +40,13 @@ export type DailyStats = {
   slowestSteps: { tool: string; durationSec: number; jobId: string }[];
   toolStats: { tool: string; runs: number; ok: number; failed: number; avgDurationSec: number; failureRate: number }[];
   retries: { jobId: string; title?: string }[];
+  // Continuation lineage — tasks that resumed from an earlier "needs context"
+  // turn. Distinct from `retries` (which replay a failed task) because a
+  // continuation ADDS context to a task that asked for it. Chains can be
+  // multi-step (a → b → c where b continues a and c continues b); we record
+  // each link so the reflection narrative can call out the longest chain
+  // and the original ask that drove it.
+  continuations: { jobId: string; title?: string; continuesJobId: string; summary?: string; originalText?: string }[];
   // Skill picker telemetry — surfaces which playbook guided each task and
   // how often picks correlated with success. Reflection uses this to spot
   // patterns like "skill X chosen N times but only succeeded M". Skills
@@ -132,6 +139,7 @@ function aggregate(jobs: Job[], windowStartMs: number, windowEndMs: number): Dai
   const slowSteps: { tool: string; durationSec: number; jobId: string }[] = [];
   const toolBuckets: Record<string, { runs: number; ok: number; failed: number; totalSec: number }> = {};
   const retries: { jobId: string; title?: string }[] = [];
+  const continuations: DailyStats["continuations"] = [];
   const skillBuckets: Record<string, { runs: number; ok: number; failed: number; totalScore: number }> = {};
 
   let succeeded = 0, failed = 0, rejected = 0;
@@ -155,11 +163,35 @@ function aggregate(jobs: Job[], windowStartMs: number, windowEndMs: number): Dai
     }
 
     const r: any = j.result ?? {};
-    const personaName = r.activePersona?.name ?? (j.inputs as any)?.activePersona?.name ?? r.persona?.name;
+    // Persona attribution priority: the canonical job.personaName set at
+    // dispatch (chat / team), then legacy result fields kept for back-
+    // compat with old persisted records (pre-B5 fix).
+    const personaName = (j as any).personaName
+      ?? r.activePersona?.name
+      ?? (j.inputs as any)?.activePersona?.name
+      ?? r.persona?.name
+      ?? r.peer?.name;
     if (personaName) byPersona[personaName] = (byPersona[personaName] ?? 0) + 1;
     const peerName = r.peer?.name;
     if (peerName) byPeer[peerName] = (byPeer[peerName] ?? 0) + 1;
     if ((j.inputs as any)?.retryOf) retries.push({ jobId: j.id, title: j.title });
+    // Continuation lineage: when this job carries `continuesJobId` on its
+    // inputs (set by chat.ts / team.ts when the user replied to a
+    // "needs context" prompt), record the link so the report can re-stitch
+    // the chain. We keep originalText short — a thumbnail of the original
+    // ask — so the reflection narrative doesn't bloat with long bodies.
+    const continuesJobId = (j.inputs as any)?.continuesJobId;
+    if (typeof continuesJobId === "string" && continuesJobId.length > 0) {
+      continuations.push({
+        jobId: j.id,
+        title: j.title,
+        continuesJobId,
+        summary: (j.inputs as any)?.continuesSummary,
+        originalText: typeof (j.inputs as any)?.continuesOriginalText === "string"
+          ? String((j.inputs as any).continuesOriginalText).slice(0, 200)
+          : undefined,
+      });
+    }
 
     // Skill picker telemetry. We bucket every job that had a skill pick
     // — including failed ones — so the reflection can spot patterns like
@@ -238,6 +270,7 @@ function aggregate(jobs: Job[], windowStartMs: number, windowEndMs: number): Dai
     slowestSteps: slowSteps.slice(0, 8),
     toolStats: toolStats.slice(0, 12),
     retries,
+    continuations,
     skillStats: skillStats.slice(0, 12),
   };
 }
@@ -310,6 +343,8 @@ ${stats.skillStats.some(s => s.runs >= 3 && s.successRate < 0.5) ? "_Note: at le
 
 ${stats.retries.length > 0 ? `### Retried tasks\n${stats.retries.map(r => `- ${r.title ?? r.jobId} (${r.jobId.slice(0, 8)})`).join("\n")}` : ""}
 
+${stats.continuations.length > 0 ? `### Continuation chains _(tasks that picked up an earlier ask after the user supplied missing context)_\n${stats.continuations.map(c => `- **${c.summary ?? c.title ?? c.jobId.slice(0,8)}** — continues \`${c.continuesJobId.slice(0,8)}\`${c.originalText ? `\n    > _Original ask: ${c.originalText.replace(/\s+/g," ").trim().slice(0,140)}${c.originalText.length > 140 ? "…" : ""}_` : ""}`).join("\n")}` : ""}
+
 Write the reflection. Honest, terse, numerically grounded.`;
 
   // Single retry before falling back. The reflection LLM call is a
@@ -350,12 +385,14 @@ type: reflection
 date: ${s.date}
 totalTasks: ${s.totalTasks}
 successRate: ${s.successRate}
+continuationChains: ${s.continuations.length}
+retries: ${s.retries.length}
 generated: ${result.generatedAt}
 ${result.modelUsed ? `model: ${result.modelUsed}\n` : ""}---
 
 # Daily reflection — ${s.date}
 
-_${s.totalTasks} tasks · ${s.succeeded} succeeded · ${s.failed} failed · ${(s.successRate * 100).toFixed(0)}% success rate_
+_${s.totalTasks} tasks · ${s.succeeded} succeeded · ${s.failed} failed · ${(s.successRate * 100).toFixed(0)}% success rate · ${s.continuations.length} continuation${s.continuations.length === 1 ? "" : "s"} · ${s.retries.length} ${s.retries.length === 1 ? "retry" : "retries"}_
 
 `;
   const footer = `
@@ -399,8 +436,42 @@ export async function runReflection(opts: { windowHours?: number; force?: boolea
     } catch (e: any) {
       console.warn(`[reflection] write failed: ${e?.message ?? e}`);
     }
+    // Reflection → lessons loop. We extract the "What to try next" /
+    // "What went wrong" sections and append them to _governance/lessons.md
+    // which loadGovernancePrefix() prepends to every agent system prompt.
+    // This is the actual mechanism that makes reflections IMPROVE the
+    // system: yesterday's findings become today's hard rules. Cap kept
+    // at the last 30 days of lessons so the prefix doesn't grow unbounded.
+    try {
+      const { writeLessonsFromReflection } = await import("./reflection-lessons.js");
+      writeLessonsFromReflection(stats.date, text);
+    } catch (e: any) {
+      console.warn(`[reflection] lessons sync failed: ${e?.message ?? e}`);
+    }
     const result: ReflectionResult = { date: stats.date, path, stats, reflection: text, generatedAt, modelUsed };
     lastResult = result;
+    // Surface the reflection on the Calendar by registering a Job record.
+    // /api/calendar/activity reads from listJobs() + the persisted journal;
+    // without a Job entry the daily reflection wouldn't appear next to the
+    // operator's other activity for the day. Tagged with kind=reflection:daily
+    // so the Calendar's filter can pick it out.
+    try {
+      const { newJob } = await import("./jobs.js");
+      const { persistJobRecord } = await import("./job-store.js");
+      const j = newJob(`reflection:daily`);
+      j.title = `Daily reflection — ${stats.date} (${stats.totalTasks} tasks, ${Math.round(stats.successRate * 100)}% success)`;
+      j.status = "succeeded";
+      j.finishedAt = generatedAt;
+      j.result = {
+        answer: text,
+        plan: { summary: `Reflection over ${windowHours}h window` },
+        stats,
+        reflectionPath: path,
+      };
+      try { persistJobRecord(j); } catch { /* tolerate */ }
+    } catch (e: any) {
+      console.warn(`[reflection] job registration failed: ${e?.message ?? e}`);
+    }
     return result;
   })();
   try { return await inFlight; }

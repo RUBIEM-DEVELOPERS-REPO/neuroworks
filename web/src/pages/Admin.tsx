@@ -5,6 +5,9 @@ import { Card, StatusDot } from "../components/Card";
 export function Admin() {
   const [status, setStatus] = useState<any>(null);
   const [peers, setPeers] = useState<{ self: any; peers: any[]; registry?: any[] } | null>(null);
+  // External (CLI) agents like Hermes — rendered in the Workforce card alongside
+  // clawbot peers so the operator manages one workforce, not two surfaces.
+  const [externalAgents, setExternalAgents] = useState<any[]>([]);
   const [vaultStats, setVaultStats] = useState<any>(null);
   const [llm, setLlm] = useState<{ ollama: { ok: boolean; model: string; error?: string }; openrouter: { enabled: boolean; ok: boolean; model: string; error?: string }; primary: "ollama" | "openrouter" } | null>(null);
   useEffect(() => { api.status().then(setStatus); }, []);
@@ -12,6 +15,7 @@ export function Admin() {
     let alive = true;
     async function tick() {
       try { const r = await api.peers(); if (alive) setPeers(r); } catch {}
+      try { const ext = await api.externalAgents(); if (alive) setExternalAgents(ext.agents ?? []); } catch {}
       try { const v = await api.vaultStats(); if (alive) setVaultStats(v); } catch {}
       try { const l = await api.llmStatus(); if (alive) setLlm(l); } catch {}
     }
@@ -76,6 +80,12 @@ export function Admin() {
               <div className="space-y-3">
                 <ClawbotRow bot={{ ...peers.self, ok: true }} isSelf />
                 {peers.peers.length > 0 && peers.peers.map((p, i) => <ClawbotRow key={i} bot={p} />)}
+                {externalAgents.length > 0 && (
+                  <div className="pt-2 mt-2 border-t border-ink-800 space-y-2">
+                    <div className="text-[11px] uppercase tracking-wider text-cream-300/50 px-1">External agents</div>
+                    {externalAgents.map((a, i) => <ExternalAgentRow key={`ext-${i}`} agent={a} />)}
+                  </div>
+                )}
                 <WorkerControls
                   hasActive={peers.peers.some(p => p.ok && p.ready)}
                   registry={peers.registry ?? []}
@@ -394,6 +404,37 @@ function ClawbotRow({ bot, isSelf = false }: { bot: any; isSelf?: boolean }) {
         </div>
       </div>
       <StatusDot ok={!dead && bot.ready !== false} label={dead ? "offline" : busy ? "busy" : "idle"} />
+    </div>
+  );
+}
+
+// External-agent row — mirrors ClawbotRow shape so the two read as one
+// workforce, but the metadata differs: external CLI agents don't expose an
+// inflight count (spawned per task), so we surface recent throughput as the
+// heartbeat instead, and we surface the install path + install-state badge
+// in place of the "this server" tag.
+function ExternalAgentRow({ agent }: { agent: any }) {
+  const r = agent.recentJobs ?? { last1h: 0, last24h: 0, total: 0, succeeded: 0, failed: 0 };
+  const installed = !!agent.installed;
+  const live = r.last1h > 0;
+  return (
+    <div className={`flex items-start gap-4 p-3 rounded-lg border ${!installed ? "border-coral-500/30 bg-coral-500/5" : "border-ink-800 bg-ink-950"}`}>
+      <div className="w-10 h-10 rounded-lg bg-violet-500/15 grid place-items-center text-violet-300 text-xl flex-shrink-0">◈</div>
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-sm font-medium text-cream-50">{agent.name}</span>
+          <span className="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded border text-violet-300 bg-violet-500/10 border-violet-500/30">{agent.kind}</span>
+          <span className="text-[10px] uppercase tracking-wider text-cream-300/40">external</span>
+        </div>
+        <div className="text-[11px] text-cream-300/70 mt-1 font-mono break-all">
+          {installed ? (agent.binPath ?? "installed") : "not installed"}
+        </div>
+        <div className="text-[11px] text-cream-300/50 mt-1">
+          {!installed ? <span className="text-coral-400">install Hermes Agent (Nous Research) to enable</span>
+            : `${r.total} run${r.total === 1 ? "" : "s"} tracked · ${r.succeeded} succeeded · ${r.failed} failed${r.last1h ? ` · ${r.last1h} in last hour` : ""}`}
+        </div>
+      </div>
+      <StatusDot ok={installed} label={!installed ? "offline" : live ? "busy" : "idle"} />
     </div>
   );
 }

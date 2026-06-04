@@ -40,7 +40,7 @@ Your training knowledge of these numbers is almost certainly stale. Web FIRST.
 ```
 **Benchmark question:** <precise — metric, segment, size band, period>
 
-**TL;DR:** <one sentence — the median + the relevant range + the source>
+**Bottom line:** <one sentence — the median + the relevant range + the source>
 
 ## Numbers
 

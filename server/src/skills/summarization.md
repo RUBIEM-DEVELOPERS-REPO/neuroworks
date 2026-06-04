@@ -13,7 +13,7 @@ The reader skips the original, gets the same decisions / actions / facts in 1/10
 ## Output shape
 
 ```
-**TL;DR:** <one sentence — the single thing the reader needs to know>
+**Bottom line:** <one sentence — the single thing the reader needs to know>
 
 ## Key points
 - <Fact / decision / action — most important first> [source]
@@ -29,7 +29,7 @@ The reader skips the original, gets the same decisions / actions / facts in 1/10
 
 ## Principles
 
-- **TL;DR first.** If the reader only gets one line, what is it?
+- **Bottom line first.** If the reader only gets one line, what is it?
 - **Lead with what the source DECIDED or RECOMMENDED**, not what it described.
 - **3-7 bullets.** Less and you're under-summarizing; more and you're paraphrasing.
 - **Lose tone, keep stance.** "The author argues X" stays in; "the author elegantly demonstrates that…" goes.

@@ -23,7 +23,7 @@ The customer is choosing between options. Show what's different on the dimension
 ```
 # <Thing A> vs <Thing B>
 
-**TL;DR:** <One sentence with the recommendation and the constraint.>
+**Bottom line:** <One sentence with the recommendation and the constraint.>
 
 ## At a glance
 

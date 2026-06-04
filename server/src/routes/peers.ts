@@ -364,6 +364,14 @@ peersRouter.post("/delegate", async (req, res) => {
           modelUsed: x.modelUsed,
           result: compactRunResult(x.result, x.step?.tool),
         })),
+        // QA gate outputs hoisted to top-level so delegateToPeer can read them
+        // (peers.ts polls j.result?.quality / .security / .review). Without
+        // these the primary's ResultPanel can't render QualityBlock,
+        // SecurityBlock, or PeerReviewInner for delegated runs — they live
+        // inside runs[] but the UI reads the top-level fields.
+        quality: r.quality,
+        security: r.security,
+        review: r.review,
         delegatedFromPeer: true,
         // Verification trail — the primary's chat handler checks this matches
         // what it sent. Mismatch = persona-shifter bug; log and surface.
@@ -407,11 +415,31 @@ Output ONLY a JSON object with this exact shape, no prose, no markdown fences:
 {"verdict":"good"|"needs-work"|"bad","issues":["<short>",...],"revised_answer":"<your tightened version OR empty string if no revision needed>","confidence":<0..1 number>}
 
 Be terse. "good" = ship it, "needs-work" = fixable issues, "bad" = misleading or off-task.`;
-  let raw: string;
+  // Mirror quality.check resilience: try the extraction profile first (may
+  // route to OpenRouter), fall back to LOCAL Ollama on a transient cloud
+  // failure (429 / rate limit / 5xx / transport). temperature:0 pins verdicts
+  // so peer review noise doesn't masquerade as quality drift. 300s wall-time
+  // cap kills the same long-tail OR-retry loops that produced 91-minute
+  // grader hangs in prior runs.
+  let raw: string = "";
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    raw = await ollamaGenerate(`Task: ${task}\n\nDraft answer:\n${answer}`, sys, { profile: "extraction" });
+    raw = await Promise.race<string>([
+      (async () => {
+        try {
+          return await ollamaGenerate(`Task: ${task}\n\nDraft answer:\n${answer}`, sys, { profile: "extraction", temperature: 0 });
+        } catch (e: any) {
+          const msg = String(e?.message ?? e);
+          if (!/429|rate[\s-]?limit|fetch\s+failed|terminated|ECONNRESET|HTTP\s+5\d\d|timeout|other\s+side\s+closed/i.test(msg)) throw e;
+          return await ollamaGenerate(`Task: ${task}\n\nDraft answer:\n${answer}`, sys, { profile: undefined, temperature: 0 });
+        }
+      })(),
+      new Promise<string>((_, rej) => { timer = setTimeout(() => rej(new Error("peer.review wall-time cap (300s) exceeded")), 300_000); }),
+    ]);
   } catch (e: any) {
-    return res.status(503).json({ error: `local LLM unavailable: ${e?.message ?? e}` });
+    return res.status(503).json({ error: `reviewer LLM unavailable: ${String(e?.message ?? e).slice(0, 200)}` });
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 
   // Strip code fences and find the first balanced JSON object.

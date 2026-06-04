@@ -1,9 +1,15 @@
 import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { marked } from "marked";
+import {
+  Paperclip, X, Plus, Pause, RotateCcw, ArrowRight, AlertTriangle,
+  CheckCircle2, FileText, Send, Mic, Square, Loader2,
+} from "lucide-react";
 import { api } from "../lib/api";
+import { useAudioRecorder } from "../lib/useAudioRecorder";
 import { BrandMark } from "../components/BrandMark";
 import { ResultPanel } from "../components/ResultPanel";
+import { Kbd, MetaKey } from "../components/Kbd";
 
 type Clarification = {
   originalText: string;
@@ -80,6 +86,41 @@ export function Chat() {
     return fresh;
   });
   const [draft, setDraft] = useState("");
+  // Voice input — record a prompt with the mic, then transcribe server-side via
+  // /api/stt (AssemblyAI). The transcript is appended to the draft so the user
+  // can edit or send as normal. sttEnabled gates the button on the server key.
+  const recorder = useAudioRecorder();
+  const [sttEnabled, setSttEnabled] = useState(false);
+  const [transcribing, setTranscribing] = useState(false);
+  const [sttError, setSttError] = useState<string | null>(null);
+  useEffect(() => { api.sttStatus().then(s => setSttEnabled(s.enabled)).catch(() => setSttEnabled(false)); }, []);
+
+  async function toggleMic() {
+    if (transcribing) return;
+    setSttError(null);
+    if (recorder.recording) {
+      const blob = await recorder.stop();
+      if (!blob) return;
+      setTranscribing(true);
+      try {
+        const dataUrl: string = await new Promise((resolve, reject) => {
+          const r = new FileReader();
+          r.onloadend = () => resolve(String(r.result));
+          r.onerror = () => reject(new Error("could not read audio"));
+          r.readAsDataURL(blob);
+        });
+        const { text } = await api.transcribe(dataUrl);
+        if (text) setDraft(d => (d.trim() ? d.replace(/\s+$/, "") + " " : "") + text);
+        else setSttError("No speech detected — try again.");
+      } catch (e: any) {
+        setSttError(e?.message ?? "Transcription failed");
+      } finally {
+        setTranscribing(false);
+      }
+    } else {
+      await recorder.start();
+    }
+  }
   // When a customer clicks a starter template, we DON'T paste the full
   // template task into the input box — that exposes internal tool names and
   // makes the customer feel they have to edit a prompt. Instead we pin the
@@ -99,6 +140,15 @@ export function Chat() {
   const [uploadState, setUploadState] = useState<{ status: "idle" | "uploading" | "error" | "saved"; filename?: string; error?: string; vaultPath?: string }>({ status: "idle" });
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [uploadTarget, setUploadTarget] = useState<"context" | "vault">("context");
+  // Context-target TTL — how long the upload stays available for chat
+  // attachment before the gc unlinks it. Default 1h matches the legacy
+  // global default; "1d" / "7d" are persisted as a per-upload .ttl sidecar
+  // on the server (#6 from the gap-review batch).
+  const [uploadTtl, setUploadTtl] = useState<"1h" | "1d" | "7d">("1h");
+  // Vault-target folder. Free-text — server validates and falls back to
+  // 0-Inbox if unsafe (system folders, traversal, absolute paths).
+  const [uploadVaultFolder, setUploadVaultFolder] = useState<string>("0-Inbox");
+  const [attachMenuOpen, setAttachMenuOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [model, setModel] = useState<string | null>(null);
@@ -236,6 +286,8 @@ export function Chat() {
   }
 
   async function send() {
+    // Stop any in-progress recording so it doesn't dangle after send.
+    if (recorder.recording) void recorder.stop();
     const topic = draft.trim();
     // Allow empty topic when attachments alone carry the intent — e.g.
     // "Summarize this for me" can be implied by just attaching a doc.
@@ -329,11 +381,14 @@ export function Chat() {
         binary += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + CHUNK)));
       }
       const contentBase64 = btoa(binary);
+      const ttlSecondsMap = { "1h": 3600, "1d": 86400, "7d": 604800 };
       const r = await api.upload({
         filename: file.name,
         contentBase64,
         target: uploadTarget,
         mimeType: file.type || undefined,
+        ...(uploadTarget === "vault" ? { vaultFolder: uploadVaultFolder.trim() || "0-Inbox" } : {}),
+        ...(uploadTarget === "context" ? { ttlSeconds: ttlSecondsMap[uploadTtl] } : {}),
       });
       if (r.target === "vault") {
         setUploadState({ status: "saved", filename: file.name, vaultPath: r.vaultPath });
@@ -379,18 +434,24 @@ export function Chat() {
     <div className="flex flex-col h-[calc(100vh-66px)] -my-7 -mx-8">
       <div className="flex items-center justify-between px-8 py-4 border-b border-ink-800 gap-4">
         <div className="min-w-0">
-          <h1 className="font-display text-2xl text-cream-50">Chat with clawbot</h1>
+          <h1 className="text-2xl font-semibold tracking-tight text-cream-50">Chat with clawbot</h1>
           <div className="flex items-center gap-2 mt-0.5 flex-wrap">
             <p className="text-xs text-cream-300/60">Type what you want done; I'll delegate and report back.</p>
-            <span className="text-[10px] text-cream-300/40 font-mono">· session {sessionId.slice(0, 18)}</span>
+            <span className="text-[10px] text-cream-300/40 font-mono">session {sessionId.slice(0, 18)}</span>
           </div>
         </div>
         <div className="flex items-center gap-2 flex-shrink-0">
-          {saveState.status === "saving" && <span className="text-[11px] text-violet-400">saving…</span>}
+          {saveState.status === "saving" && <span className="text-[11px] text-violet-400">saving...</span>}
           {saveState.status === "saved" && saveState.path && (
-            <Link to={`/knowledge/${saveState.path}`} className="text-[11px] text-leaf-400 hover:text-leaf-500" title={saveState.path}>✓ saved to vault</Link>
+            <Link to={`/knowledge/${saveState.path}`} className="inline-flex items-center gap-1 text-[11px] text-leaf-400 hover:text-leaf-500" title={saveState.path}>
+              <CheckCircle2 size={11} /> saved to vault
+            </Link>
           )}
-          {saveState.status === "error" && <span className="text-[11px] text-coral-400" title={saveState.error}>save failed</span>}
+          {saveState.status === "error" && (
+            <span className="inline-flex items-center gap-1 text-[11px] text-coral-400" title={saveState.error}>
+              <AlertTriangle size={11} /> save failed
+            </span>
+          )}
           <Link
             to="/knowledge/_neuroworks/sessions"
             className="text-xs text-cream-300 hover:text-cream-50 px-2 py-1 rounded border border-ink-700 hover:border-violet-500/40 transition-colors"
@@ -452,20 +513,20 @@ export function Chat() {
         {messages.length === 0 && (
           <div className="max-w-2xl mx-auto text-center py-16">
             <div className="grid place-items-center mb-4"><BrandMark size={56} /></div>
-            <h2 className="font-display text-3xl text-cream-50 mb-2">
+            <h2 className="text-3xl font-semibold tracking-tight text-cream-50 mb-2">
               {activePersona ? `Hi, I'm ${activePersona.name}.` : "Hi, I'm clawbot."}
             </h2>
             <p className="text-sm text-cream-300/70 mb-2">
               {activePersona
-                ? `Operating as ${activePersona.role}. Pick a starter or type your own — I'll route it through the right tools.`
+                ? `Operating as ${activePersona.role}. Pick a starter or type your own. I'll route it through the right tools.`
                 : "I can search your knowledge base, summarize projects, run digests, capture notes, and sync downloads. Try:"}
             </p>
             {activePersona && personaTemplates.length > 0 && (
               <p className="text-[11px] text-cream-300/40 mb-6">
-                These are <Link to="/personas" className="text-violet-400 hover:text-violet-500">{activePersona.name}'s</Link> starter templates · <Link to="/templates" className="text-violet-400 hover:text-violet-500">see all</Link>
+                These are <Link to="/personas" className="text-violet-400 hover:text-violet-500">{activePersona.name}'s</Link> starter templates. <Link to="/templates" className="text-violet-400 hover:text-violet-500">See all</Link>
               </p>
             )}
-            <div className="grid grid-cols-1 gap-2 max-w-xl mx-auto text-left">
+            <div className="grid grid-cols-2 gap-2 max-w-xl mx-auto text-left">
               {suggestions.map(s => (
                 <button
                   key={s.title}
@@ -515,17 +576,17 @@ export function Chat() {
               <button
                 type="button"
                 onClick={() => setActiveTemplate(null)}
-                className="ml-auto text-cream-300/60 hover:text-cream-50 text-sm leading-none"
+                className="ml-auto text-cream-300/60 hover:text-cream-50"
                 title="Clear template"
                 aria-label="Clear template"
               >
-                ✕
+                <X size={12} />
               </button>
             </div>
           )}
           {pendingContinuation && (
             <div className="flex items-start gap-2 mb-2 px-3 py-2 bg-flame-500/10 border border-flame-500/30 rounded-lg text-xs">
-              <span aria-hidden className="mt-0.5">↻</span>
+              <RotateCcw size={13} className="text-flame-300 mt-0.5 shrink-0" />
               <div className="min-w-0 flex-1">
                 <div className="text-flame-300 font-medium">Continuing task</div>
                 <div className="text-cream-100 truncate" title={pendingContinuation.originalText}>
@@ -538,11 +599,11 @@ export function Chat() {
               <button
                 type="button"
                 onClick={() => setPendingContinuation(null)}
-                className="text-cream-300/60 hover:text-cream-50 text-sm leading-none"
-                title="Cancel continuation — treat next message as a new task"
+                className="text-cream-300/60 hover:text-cream-50"
+                title="Cancel continuation, treat next message as a new task"
                 aria-label="Cancel continuation"
               >
-                ✕
+                <X size={12} />
               </button>
             </div>
           )}
@@ -553,61 +614,121 @@ export function Chat() {
                 <span
                   key={a.contextId}
                   className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-leaf-500/10 border border-leaf-500/30 rounded-lg text-[11px]"
-                  title={`${a.chars} chars extracted · ${(a.bytes / 1024).toFixed(1)} KB`}
+                  title={`${a.chars} chars extracted, ${(a.bytes / 1024).toFixed(1)} KB`}
                 >
-                  <span aria-hidden>📎</span>
+                  <Paperclip size={11} className="text-leaf-400" />
                   <span className="text-cream-100 max-w-[180px] truncate">{a.filename}</span>
                   <span className="text-cream-300/50 text-[10px]">{a.chars > 0 ? `${a.chars.toLocaleString()} chars` : "binary"}</span>
                   <button
                     type="button"
                     onClick={() => removeAttachment(a.contextId)}
-                    className="text-cream-300/60 hover:text-coral-400 text-sm leading-none ml-1"
+                    className="text-cream-300/60 hover:text-coral-400 ml-1"
                     aria-label={`Remove ${a.filename}`}
                   >
-                    ✕
+                    <X size={11} />
                   </button>
                 </span>
               ))}
             </div>
           )}
           {uploadState.status === "uploading" && (
-            <div className="text-[11px] text-violet-300 mb-2">Uploading {uploadState.filename}…</div>
+            <div className="text-[11px] text-violet-300 mb-2">Uploading {uploadState.filename}...</div>
           )}
           {uploadState.status === "error" && (
             <div className="text-[11px] text-coral-400 mb-2">Upload failed: {uploadState.error}</div>
           )}
           {uploadState.status === "saved" && uploadState.vaultPath && (
-            <div className="text-[11px] text-leaf-400 mb-2">
-              ✓ saved to vault at <Link to={`/knowledge/${uploadState.vaultPath}`} className="underline hover:text-leaf-300">{uploadState.vaultPath}</Link>
+            <div className="inline-flex items-center gap-1 text-[11px] text-leaf-400 mb-2">
+              <CheckCircle2 size={11} /> saved to vault at <Link to={`/knowledge/${uploadState.vaultPath}`} className="underline hover:text-leaf-300">{uploadState.vaultPath}</Link>
             </div>
           )}
-          <div className="flex items-end gap-2">
-            <div className="flex flex-col items-center gap-1">
-              <input
-                ref={fileInputRef}
-                type="file"
-                className="hidden"
-                onChange={handleFileSelected}
-              />
+          <div className="flex items-end gap-2 relative">
+            <input
+              ref={fileInputRef}
+              type="file"
+              className="hidden"
+              onChange={handleFileSelected}
+              aria-label="Attach a document"
+            />
+            <div className="relative">
               <button
                 type="button"
-                onClick={() => fileInputRef.current?.click()}
+                onClick={() => setAttachMenuOpen(o => !o)}
                 disabled={uploadState.status === "uploading"}
-                className="bg-ink-900 hover:bg-ink-850 border border-ink-800 hover:border-violet-500/40 disabled:opacity-40 text-cream-100 w-12 h-12 rounded-xl flex items-center justify-center text-lg"
-                title={uploadTarget === "context" ? "Attach a document for this chat (TTL: 1h)" : "Upload to your knowledge vault"}
-                aria-label="Attach document"
+                className="bg-ink-900 hover:bg-ink-850 border border-ink-800 hover:border-violet-500/40 disabled:opacity-40 text-cream-300 hover:text-cream-100 w-12 h-12 rounded-xl flex items-center justify-center"
+                title="Attach a document"
+                aria-label="Attach a document"
+                aria-expanded={attachMenuOpen ? "true" : "false"}
               >
-                📎
+                <Plus size={18} className={`transition-transform ${attachMenuOpen ? "rotate-45" : ""}`} />
               </button>
-              <select
-                value={uploadTarget}
-                onChange={e => setUploadTarget(e.target.value as "context" | "vault")}
-                className="bg-ink-900 border border-ink-800 text-[10px] text-cream-300 rounded px-1 py-0.5 hover:border-violet-500/40 focus:outline-none focus:border-violet-500/60 cursor-pointer"
-                title="Where the next upload goes — context (this chat only) or knowledge vault (permanent)"
-              >
-                <option value="context">context</option>
-                <option value="vault">vault</option>
-              </select>
+              {attachMenuOpen && (
+                <>
+                  <div className="fixed inset-0 z-10" onClick={() => setAttachMenuOpen(false)} />
+                  <div className="absolute bottom-14 left-0 z-20 w-72 bg-ink-900 border border-ink-700 rounded-xl shadow-xl p-3 space-y-3">
+                    <div className="text-[10px] uppercase tracking-wider text-cream-300/50">Attach a document</div>
+
+                    <fieldset className="space-y-1.5">
+                      <legend className="text-[11px] text-cream-300/70 mb-1">Destination</legend>
+                      <label className="flex items-start gap-2 cursor-pointer p-2 rounded hover:bg-ink-800/60">
+                        <input type="radio" name="upload-target" value="context" checked={uploadTarget === "context"} onChange={() => setUploadTarget("context")} className="mt-0.5 accent-violet-500" />
+                        <div className="text-xs">
+                          <div className="text-cream-100">This chat only</div>
+                          <div className="text-cream-300/50 text-[10px]">Used as context, then expires</div>
+                        </div>
+                      </label>
+                      <label className="flex items-start gap-2 cursor-pointer p-2 rounded hover:bg-ink-800/60">
+                        <input type="radio" name="upload-target" value="vault" checked={uploadTarget === "vault"} onChange={() => setUploadTarget("vault")} className="mt-0.5 accent-violet-500" />
+                        <div className="text-xs">
+                          <div className="text-cream-100">Knowledge vault</div>
+                          <div className="text-cream-300/50 text-[10px]">Saved permanently to your second brain</div>
+                        </div>
+                      </label>
+                    </fieldset>
+
+                    {uploadTarget === "context" && (
+                      <div>
+                        <div className="text-[11px] text-cream-300/70 mb-1">Keep available for</div>
+                        <div className="flex gap-1" role="radiogroup" aria-label="Context upload TTL">
+                          {(["1h", "1d", "7d"] as const).map(t => (
+                            <button
+                              key={t}
+                              type="button"
+                              onClick={() => setUploadTtl(t)}
+                              className={`flex-1 text-xs py-1.5 rounded border ${uploadTtl === t ? "bg-violet-500/15 border-violet-500/40 text-violet-200" : "bg-ink-950 border-ink-800 text-cream-300 hover:border-ink-700"}`}
+                            >
+                              {t === "1h" ? "1 hour" : t === "1d" ? "1 day" : "7 days"}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {uploadTarget === "vault" && (
+                      <div>
+                        <label htmlFor="vault-folder" className="block text-[11px] text-cream-300/70 mb-1">Save into folder</label>
+                        <input
+                          id="vault-folder"
+                          type="text"
+                          value={uploadVaultFolder}
+                          onChange={e => setUploadVaultFolder(e.target.value)}
+                          placeholder="0-Inbox"
+                          className="w-full bg-ink-950 border border-ink-800 text-xs text-cream-100 rounded px-2 py-1.5 hover:border-violet-500/40 focus:outline-none focus:border-violet-500/60"
+                        />
+                        <div className="text-[10px] text-cream-300/40 mt-1">Auto-created. System folders and traversal are rejected.</div>
+                      </div>
+                    )}
+
+                    <button
+                      type="button"
+                      onClick={() => { setAttachMenuOpen(false); fileInputRef.current?.click(); }}
+                      className="w-full inline-flex items-center justify-center gap-1.5 bg-violet-500 hover:bg-violet-600 text-white text-sm px-3 py-2 rounded-md"
+                    >
+                      <FileText size={14} /> Choose file
+                    </button>
+                  </div>
+                </>
+              )}
             </div>
             <textarea
               value={draft}
@@ -616,19 +737,56 @@ export function Chat() {
               rows={1}
               placeholder={
                 activeTemplate?.placeholder
-                ?? (pendingContinuation ? "Add the missing context (e.g. the file path, the recipient, the topic)…"
-                : pendingAttachments.length > 0 ? "Add a note (optional) — Send to ask about the attachment…"
-                : "Message clawbot…")
+                ?? (pendingContinuation ? "Add the missing context, like the file path, the recipient, the topic..."
+                : pendingAttachments.length > 0 ? "Add a note (optional). Press Send to ask about the attachment..."
+                : "Message clawbot...")
               }
-              className="flex-1 bg-ink-900 border border-ink-800 focus:border-violet-500/60 rounded-xl px-4 py-3 text-sm resize-none focus:outline-none placeholder:text-cream-300/40"
-              style={{ maxHeight: 200 }}
+              className="flex-1 bg-ink-900 border border-ink-800 focus:border-violet-500/60 rounded-xl px-4 py-3 text-sm resize-none focus:outline-none placeholder:text-cream-300/40 max-h-52"
+              aria-label="Message"
             />
-            <button type="submit" disabled={busy || (!draft.trim() && pendingAttachments.length === 0)} className="bg-violet-500 hover:bg-violet-600 disabled:opacity-40 text-white px-5 py-3 rounded-xl text-sm font-medium">
-              Send
+            {recorder.supported && sttEnabled && (
+              <button
+                type="button"
+                onClick={toggleMic}
+                disabled={transcribing}
+                className={`w-12 h-12 rounded-xl flex items-center justify-center border transition-colors disabled:opacity-60 ${
+                  recorder.recording
+                    ? "bg-coral-500/20 border-coral-500/50 text-coral-300 animate-pulse"
+                    : "bg-ink-900 hover:bg-ink-850 border-ink-800 hover:border-violet-500/40 text-cream-300 hover:text-cream-100"
+                }`}
+                title={recorder.recording ? "Stop & transcribe" : transcribing ? "Transcribing…" : "Record a prompt"}
+                aria-label={recorder.recording ? "Stop and transcribe" : "Record a prompt"}
+                aria-pressed={recorder.recording}
+              >
+                {transcribing ? <Loader2 size={16} className="animate-spin" /> : recorder.recording ? <Square size={16} /> : <Mic size={18} />}
+              </button>
+            )}
+            <button type="submit" disabled={busy || (!draft.trim() && pendingAttachments.length === 0)} className="inline-flex items-center gap-1.5 bg-violet-500 hover:bg-violet-600 disabled:opacity-40 text-white px-5 py-3 rounded-xl text-sm font-medium">
+              <Send size={14} /> Send
             </button>
           </div>
+          {(recorder.recording || transcribing || sttError || recorder.error) && (
+            <div className="max-w-3xl mx-auto mt-2 px-1 text-[11px]">
+              {(sttError || recorder.error) ? (
+                <span className="text-coral-400 inline-flex items-center gap-1"><AlertTriangle size={11} /> {sttError ?? recorder.error}</span>
+              ) : transcribing ? (
+                <span className="text-cream-300/60 inline-flex items-center gap-1.5"><Loader2 size={11} className="animate-spin" /> Transcribing…</span>
+              ) : (
+                <span className="text-cream-300/60 inline-flex items-center gap-1.5">
+                  <span className="w-1.5 h-1.5 rounded-full bg-coral-500 animate-pulse" /> Recording… tap the square to transcribe
+                </span>
+              )}
+            </div>
+          )}
         </form>
-        <div className="max-w-3xl mx-auto text-[10px] text-cream-300/40 mt-2 px-1">Enter to send · Shift+Enter for newline · 📎 to attach a doc (toggle context/vault){model ? ` · Ollama local model: ${model}` : ""}</div>
+        <div className="max-w-3xl mx-auto text-[10px] text-cream-300/40 mt-2 px-1 flex items-center gap-2 flex-wrap">
+          <span className="flex items-center gap-1"><Kbd>↵</Kbd> send</span>
+          <span className="text-cream-300/30">·</span>
+          <span className="flex items-center gap-1"><Kbd>⇧</Kbd>+<Kbd>↵</Kbd> newline</span>
+          <span className="text-cream-300/30">·</span>
+          <span className="flex items-center gap-1"><MetaKey /><Kbd>K</Kbd> search</span>
+          {model && <><span className="text-cream-300/30">·</span><span>Ollama local: {model}</span></>}
+        </div>
       </div>
     </div>
   );
@@ -660,17 +818,17 @@ function Bubble({ m, onStartContinuation, continuationActive }: { m: Msg; onStar
         <div className="bg-ink-900 border border-ink-800 rounded-2xl rounded-tl-sm px-4 py-3 text-sm text-cream-100 prose-vault" dangerouslySetInnerHTML={{ __html: marked.parse(m.content) as string }} />
         {m.needsContext && m.clarification && (
           <div className="flex items-center gap-2 px-3 py-2 bg-flame-500/10 border border-flame-500/30 rounded-lg text-xs">
-            <span aria-hidden>⏸</span>
+            <Pause size={12} className="text-flame-300 shrink-0" />
             <span className="text-flame-300">Paused for missing context.</span>
             {continuationActive ? (
-              <span className="text-cream-300/70 ml-1">Type the missing piece and send — I'll continue the task.</span>
+              <span className="text-cream-300/70 ml-1">Type the missing piece and send. I'll continue the task.</span>
             ) : (
               <button
                 type="button"
                 onClick={() => onStartContinuation?.(m.clarification!, m.jobId)}
-                className="ml-auto text-flame-400 hover:text-flame-300 font-medium underline-offset-2 hover:underline"
+                className="ml-auto inline-flex items-center gap-1 text-flame-400 hover:text-flame-300 font-medium"
               >
-                Continue this task →
+                Continue this task <ArrowRight size={11} />
               </button>
             )}
           </div>
@@ -697,20 +855,105 @@ function Bubble({ m, onStartContinuation, continuationActive }: { m: Msg; onStar
 function InlineJob({ jobId, requiresApproval, templateId }: { jobId: string; requiresApproval?: boolean; templateId?: string }) {
   const [job, setJob] = useState<any>(null);
   const [retry, setRetry] = useState<{ state: "idle" | "running" | "started" | "error"; newJobId?: string; error?: string }>({ state: "idle" });
+  // Tracks "the server restarted while this job was running" so we can show
+  // a friendlier message + a retry path instead of an infinite spinner.
+  // The 404 hint (with serverBootAt) comes from /api/templates/jobs/:id when
+  // the in-memory map has been wiped by tsx watch hot-reload.
+  const [lostToRestart, setLostToRestart] = useState<{ hint: string; serverBootAt?: string } | null>(null);
   useEffect(() => {
     let alive = true;
-    let timer: any;
-    async function tick() {
+    let es: EventSource | null = null;
+    let pollTimer: any;
+    let consecutive404s = 0;
+    // Hybrid model: SSE streams "patch" / "done" / "log" events live, but
+    // we still need ONE getJob call to load the initial state (status,
+    // existing result, persona info) since the SSE endpoint replays log
+    // lines but not the structured job object. We also fall back to
+    // polling if SSE setup or connection fails — old browsers / proxies
+    // sometimes block long-lived event-stream connections.
+    let fellBackToPolling = false;
+
+    async function loadInitial(): Promise<boolean> {
       try {
         const j = await api.getJob(jobId);
-        if (!alive) return;
+        if (!alive) return false;
         setJob(j);
-        if (j.status === "succeeded" || j.status === "failed" || j.status === "rejected") return;
-      } catch {}
-      timer = setTimeout(tick, 2000);
+        consecutive404s = 0;
+        if (j.status === "succeeded" || j.status === "failed" || j.status === "rejected") return false;
+        return true;
+      } catch (e: any) {
+        if (alive && e && typeof e === "object" && e.status === 404) {
+          consecutive404s += 1;
+          if (consecutive404s >= 2 && !lostToRestart) {
+            setLostToRestart({
+              hint: e.hint ?? "The server may have restarted while this task was running.",
+              serverBootAt: e.serverBootAt,
+            });
+          }
+        }
+        return false;
+      }
     }
-    tick();
-    return () => { alive = false; if (timer) clearTimeout(timer); };
+
+    function startPolling() {
+      fellBackToPolling = true;
+      async function tick() {
+        const stillRunning = await loadInitial();
+        if (!alive || !stillRunning) return;
+        pollTimer = setTimeout(tick, 2000);
+      }
+      tick();
+    }
+
+    function startSse(initialJob: any) {
+      try {
+        es = api.jobStream(jobId);
+        es.addEventListener("patch", (ev: MessageEvent) => {
+          try {
+            const patch = JSON.parse(ev.data);
+            setJob((prev: any) => prev ? { ...prev, result: { ...(prev.result ?? {}), ...patch } } : prev);
+          } catch { /* tolerate */ }
+        });
+        es.addEventListener("log", (ev: MessageEvent) => {
+          try {
+            const { line } = JSON.parse(ev.data);
+            setJob((prev: any) => prev ? { ...prev, log: [...(prev.log ?? []), line] } : prev);
+          } catch { /* tolerate */ }
+        });
+        es.addEventListener("done", (ev: MessageEvent) => {
+          try {
+            const { status, error } = JSON.parse(ev.data);
+            setJob((prev: any) => prev ? { ...prev, status, error } : prev);
+          } catch { /* tolerate */ }
+          es?.close();
+          es = null;
+        });
+        es.onerror = () => {
+          // Connection dropped before "done". Could be a server restart, a
+          // proxy timeout, or a real failure. Close the SSE and fall back to
+          // one poll — that'll give us a 404 (and trigger the restart UI) or
+          // a refreshed status.
+          es?.close();
+          es = null;
+          if (alive && !fellBackToPolling) startPolling();
+        };
+      } catch {
+        if (alive) startPolling();
+      }
+      void initialJob;
+    }
+
+    (async () => {
+      const stillRunning = await loadInitial();
+      if (!alive) return;
+      if (stillRunning) startSse(null);
+    })();
+
+    return () => {
+      alive = false;
+      if (pollTimer) clearTimeout(pollTimer);
+      if (es) { try { es.close(); } catch { /* tolerate */ } es = null; }
+    };
   }, [jobId]);
   async function doRetry() {
     setRetry({ state: "running" });
@@ -722,10 +965,25 @@ function InlineJob({ jobId, requiresApproval, templateId }: { jobId: string; req
     }
   }
 
+  if (lostToRestart) {
+    return (
+      <div className="text-xs bg-flame-500/10 border border-flame-500/30 rounded-lg px-3 py-2">
+        <div className="flex items-center gap-1.5 text-flame-300 font-medium">
+          <AlertTriangle size={12} /> Lost track of job <span className="font-mono">{jobId.slice(0, 8)}</span>
+        </div>
+        <div className="text-cream-300/70 mt-1">
+          {lostToRestart.hint}
+        </div>
+        <div className="text-cream-300/50 mt-1">
+          Resend the original task to retry. Your previous request wasn't kept on disk in time.
+        </div>
+      </div>
+    );
+  }
   if (!job) {
     return (
       <div className="text-xs text-cream-300/60 bg-ink-950 border border-ink-800 rounded-lg px-3 py-2">
-        Connecting to job <span className="font-mono">{jobId.slice(0, 8)}</span>…
+        Connecting to job <span className="font-mono">{jobId.slice(0, 8)}</span>...
       </div>
     );
   }
@@ -739,15 +997,37 @@ function InlineJob({ jobId, requiresApproval, templateId }: { jobId: string; req
   const doneCount = runs.filter(x => x?.ok === true).length;
   const inflightCount = runs.filter(x => x && x.startedAt && x.ok === false && !x.error).length;
 
+  // Categorise a failure into a one-line label that tells the user the
+  // SHAPE of the problem, not the cryptic "Hit a snag". The full error
+  // is still rendered below — this label sets the user's expectation
+  // (transient → retry, permission → check config, unsupported → rephrase).
+  function failureLabel(err: string | undefined, hasPartial: boolean): string {
+    const e = (err ?? "").toLowerCase();
+    if (hasPartial) return "Finished with partial results";
+    if (!e) return "Couldn't complete this task";
+    if (/vault.*unreach|vaultpath|mkdir.*enoent|d:\\\\main brain/.test(e)) return "Couldn't reach your vault";
+    if (/\b(?:401|403|unauthori[sz]ed|forbidden|api key|missing.*token)\b/.test(e)) return "Authorisation problem, check your keys";
+    if (/\b(?:econnreset|etimedout|enotfound|eai_again|fetch failed|socket hang up|timeout)\b/.test(e)) return "Network hiccup, usually clears on retry";
+    if (/\b(?:429|rate.?limit|too many requests)\b/.test(e)) return "Rate-limited, wait a minute and retry";
+    if (/refused to fetch|ssrf/.test(e)) return "Blocked target, public-internet only";
+    if (/refused to read|sensitive file/.test(e)) return "Refused, path looks sensitive";
+    if (/cannot read properties of undefined/.test(e)) return "Internal error, please retry";
+    if (/no such tool|invalid tool|unknown tool/.test(e)) return "Couldn't route, try rephrasing";
+    return "Couldn't complete this task";
+  }
+
   const friendlyLabel = (() => {
     if (status === "succeeded") return r.savedTemplateId ? "Done · saved as a shortcut" : "Done";
-    if (status === "failed") return "Hit a snag";
+    if (status === "failed") {
+      const hasPartial = typeof r.answer === "string" && r.answer.trim().length > 0;
+      return failureLabel(job.error, hasPartial);
+    }
     if (status === "rejected") return "Rejected";
     if (status === "awaiting-approval") return "Waiting for your approval";
     if (phase === "planning") return "Working out a plan";
     if (phase === "executing") {
       if (inflightCount > 1) return `${inflightCount} sub-agents working together`;
-      if (totalSteps > 0) return `Working on it · ${doneCount}/${totalSteps}`;
+      if (totalSteps > 0) return `Working on it, ${doneCount}/${totalSteps}`;
       return "Working on it";
     }
     if (phase === "synthesizing") return "Writing your answer";
@@ -770,9 +1050,15 @@ function InlineJob({ jobId, requiresApproval, templateId }: { jobId: string; req
           "bg-violet-500 animate-pulse"
         }`} />
         {friendlyLabel}
-        {requiresApproval && status === "awaiting-approval" && <Link to="/approvals" className="ml-1 underline">approve →</Link>}
-        {!isPending && status === "succeeded" && <Link to={`/results/${jobId}`} className="ml-1 underline opacity-90 hover:opacity-100">open report →</Link>}
-        {!isPending && <Link to={`/tasks?focus=${jobId}`} className="ml-1 underline opacity-60 hover:opacity-100">technical view</Link>}
+        {requiresApproval && status === "awaiting-approval" && (
+          <Link to="/approvals" className="ml-1 inline-flex items-center gap-0.5 underline">approve <ArrowRight size={11} /></Link>
+        )}
+        {!isPending && status === "succeeded" && (
+          <Link to={`/results/${jobId}`} className="ml-1 inline-flex items-center gap-0.5 underline opacity-90 hover:opacity-100">open report <ArrowRight size={11} /></Link>
+        )}
+        {!isPending && (
+          <Link to={`/tasks?focus=${jobId}`} className="ml-1 underline opacity-50 hover:opacity-100 text-[10px]">details</Link>
+        )}
       </div>
       {(job.template === "general-task" || (job.template ?? "").startsWith("custom-")) && job.result?.plan && (
         <ResultPanel job={job} />
@@ -793,15 +1079,17 @@ function InlineJob({ jobId, requiresApproval, templateId }: { jobId: string; req
               "Hit a snag" outcomes are transient (LLM hiccup, network blip)
               and clear on a fresh attempt. */}
           {retry.state === "started" && retry.newJobId
-            ? <div className="text-[11px] text-leaf-400">Retry started — <Link to={`/tasks?focus=${retry.newJobId}`} className="underline">track new job →</Link></div>
+            ? <div className="inline-flex items-center gap-1 text-[11px] text-leaf-400">
+                Retry started. <Link to={`/tasks?focus=${retry.newJobId}`} className="underline inline-flex items-center gap-0.5">track new job <ArrowRight size={10} /></Link>
+              </div>
             : <div className="flex items-center gap-2 flex-wrap">
                 <button
                   type="button"
                   onClick={doRetry}
                   disabled={retry.state === "running"}
-                  className="text-xs px-3 py-1.5 rounded-md bg-violet-500/15 border border-violet-500/40 text-violet-300 hover:bg-violet-500/25 disabled:opacity-40"
+                  className="inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-md bg-violet-500/15 border border-violet-500/40 text-violet-300 hover:bg-violet-500/25 disabled:opacity-40"
                 >
-                  {retry.state === "running" ? "Retrying…" : "↻ Retry this task"}
+                  <RotateCcw size={12} /> {retry.state === "running" ? "Retrying..." : "Retry this task"}
                 </button>
                 {retry.state === "error" && <span className="text-[11px] text-coral-400">{retry.error}</span>}
               </div>

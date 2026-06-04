@@ -34,7 +34,28 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 // permanent knowledge. Cleaned up on a TTL (default 1h) so old context
 // files don't accumulate.
 const CONTEXT_DIR = resolve(__dirname, "../../../.neuroworks/context-uploads");
+// Default TTL — overridable per upload via body.ttlSeconds. Clamped to
+// [60s, 7 days] so a runaway value can't park stale uploads indefinitely
+// or evict an upload before it's used.
 const CONTEXT_TTL_MS = Number(process.env.CLAWBOT_CONTEXT_UPLOAD_TTL_MS ?? "3600000");
+const MIN_TTL_MS = 60_000;
+const MAX_TTL_MS = 7 * 24 * 3600_000;
+
+// Reject anything that could escape the vault, hit a system-managed folder,
+// or look like an absolute path. mkdirSync inside importBinaryIntoVault will
+// auto-create any safe user folder, so callers can stash uploads under
+// arbitrary categories ("meetings", "2024-Q3", etc.) — not just the four
+// standard Zettel folders.
+const SYSTEM_PREFIXES = ["_clawbot", "_archive", "_neuroworks", ".git", ".obsidian"];
+function isSafeVaultFolder(p: string): boolean {
+  if (!p || p.length > 200) return false;
+  if (/^[A-Za-z]:|^[/\\]/.test(p)) return false;
+  if (p.split("/").some(seg => seg === "" || seg === "." || seg === "..")) return false;
+  if (!/^[A-Za-z0-9_./-]+$/.test(p)) return false;
+  const top = p.split("/")[0];
+  if (SYSTEM_PREFIXES.some(prefix => top === prefix)) return false;
+  return true;
+}
 
 export const uploadsRouter = Router();
 
@@ -46,6 +67,22 @@ function sanitizeFilename(raw: string): string {
   return name || `upload-${Date.now()}.bin`;
 }
 
+// Per-upload TTL is recorded in a sidecar `.ttl` file next to the upload
+// (contents = the TTL in ms as a plain integer). gcContextDir reads it on
+// each pass and falls back to the default CONTEXT_TTL_MS when missing.
+// Sidecars themselves are unlinked alongside the data file so we don't
+// leak orphan .ttl files after the parent expires.
+function readEffectiveTtlMs(fullPath: string): number {
+  try {
+    const sidecar = `${fullPath}.ttl`;
+    if (!existsSync(sidecar)) return CONTEXT_TTL_MS;
+    const raw = readFileSync(sidecar, "utf8").trim();
+    const n = Number(raw);
+    if (Number.isFinite(n) && n >= MIN_TTL_MS && n <= MAX_TTL_MS) return n;
+    return CONTEXT_TTL_MS;
+  } catch { return CONTEXT_TTL_MS; }
+}
+
 // Best-effort TTL cleanup of stale context uploads. Runs on each request;
 // cheap (just stat + unlink). Avoids needing a separate cron.
 function gcContextDir() {
@@ -53,12 +90,17 @@ function gcContextDir() {
   try {
     const now = Date.now();
     for (const entry of readdirSync(CONTEXT_DIR)) {
+      // Skip sidecar .ttl files — they're swept alongside their parent.
+      if (entry.endsWith(".ttl")) continue;
       const full = join(CONTEXT_DIR, entry);
       try {
         const st = statSync(full);
-        if (now - st.mtimeMs > CONTEXT_TTL_MS) {
-          if (st.isFile()) unlinkSync(full);
-          else if (st.isDirectory()) {
+        const effectiveTtl = readEffectiveTtlMs(full);
+        if (now - st.mtimeMs > effectiveTtl) {
+          if (st.isFile()) {
+            unlinkSync(full);
+            try { unlinkSync(`${full}.ttl`); } catch {}
+          } else if (st.isDirectory()) {
             for (const inner of readdirSync(full)) {
               try { unlinkSync(join(full, inner)); } catch {}
             }
@@ -77,8 +119,16 @@ uploadsRouter.post("/", async (req, res) => {
     const filename = sanitizeFilename(req.body?.filename ?? "");
     const contentBase64 = String(req.body?.contentBase64 ?? "");
     const target = String(req.body?.target ?? "context");
-    const vaultFolder = String(req.body?.vaultFolder ?? "0-Inbox");
+    const rawFolder = String(req.body?.vaultFolder ?? "0-Inbox").trim().replace(/^\/+|\/+$/g, "").replace(/\\/g, "/");
+    const vaultFolder = isSafeVaultFolder(rawFolder) ? rawFolder : "0-Inbox";
+    const folderRewritten = vaultFolder !== rawFolder;
     const mimeType = req.body?.mimeType ? String(req.body.mimeType) : undefined;
+    // Per-upload TTL override (context target only). Clamped server-side so
+    // a caller can't park a file forever or pre-expire it before pickup.
+    const requestedTtlSec = Number(req.body?.ttlSeconds);
+    const ttlMs = (Number.isFinite(requestedTtlSec) && requestedTtlSec > 0)
+      ? Math.min(MAX_TTL_MS, Math.max(MIN_TTL_MS, requestedTtlSec * 1000))
+      : CONTEXT_TTL_MS;
 
     if (!contentBase64) return res.status(400).json({ error: "contentBase64 required" });
     if (!filename) return res.status(400).json({ error: "filename required" });
@@ -110,7 +160,12 @@ uploadsRouter.post("/", async (req, res) => {
           target: "vault",
           vaultPath: binaryRel,
           bytes: buf.length,
-          message: `Imported to vault at ${binaryRel}`,
+          folderRequested: rawFolder,
+          folderUsed: vaultFolder,
+          folderRewritten,
+          message: folderRewritten
+            ? `Requested folder "${rawFolder}" was unsafe — imported to ${binaryRel} instead.`
+            : `Imported to vault at ${binaryRel}`,
         });
       } finally {
         try { unlinkSync(tempPath); } catch {}
@@ -122,6 +177,12 @@ uploadsRouter.post("/", async (req, res) => {
     mkdirSync(CONTEXT_DIR, { recursive: true });
     const filePath = join(CONTEXT_DIR, `${contextId}__${filename}`);
     writeFileSync(filePath, buf);
+    // Persist the effective TTL as a sidecar — gcContextDir reads this on
+    // every pass to decide eligibility. Stored as a plain integer (ms) so
+    // it's grep-friendly during incident triage.
+    if (ttlMs !== CONTEXT_TTL_MS) {
+      try { writeFileSync(`${filePath}.ttl`, String(ttlMs), "utf8"); } catch {}
+    }
 
     // Eagerly extract text so chat.ts can fold it into the enriched task
     // without per-request extraction latency. For unsupported binary types,
@@ -143,7 +204,9 @@ uploadsRouter.post("/", async (req, res) => {
       hasExtractedText: Boolean(extractedText),
       extractedChars: extractedText?.length ?? 0,
       extractError,
-      ttlSeconds: Math.floor(CONTEXT_TTL_MS / 1000),
+      ttlSeconds: Math.floor(ttlMs / 1000),
+      ttlDefaultSeconds: Math.floor(CONTEXT_TTL_MS / 1000),
+      ttlCustom: ttlMs !== CONTEXT_TTL_MS,
       // The contextId is the handle a subsequent /api/chat call uses via
       // body.attachments: [{ contextId: "<this>" }]. Surface it prominently.
       usage: `Reference this upload in chat via attachments:[{contextId:"${contextId}"}]`,

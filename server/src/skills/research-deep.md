@@ -35,7 +35,7 @@ When you spot any of these, do NOT answer from training alone. Run `research.dee
 ## Output shape
 
 ```
-**TL;DR:** <one sentence with the answer — grounded in the strongest source>
+**Bottom line:** <one sentence with the answer — grounded in the strongest source>
 
 ## What we know
 - Claim 1 [1]
@@ -61,7 +61,7 @@ When you spot any of these, do NOT answer from training alone. Run `research.dee
 - **Primary > major outlet > trade press > blog > forum.** A pricing page beats a TechCrunch summary of the pricing page.
 - **No "according to industry research"** without naming the report. "Per OpenView 2024 SaaS Benchmarks" is fine; "industry research shows" is not.
 - **No claim without a date.** "X grew" is meaningless; "X grew 30% Q1→Q3 2025 [2]" is a claim.
-- **If sources are thin, say so plainly in the TL;DR** — don't dress up weak evidence as strong.
+- **If sources are thin, say so plainly in the Bottom line** — don't dress up weak evidence as strong.
 
 ## Pitfalls
 

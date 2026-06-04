@@ -31,7 +31,7 @@ Hi <name>,
 
 | Recipient | Tone | Example opener |
 |---|---|---|
-| Executive / external client | Formal | "Sharing the Q4 update — TL;DR: we'll ship on time." |
+| Executive / external client | Formal | "Sharing the Q4 update — bottom line: we'll ship on time." |
 | Internal peer | Collegial | "Quick one — we're slipping the Q4 launch by a week." |
 | Direct report | Direct + warm | "Heads up: Q4 launch moves to Nov 22." |
 

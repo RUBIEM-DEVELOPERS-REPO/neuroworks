@@ -24,7 +24,7 @@ const vaultRepo = pick("VAULT_REPO", "RUBIEM-DEVELOPERS-REPO/main-brain");
 const vaultPathRaw = pick("VAULT_PATH", "D:\\Main brain");
 const vaultPath = resolve(vaultPathRaw);
 const ollamaHost = pick("OLLAMA_HOST", "http://127.0.0.1:11434");
-const ollamaModel = pick("OLLAMA_MODEL", "qwen3.5:0.8b");
+const ollamaModel = pick("OLLAMA_MODEL", "qwen2.5:3b"); // qwen3.5:0.8b retired — default to an installed model
 
 // OpenRouter — optional cloud LLM provider used to accelerate slow profiles
 // (planning/synthesis) when local Ollama can't keep up. Key absent = fully

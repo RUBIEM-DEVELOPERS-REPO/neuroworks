@@ -1,6 +1,6 @@
 import { config } from "../config.js";
 import { pickModelFor, type TaskNeeds } from "./models.js";
-import { openrouterGenerateWithMeta, openrouterHealth } from "./openrouter.js";
+import { openrouterGenerateWithMeta, openrouterHealth, isTransientError } from "./openrouter.js";
 
 export type LLMCallOptions = {
   model?: string;
@@ -18,6 +18,10 @@ export type LLMCallOptions = {
   // mean the model stops generating sooner, which on local Ollama is the
   // dominant cost on simple tasks. Default is 1024 (~750 words).
   maxTokens?: number;
+  // Override the default sampling temperature (Ollama default 0.3, OR default
+  // 0.3). Pass 0 to pin deterministic output — useful for scorers/graders
+  // where run-to-run noise corrupts the metric. Applies to both backends.
+  temperature?: number;
   // Notified once when the dispatcher picks a backend + model. Lets the
   // caller surface routing decisions in customer-facing logs (e.g. push
   // "Bumped to GPT-4o for the synth — 8k tokens of evidence" into the chat
@@ -177,7 +181,7 @@ async function chooseBackendAndModel(opts: LLMCallOptions, prompt: string, syste
 
 // Raw Ollama streaming call — same as the original ollamaGenerate body but
 // without the routing logic (that's now upstream in llmGenerateWithMeta).
-async function callOllamaStream(prompt: string, system: string | undefined, model: string, onToken?: LLMCallOptions["onToken"], maxTokens?: number): Promise<{ text: string; model: string }> {
+async function callOllamaStream(prompt: string, system: string | undefined, model: string, onToken?: LLMCallOptions["onToken"], maxTokens?: number, temperature?: number): Promise<{ text: string; model: string }> {
   // qwen3 ships with reasoning mode on by default. The /no_think directive in
   // the SYSTEM prompt (not user) suppresses the <think>…</think> block.
   const isQwen3 = /qwen3/i.test(model) && !/qwen3\.5/i.test(model);
@@ -196,7 +200,7 @@ async function callOllamaStream(prompt: string, system: string | undefined, mode
         system: sys,
         stream: true,
         think: false,
-        options: { temperature: 0.3, num_ctx: 8192, num_predict: numPredict },
+        options: { temperature: typeof temperature === "number" ? temperature : 0.3, num_ctx: 8192, num_predict: numPredict },
       }),
       signal: ctrl.signal,
     });
@@ -241,10 +245,12 @@ async function callOllamaStream(prompt: string, system: string | undefined, mode
 // rules and returns both the text and the model that actually answered, so
 // step-level provenance shows up in StepRun + the vault journal.
 //
-// On OpenRouter failure (network, 429, model unavailable) we DON'T silently
-// fall back to Ollama — different models give very different answers, and
-// silent fallback masks a config problem. The caller sees the OR error and
-// can decide what to do.
+// OpenRouter failures split two ways. CONFIG errors (401/403/400, unknown
+// model) still throw — silent fallback there would mask a real misconfig.
+// TRANSIENT errors (429 rate-limit, 5xx, network) instead fall back to the
+// local Ollama model when no token has streamed yet, so a temporary upstream
+// rate-limit doesn't fail the whole task with a partial result. Disable the
+// fallback with CLAWBOT_OR_FALLBACK_OLLAMA=0.
 export async function llmGenerateWithMeta(prompt: string, system?: string, opts: LLMCallOptions = {}): Promise<{ text: string; model: string }> {
   const { backend, model, reason } = await chooseBackendAndModel(opts, prompt, system);
   const tokenEstimate = estimateTokens(prompt) + estimateTokens(system);
@@ -261,9 +267,31 @@ export async function llmGenerateWithMeta(prompt: string, system?: string, opts:
     console.log(`[llm] ${reason} (profile=${opts.profile ?? "none"})`);
   }
   if (backend === "openrouter") {
-    return openrouterGenerateWithMeta(prompt, system, { model, onToken: opts.onToken, maxTokens: opts.maxTokens });
+    // Track whether any token reached the consumer. A transient failure
+    // (429/5xx) BEFORE streaming starts can fall back to the local model
+    // cleanly; once tokens have streamed, falling back would double-emit, so
+    // we rethrow. A 429 is rate-limiting, not the config error the original
+    // no-fallback rule guarded against — so failing the whole task is wrong.
+    let streamed = false;
+    const onToken = opts.onToken
+      ? (chunk: string, acc: string) => { streamed = true; opts.onToken!(chunk, acc); }
+      : undefined;
+    try {
+      return await openrouterGenerateWithMeta(prompt, system, { model, onToken, maxTokens: opts.maxTokens, temperature: opts.temperature });
+    } catch (e: any) {
+      const fallbackOn = process.env.CLAWBOT_OR_FALLBACK_OLLAMA !== "0";
+      if (isTransientError(e) && fallbackOn && !streamed) {
+        const localModel = opts.profile ? await pickModelFor(opts.profile, config.ollamaModel) : config.ollamaModel;
+        console.warn(`[llm] OpenRouter transient failure — falling back to local ${localModel}: ${String(e?.message ?? e).slice(0, 140)}`);
+        if (opts.onRoutingDecision) {
+          try { opts.onRoutingDecision({ backend: "ollama", model: localModel, reason: `OpenRouter rate-limited/unavailable — fell back to local ${localModel}`, tokenEstimate }); } catch { /* consumer error */ }
+        }
+        return callOllamaStream(prompt, system, localModel, opts.onToken, opts.maxTokens, opts.temperature);
+      }
+      throw e;
+    }
   }
-  return callOllamaStream(prompt, system, model, opts.onToken, opts.maxTokens);
+  return callOllamaStream(prompt, system, model, opts.onToken, opts.maxTokens, opts.temperature);
 }
 
 export async function llmGenerate(prompt: string, system?: string, opts: LLMCallOptions = {}): Promise<string> {

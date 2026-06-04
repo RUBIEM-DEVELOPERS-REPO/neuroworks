@@ -16,6 +16,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { marked } from "marked";
+import { Paperclip, X, RotateCcw, ArrowRight, Plus } from "lucide-react";
 import { api } from "../lib/api";
 import { Card, Button } from "../components/Card";
 
@@ -72,13 +73,57 @@ export function Team() {
   const [retrying, setRetrying] = useState<Record<string, boolean>>({});
   const [retryHistory, setRetryHistory] = useState<Record<string, string[]>>({});
 
+  // Pre-organized teams + team templates (loaded from /api/teams).
+  type PreorgTeam = { id: string; name: string; description: string; members: { personaId: string; role: string }[] };
+  type TeamTpl = { id: string; name: string; description?: string; teamId?: string; tasks: { persona: string; content: string }[] };
+  const [teams, setTeams] = useState<PreorgTeam[]>([]);
+  const [teamTemplates, setTeamTemplates] = useState<TeamTpl[]>([]);
+  const [pickTemplate, setPickTemplate] = useState("");
+
   useEffect(() => { try { localStorage.setItem(STORAGE_KEY, brief); } catch {} }, [brief]);
 
   useEffect(() => {
     api.listPersonas()
       .then(r => setPersonas((r.personas ?? []) as Persona[]))
       .catch(e => setErr(e?.message ?? String(e)));
+    api.listTeams()
+      .then(r => { setTeams(r.teams ?? []); setTeamTemplates(r.templates ?? []); })
+      .catch(() => { /* teams are optional convenience — ignore load failures */ });
   }, []);
+
+  // Load a pre-organized team's members into the assignment form so the user
+  // can add a brief + per-role notes, then dispatch through the normal path.
+  function loadTeam(teamId: string) {
+    const t = teams.find(x => x.id === teamId);
+    if (!t) return;
+    setAssignments(t.members.map(m => ({
+      uid: `${m.personaId}-${Math.random().toString(36).slice(2, 6)}`,
+      personaId: m.personaId,
+      perRole: "",
+    })));
+  }
+
+  // One-click dispatch of a ready-made team template. The brief above is the
+  // objective the server substitutes into the template's {{objective}} slots.
+  async function dispatchTemplate(templateId: string) {
+    if (dispatching || !templateId) return;
+    if (!brief.trim()) {
+      setErr("Type your objective in the Team brief below first — the template uses it as the input.");
+      return;
+    }
+    setErr("");
+    setDispatching(true);
+    setJobs({});
+    setDispatched([]);
+    try {
+      const r = await api.dispatchTeam({ templateId, objective: brief.trim() });
+      setDispatched(r.tasks);
+    } catch (e: any) {
+      setErr(e?.message ?? String(e));
+    } finally {
+      setDispatching(false);
+    }
+  }
 
   // Poll dispatched jobs every 2s until they all finish. Stops itself
   // when every job is in a terminal state.
@@ -261,9 +306,9 @@ export function Team() {
   return (
     <div className="space-y-5">
       <div>
-        <h1 className="font-display text-2xl text-cream-50">Team</h1>
+        <h1 className="text-2xl font-semibold tracking-tight text-cream-50">Team</h1>
         <p className="text-xs text-cream-300/60 mt-1">
-          Dispatch the same task to multiple employees in parallel — they spawn sub-agents and a peer worker takes the load if the primary is busy.
+          Dispatch the same task to multiple employees in parallel. They spawn sub-agents and a peer worker takes the load if the primary is busy.
           Each employee returns their slice; the Tasks page shows every job live.
         </p>
       </div>
@@ -272,15 +317,65 @@ export function Team() {
         <div className="bg-coral-500/10 border border-coral-500/30 text-coral-300 text-sm rounded-md px-3 py-2">{err}</div>
       )}
 
-      <Card title="Team brief">
-        <p className="text-xs text-cream-300/60 mb-2">The shared mission every employee will see.</p>
+      {(teams.length > 0 || teamTemplates.length > 0) && (
+        <Card title="Quick start: teams & templates">
+          <p className="text-xs text-cream-300/60 mb-3">
+            Load a <span className="text-cream-100">pre-organized team</span> to fill the employees below, or one-click a
+            <span className="text-cream-100"> team template</span> (a ready-made brief) using your objective from “Team brief” as the input.
+          </p>
+          <div className="grid sm:grid-cols-2 gap-4">
+            <div>
+              <div className="text-[10px] uppercase tracking-wider text-cream-300/50 mb-1">Pre-organized team</div>
+              <select
+                defaultValue=""
+                onChange={e => { loadTeam(e.target.value); e.target.value = ""; }}
+                aria-label="Load a pre-organized team into the form"
+                className="w-full bg-ink-900 border border-ink-800 text-xs text-cream-100 rounded px-2 py-1.5 hover:border-violet-500/40 focus:outline-none focus:border-violet-500/60 cursor-pointer"
+              >
+                <option value="">— Load a team into the form —</option>
+                {teams.map(t => (
+                  <option key={t.id} value={t.id}>{t.name} · {t.members.length} roles</option>
+                ))}
+              </select>
+              <p className="text-[10px] text-cream-300/40 mt-1">Replaces the assigned employees below; you keep the brief.</p>
+            </div>
+            <div>
+              <div className="text-[10px] uppercase tracking-wider text-cream-300/50 mb-1">Team template (one-click brief)</div>
+              <div className="flex items-center gap-2">
+                <select
+                  value={pickTemplate}
+                  onChange={e => setPickTemplate(e.target.value)}
+                  aria-label="Pick a team template to dispatch"
+                  className="flex-1 bg-ink-900 border border-ink-800 text-xs text-cream-100 rounded px-2 py-1.5 hover:border-violet-500/40 focus:outline-none focus:border-violet-500/60 cursor-pointer"
+                >
+                  <option value="">— Pick a template —</option>
+                  {teamTemplates.map(t => (
+                    <option key={t.id} value={t.id}>{t.name} · {t.tasks.length} tasks</option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  onClick={() => dispatchTemplate(pickTemplate)}
+                  disabled={!pickTemplate || dispatching}
+                  className="inline-flex items-center gap-1 bg-violet-500 hover:bg-violet-600 disabled:opacity-40 text-white px-3 py-1.5 rounded text-xs whitespace-nowrap"
+                >
+                  <ArrowRight size={11} /> Dispatch
+                </button>
+              </div>
+              <p className="text-[10px] text-cream-300/40 mt-1">Fans out as a parallel brief; uses the “Team brief” as the objective.</p>
+            </div>
+          </div>
+        </Card>
+      )}
+
+      <Card title="1. Team brief">
+        <p className="text-xs text-cream-300/60 mb-2">The shared mission every employee will see — and the objective for any template you dispatch above.</p>
         <textarea
           value={brief}
           onChange={e => setBrief(e.target.value)}
           rows={4}
-          placeholder="E.g. — We're launching pricing tier v2 on Sep 14. Draft the launch story, plan the on-call swap for the rollout, and check the contract changes."
-          className="w-full bg-ink-900 border border-ink-800 focus:border-violet-500/60 rounded-lg px-3 py-2 text-sm resize-y focus:outline-none placeholder:text-cream-300/40"
-          style={{ minHeight: 80 }}
+          placeholder="E.g. We're launching pricing tier v2 on Sep 14. Draft the launch story, plan the on-call swap for the rollout, and check the contract changes."
+          className="w-full bg-ink-950 border border-ink-800 focus:border-violet-500/60 rounded-lg px-3 py-2 text-sm resize-y focus:outline-none placeholder:text-cream-300/40 min-h-20"
         />
 
         <div className="mt-4">
@@ -288,50 +383,54 @@ export function Team() {
           {pendingAttachments.length > 0 && (
             <div className="flex flex-wrap items-center gap-2 mb-2">
               {pendingAttachments.map(a => (
-                <span key={a.contextId} className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-leaf-500/10 border border-leaf-500/30 rounded-lg text-[11px]" title={`${a.chars} chars · ${(a.bytes / 1024).toFixed(1)} KB`}>
-                  <span aria-hidden>📎</span>
+                <span key={a.contextId} className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-leaf-500/10 border border-leaf-500/30 rounded-lg text-[11px]" title={`${a.chars} chars, ${(a.bytes / 1024).toFixed(1)} KB`}>
+                  <Paperclip size={11} className="text-leaf-400" />
                   <span className="text-cream-100 max-w-[200px] truncate">{a.filename}</span>
                   <span className="text-cream-300/50 text-[10px]">{a.chars > 0 ? `${a.chars.toLocaleString()} chars` : "binary"}</span>
-                  <button type="button" onClick={() => removeAttachment(a.contextId)} className="text-cream-300/60 hover:text-coral-400 text-sm leading-none ml-1" aria-label={`Remove ${a.filename}`}>✕</button>
+                  <button type="button" onClick={() => removeAttachment(a.contextId)} className="text-cream-300/60 hover:text-coral-400 ml-1" aria-label={`Remove ${a.filename}`}>
+                    <X size={12} />
+                  </button>
                 </span>
               ))}
             </div>
           )}
           <div className="flex items-center gap-2">
             <input ref={fileInputRef} type="file" className="hidden" onChange={handleFile} aria-label="Attach a document to share with every employee on this team task" />
-            <button type="button" onClick={() => fileInputRef.current?.click()} disabled={uploadState.status === "uploading"} className="bg-ink-900 hover:bg-ink-850 border border-ink-800 hover:border-violet-500/40 text-cream-100 px-3 py-1.5 rounded-lg text-xs disabled:opacity-40">
-              📎 Attach a document
+            <button type="button" onClick={() => fileInputRef.current?.click()} disabled={uploadState.status === "uploading"} className="inline-flex items-center gap-1.5 bg-ink-950 hover:bg-ink-800 border border-ink-800 hover:border-violet-500/40 text-cream-100 px-3 py-1.5 rounded-lg text-xs disabled:opacity-40">
+              <Paperclip size={12} /> Attach a document
             </button>
-            {uploadState.status === "uploading" && <span className="text-[11px] text-violet-300">Uploading {uploadState.filename}…</span>}
+            {uploadState.status === "uploading" && <span className="text-[11px] text-violet-300">Uploading {uploadState.filename}...</span>}
             {uploadState.status === "error" && <span className="text-[11px] text-coral-400">Upload failed: {uploadState.error}</span>}
-            <span className="text-[10px] text-cream-300/40">(context-only · ttl 1h)</span>
+            <span className="text-[10px] text-cream-300/40">context-only, ttl 1h</span>
           </div>
         </div>
       </Card>
 
-      <Card title="Assigned employees" action={<AddEmployee personas={personas} onAdd={addAssignment} assigned={new Set(assignments.map(a => a.personaId))} />}>
+      <Card title="2. Assigned employees" action={<AddEmployee personas={personas} onAdd={addAssignment} assigned={new Set(assignments.map(a => a.personaId))} />}>
         {assignments.length === 0 ? (
           <p className="text-sm text-cream-300/60">
-            No one assigned yet. Pick at least one employee above — or leave empty to dispatch the brief through the auto-router.
+            No one assigned yet. Pick at least one employee above, or leave empty to dispatch the brief through the auto-router.
           </p>
         ) : (
-          <ul className="space-y-3">
-            {assignments.map(a => {
+          <ul className="divide-y divide-ink-800">
+            {assignments.map((a, idx) => {
               const p = personas.find(x => x.id === a.personaId);
               return (
-                <li key={a.uid} className="bg-ink-900 border border-ink-800 rounded-lg p-3">
+                <li key={a.uid} className={`py-3 ${idx === 0 ? "pt-0" : ""}`}>
                   <div className="flex items-start justify-between gap-3 mb-2">
                     <div className="min-w-0">
                       <div className="text-sm text-cream-50 font-medium truncate">{p?.name ?? a.personaId}</div>
-                      <div className="text-[11px] text-cream-300/60 truncate">{p?.role ?? "(unknown role)"}</div>
+                      <div className="text-[11px] text-cream-300/60 truncate">{p?.role ?? "unknown role"}</div>
                     </div>
-                    <button type="button" onClick={() => removeAssignment(a.uid)} className="text-cream-300/60 hover:text-coral-400 text-sm" aria-label="Remove">✕</button>
+                    <button type="button" onClick={() => removeAssignment(a.uid)} className="text-cream-300/60 hover:text-coral-400" aria-label="Remove">
+                      <X size={14} />
+                    </button>
                   </div>
                   <textarea
                     value={a.perRole}
                     onChange={e => updatePerRole(a.uid, e.target.value)}
-                    rows={2}
-                    placeholder={`Per-role instruction for ${p?.name ?? "this employee"} (optional — leave blank to let them pick the slice their role would own).`}
+                    rows={3}
+                    placeholder={`Per-role instruction for ${p?.name ?? "this employee"}. Leave blank to let them pick the slice their role would own.`}
                     className="w-full bg-ink-950 border border-ink-800 focus:border-violet-500/60 rounded px-2.5 py-1.5 text-xs resize-y focus:outline-none placeholder:text-cream-300/40"
                   />
                 </li>
@@ -343,21 +442,23 @@ export function Team() {
 
       <div className="flex items-center gap-3">
         <Button onClick={dispatch} disabled={dispatching}>
-          {dispatching ? "Dispatching…" : `Dispatch to team${assignments.length > 0 ? ` (${assignments.length})` : ""}`}
+          {dispatching ? "Dispatching..." : `3. Dispatch to team${assignments.length > 0 ? ` (${assignments.length})` : ""}`}
         </Button>
         {dispatched.length > 0 && (
           <Button onClick={reset} variant="ghost">Clear results</Button>
         )}
-        <Link to="/tasks" className="text-xs text-cream-300/70 hover:text-cream-50">View all tasks →</Link>
+        <Link to="/tasks" className="inline-flex items-center gap-1 text-xs text-cream-300/70 hover:text-cream-50">
+          View all tasks <ArrowRight size={11} />
+        </Link>
       </div>
 
       {dispatched.length > 0 && (
         <Card title={`Live results (${dispatched.length})`}>
           <p className="text-xs text-cream-300/60 mb-3">
-            Each employee runs as a separate job — they may land on the primary, a peer worker, or an auto-spawned extra worker.
+            Each employee runs as a separate job. They may land on the primary, a peer worker, or an auto-spawned extra worker.
             Click a row to open the full result.
           </p>
-          <div className="space-y-3">
+          <div className="divide-y divide-ink-800">
             {dispatched.map((d, rowIndex) => {
               const job = jobs[d.jobId];
               const status = job?.status ?? "pending";
@@ -366,8 +467,9 @@ export function Team() {
               const completedButEmpty = status === "succeeded" && answer.length < 100;
               const canRetry = (terminalFail || completedButEmpty) && !retrying[d.jobId];
               const history = retryHistory[d.jobId] ?? [];
+              const truncated = answer.length > 6000;
               return (
-                <div key={d.jobId || d.taskIndex} className="bg-ink-900 border border-ink-800 rounded-lg p-3">
+                <div key={d.jobId || d.taskIndex} className="py-4 first:pt-0 last:pb-0">
                   <div className="flex items-center justify-between gap-3 mb-2">
                     <div className="min-w-0">
                       <div className="text-sm text-cream-50 truncate">
@@ -386,22 +488,22 @@ export function Team() {
                     </div>
                     <div className="flex items-center gap-2">
                       <StatusPill status={status} />
-                      {retrying[d.jobId] && <span className="text-[10px] text-violet-300 animate-pulse">retrying…</span>}
+                      {retrying[d.jobId] && <span className="text-[10px] text-violet-300 animate-pulse">retrying...</span>}
                       {canRetry && (
                         <button
                           type="button"
                           onClick={() => retryRow(rowIndex)}
-                          className="text-[11px] px-2 py-1 rounded border border-flame-500/40 text-flame-200 hover:bg-flame-500/10"
-                          title={terminalFail ? "Job failed — re-dispatch the same task" : "Job returned an empty answer — re-dispatch the same task"}
+                          className="inline-flex items-center gap-1 text-[11px] px-2 py-1 rounded border border-flame-500/40 text-flame-200 hover:bg-flame-500/10"
+                          title={terminalFail ? "Job failed, re-dispatch the same task" : "Job returned an empty answer, re-dispatch the same task"}
                         >
-                          ↻ Retry
+                          <RotateCcw size={11} /> Retry
                         </button>
                       )}
                     </div>
                   </div>
                   {completedButEmpty && (
                     <div className="text-[11px] text-flame-300 bg-flame-500/10 border border-flame-500/30 rounded px-2 py-1 mb-2">
-                      Returned an empty answer — likely an upstream LLM hiccup. Retry usually works.
+                      Returned an empty answer, likely an upstream LLM hiccup. Retry usually works.
                     </div>
                   )}
                   {job && Array.isArray(job.log) && job.log.length > 0 && (
@@ -415,9 +517,16 @@ export function Team() {
                   {answer && (
                     <div className="bg-ink-950 border border-ink-800 rounded p-3 prose-vault text-sm text-cream-100" dangerouslySetInnerHTML={{ __html: marked.parse(answer.slice(0, 6000)) as string }} />
                   )}
+                  {truncated && (
+                    <div className="text-[11px] text-cream-300/50 mt-1">
+                      Showing first 6,000 of {answer.length.toLocaleString()} chars. Open the full result for the rest.
+                    </div>
+                  )}
                   {job && d.jobId && (
                     <div className="mt-2 text-right">
-                      <Link to={`/results/${d.jobId}`} className="text-[11px] text-violet-400 hover:text-violet-300">Full result →</Link>
+                      <Link to={`/results/${d.jobId}`} className="inline-flex items-center gap-1 text-[11px] text-violet-400 hover:text-violet-300">
+                        Full result <ArrowRight size={11} />
+                      </Link>
                     </div>
                   )}
                 </div>
@@ -469,9 +578,9 @@ function AddEmployee({ personas, onAdd, assigned }: { personas: Persona[]; onAdd
         type="button"
         onClick={() => { if (pick) { onAdd(pick); setPick(""); } }}
         disabled={!pick}
-        className="bg-violet-500 hover:bg-violet-600 disabled:opacity-40 text-white px-3 py-1 rounded text-xs"
+        className="inline-flex items-center gap-1 bg-violet-500 hover:bg-violet-600 disabled:opacity-40 text-white px-3 py-1 rounded text-xs"
       >
-        + Add
+        <Plus size={11} /> Add
       </button>
     </div>
   );

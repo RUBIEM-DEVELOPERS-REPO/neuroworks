@@ -157,6 +157,19 @@ export type SearchHit = { title: string; url: string; snippet: string };
 
 export async function searchWeb(query: string, limit = 8): Promise<{ engine: string; results: SearchHit[]; tried: string[] }> {
   const tried: string[] = [];
+  // FIRECRAWL FIRST when configured. Firecrawl's search has consistently
+  // better source quality than DDG/Bing scraping (the engines we fall back
+  // to often return spam SEO farms first). When the key isn't set,
+  // firecrawlSearch returns null and we skip silently — no extra latency,
+  // no behaviour change for users without a key.
+  try {
+    const { firecrawlEnabled, firecrawlSearch } = await import("./firecrawl.js");
+    if (firecrawlEnabled()) {
+      tried.push("firecrawl");
+      const r = await firecrawlSearch(query, limit);
+      if (r && r.length > 0) return { engine: "firecrawl", results: r, tried };
+    }
+  } catch { /* try next */ }
   for (const engine of ["ddg", "bing"] as const) {
     tried.push(engine);
     try {
@@ -341,7 +354,7 @@ export function webCacheStats() {
 // Cached on success in the same per-URL cache as fetchWeb.
 const JS_RENDERED_TEXT_FLOOR = 400;  // under this many chars → suspect SPA
 
-export async function smartFetch(url: string, opts: FetchOptions & { allowBrowser?: boolean } = {}): Promise<{ status: number; contentType: string; text: string; title?: string; fromCache: boolean; usedBrowser: boolean }> {
+export async function smartFetch(url: string, opts: FetchOptions & { allowBrowser?: boolean } = {}): Promise<{ status: number; contentType: string; text: string; title?: string; fromCache: boolean; usedBrowser: boolean; engine: "http" | "browser" | "firecrawl" }> {
   const allowBrowser = opts.allowBrowser !== false;
   let fetchErr: Error | null = null;
   let httpResult: Awaited<ReturnType<typeof fetchWeb>> | null = null;
@@ -375,7 +388,7 @@ export async function smartFetch(url: string, opts: FetchOptions & { allowBrowse
     (httpResult.contentType.includes("html") && httpResult.text.length < JS_RENDERED_TEXT_FLOOR)
   );
   if (!shouldFallback && httpResult) {
-    return { ...httpResult, usedBrowser: false };
+    return { ...httpResult, usedBrowser: false, engine: "http" };
   }
   // Tier 2 — local Playwright. Catches JS-heavy / lazy-rendered sites.
   // Lazy import so headless Chromium isn't loaded on every server startup —
@@ -391,7 +404,7 @@ export async function smartFetch(url: string, opts: FetchOptions & { allowBrowse
       title: r.title,
     };
     cacheSet(url, value);
-    return { ...value, fromCache: false, usedBrowser: true };
+    return { ...value, fromCache: false, usedBrowser: true, engine: "browser" };
   } catch (e: any) {
     browserErr = e;
   }
@@ -410,13 +423,13 @@ export async function smartFetch(url: string, opts: FetchOptions & { allowBrowse
         title: fc.title,
       };
       cacheSet(url, value);
-      return { ...value, fromCache: false, usedBrowser: true };
+      return { ...value, fromCache: false, usedBrowser: true, engine: "firecrawl" };
     }
   } catch {
     // Firecrawl tier failed too — keep going to the final fallback below.
   }
   // All tiers exhausted — return whichever earlier path gave us the most
   // signal so the caller doesn't see a hard failure.
-  if (httpResult) return { ...httpResult, usedBrowser: false };
+  if (httpResult) return { ...httpResult, usedBrowser: false, engine: "http" };
   throw fetchErr ?? browserErr ?? new Error(`smartFetch: all tiers failed for ${url}`);
 }

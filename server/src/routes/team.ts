@@ -40,6 +40,16 @@ type TeamTaskInput = {
   persona?: string;
   content: string;
   attachments?: { contextId?: string }[];
+  // When present, this task is a CONTINUATION of a prior team task that
+  // asked for more context. Same shape as chat.ts so the synth has the
+  // original-task framing + the user's reply together. The continuation
+  // block gets folded into the enriched task so the planner / synth see
+  // them as one cohesive request.
+  continuesTaskRef?: {
+    originalText?: string;
+    originalJobId?: string;
+    summary?: string;
+  };
 };
 
 type TeamDispatch = {
@@ -128,18 +138,32 @@ teamRouter.post("/", async (req, res) => {
       const alignmentDirective = text.length >= 80
         ? `\n\n**Alignment check — required before responding.** The user's request names concrete elements (counts, people, dates, scale numbers, named sections, named steps, deliverable shape). The final answer MUST address each one. If N items are asked for, produce N. If A/B/C are named, reference A, B, AND C. Honor format directives exactly. Never silently drop or substitute — if you cannot address one, say so explicitly.`
         : "";
+      // Continuation block — when the caller is replying to an earlier
+      // team task that asked for missing context, fold the original task
+      // text + the user's added context together so the worker sees them
+      // as a single coherent request. Mirrors the chat.ts continuation
+      // path so behaviour is consistent across surfaces.
+      let continuationBlock = "";
+      const cont = t.continuesTaskRef && typeof t.continuesTaskRef === "object" ? t.continuesTaskRef : null;
+      const originalText = cont?.originalText ? String(cont.originalText).trim() : "";
+      const isContinuation = !!originalText;
+      if (isContinuation) {
+        continuationBlock = `\n\n**Continuation context.** This task is a continuation of an earlier team-task that needed more context:\n> Original task: ${originalText.slice(0, 500)}${originalText.length > 500 ? "…" : ""}\n\nThe user's reply (above) provides the missing context. Produce the deliverable now — do NOT ask for further clarification.`;
+      }
       const enrichedTask = (persona
-        ? `(You are operating as ${persona.name}, the ${persona.role}. Bias tool choices, output shape, and depth toward this role's conventions.)\n\n${text}${alignmentDirective}`
-        : `${text}${alignmentDirective}`) + attachmentBlock;
+        ? `(You are operating as ${persona.name}, the ${persona.role}. Bias tool choices, output shape, and depth toward this role's conventions.)\n\n${text}${alignmentDirective}${continuationBlock}`
+        : `${text}${alignmentDirective}${continuationBlock}`) + attachmentBlock;
 
       const tpl = templates.find(x => x.id === "general-task")!;
       const job = newJob(`insights:general-task`);
       job.template = tpl.id;
       job.title = `Team task #${i + 1}: ${text.slice(0, 60)}`;
+      if (persona) { job.personaId = persona.id; job.personaName = persona.name; }
       job.inputs = {
         task: enrichedTask,
         userText: text,
         teamTask: { taskIndex: i, persona: persona?.id ?? null, route },
+        ...(isContinuation ? { continuesOriginalText: originalText, continuesJobId: cont?.originalJobId, continuesSummary: cont?.summary } : {}),
         ...(persona ? { personaId: persona.id } : {}),
         ...(attachmentMeta.length > 0 ? { attachments: attachmentMeta } : {}),
       };

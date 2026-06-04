@@ -63,6 +63,150 @@ export type ScrapeResult = {
 
 // Scrape a JS-rendered page. The page gets a fresh incognito context so cookies
 // don't leak between calls. Times out at the user-specified or default budget.
+// Action-driven browser session. `web.interact` is the multi-step parity for
+// what Hermes' computer-use skill offers — navigate, fill a form, click,
+// wait, extract — using the existing headless Chromium pool. Each step is a
+// structured action so the planner doesn't have to generate Playwright code.
+// Capped to 8 steps per call and 90 s total wall time to bound runaway loops.
+export type InteractAction =
+  | { type: "navigate"; url: string }
+  | { type: "fill"; selector: string; value: string }
+  | { type: "click"; selector: string }
+  | { type: "wait_for"; selector: string; timeoutMs?: number }
+  | { type: "wait_ms"; ms: number }
+  | { type: "extract"; selector?: string }
+  | { type: "screenshot"; name?: string };
+
+export type InteractStepResult = { action: InteractAction; ok: boolean; error?: string; text?: string; url?: string; screenshot?: { path: string; bytes: number } };
+
+export async function interact(opts: { startUrl: string; steps: InteractAction[]; totalTimeoutMs?: number; userAgent?: string }): Promise<{ url: string; title: string; results: InteractStepResult[]; finalText: string }>{
+  const { assertSafePublicUrl } = await import("./security-gates.js");
+  assertSafePublicUrl(opts.startUrl);
+  const totalDeadline = Date.now() + Math.min(120_000, Math.max(5_000, opts.totalTimeoutMs ?? 90_000));
+  const browser = await getBrowser();
+  const context = await browser.newContext({
+    userAgent: opts.userAgent ?? pickScrapeUA(opts.startUrl),
+    viewport: { width: 1280, height: 900 },
+  });
+  let page: Page | null = null;
+  const results: InteractStepResult[] = [];
+  try {
+    page = await context.newPage();
+    page.setDefaultTimeout(20_000);
+    await page.goto(opts.startUrl, { waitUntil: "domcontentloaded", timeout: 20_000 });
+    const steps = (opts.steps ?? []).slice(0, 8);
+    for (const step of steps) {
+      if (Date.now() > totalDeadline) {
+        results.push({ action: step, ok: false, error: "total time budget exceeded" });
+        break;
+      }
+      try {
+        if (step.type === "navigate") {
+          assertSafePublicUrl(step.url);
+          await page.goto(step.url, { waitUntil: "domcontentloaded", timeout: 20_000 });
+          results.push({ action: step, ok: true, url: page.url() });
+        } else if (step.type === "fill") {
+          await page.fill(step.selector, step.value, { timeout: 8_000 });
+          results.push({ action: step, ok: true });
+        } else if (step.type === "click") {
+          await page.click(step.selector, { timeout: 8_000 });
+          results.push({ action: step, ok: true, url: page.url() });
+        } else if (step.type === "wait_for") {
+          await page.waitForSelector(step.selector, { timeout: Math.min(20_000, Math.max(500, step.timeoutMs ?? 8_000)) });
+          results.push({ action: step, ok: true });
+        } else if (step.type === "wait_ms") {
+          await new Promise(r => setTimeout(r, Math.min(15_000, Math.max(0, step.ms))));
+          results.push({ action: step, ok: true });
+        } else if (step.type === "extract") {
+          let text = "";
+          if (step.selector) {
+            const el = await page.$(step.selector);
+            if (el) text = (await el.innerText().catch(() => "")) || "";
+          }
+          if (!text) text = await page.evaluate(() => document.body?.innerText ?? "").catch(() => "");
+          results.push({ action: step, ok: true, text: text.replace(/\s{3,}/g, " \n").slice(0, 20_000) });
+        } else if (step.type === "screenshot") {
+          const stamp = new Date().toISOString().replace(/[-:T]/g, "").slice(0, 14);
+          const slug = (step.name ?? page.url().replace(/^https?:\/\//, "")).replace(/[^a-zA-Z0-9.-]+/g, "-").slice(0, 60);
+          const rel = `_neuroworks/screenshots/${stamp}-${slug}.png`;
+          const full = resolve(config.vaultPath, rel);
+          mkdirSync(join(full, ".."), { recursive: true });
+          const buf = await page.screenshot({ fullPage: true, type: "png" });
+          const { writeFileSync } = await import("node:fs");
+          writeFileSync(full, buf);
+          results.push({ action: step, ok: true, screenshot: { path: rel, bytes: buf.length } });
+        } else {
+          results.push({ action: step as any, ok: false, error: `unknown step type` });
+        }
+      } catch (e: any) {
+        results.push({ action: step, ok: false, error: String(e?.message ?? e).slice(0, 200) });
+        // Hard-stop after the first failure — the planner can retry with a
+        // tweaked selector rather than blunder forward with broken state.
+        break;
+      }
+    }
+    const title = await page.title().catch(() => "");
+    const finalText = (await page.evaluate(() => document.body?.innerText ?? "").catch(() => "")).replace(/\s{3,}/g, " \n").slice(0, 40_000);
+    return { url: page.url(), title, results, finalText };
+  } finally {
+    try { await page?.close(); } catch {}
+    try { await context.close(); } catch {}
+  }
+}
+
+// Render markdown → polished PDF via the existing headless Chromium pool.
+// Powers the `vault.write_pdf` primitive — turns clawbot's markdown output
+// into an actual document the operator can email a customer or attach to a
+// board pack, without adding wkhtmltopdf / pandoc as new deps.
+export async function renderMarkdownToPdf(opts: { markdown: string; title?: string; vaultRelPath: string; landscape?: boolean }): Promise<{ path: string; bytes: number }> {
+  const { marked } = await import("marked");
+  const bodyHtml = await marked.parse(opts.markdown, { breaks: true, gfm: true });
+  const title = (opts.title ?? "Document").replace(/</g, "&lt;");
+  // System-stack typography, generous margins, no chrome. The same look as a
+  // briefing memo printed on letterhead — nothing fancy, just readable.
+  const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${title}</title>
+<style>
+  @page { margin: 24mm 22mm; }
+  body { font: 11pt/1.55 -apple-system, "Segoe UI", system-ui, Arial, sans-serif; color: #1d1d1f; max-width: 740px; margin: 0 auto; }
+  h1 { font-size: 22pt; font-weight: 600; letter-spacing: -0.01em; margin: 0 0 12pt; }
+  h2 { font-size: 14pt; font-weight: 600; margin-top: 18pt; margin-bottom: 6pt; }
+  h3 { font-size: 12pt; font-weight: 600; margin-top: 14pt; }
+  p, li { margin: 6pt 0; }
+  ul, ol { padding-left: 22pt; }
+  table { border-collapse: collapse; width: 100%; margin: 10pt 0; font-size: 10pt; }
+  th, td { border: 1px solid #d8d8da; padding: 6pt 8pt; text-align: left; vertical-align: top; }
+  th { background: #f5f5f7; font-weight: 600; }
+  code { font: 10pt "SF Mono", Menlo, Consolas, monospace; background: #f5f5f7; padding: 1pt 4pt; border-radius: 3pt; }
+  pre { background: #f5f5f7; padding: 10pt; border-radius: 4pt; overflow-x: auto; font: 9.5pt "SF Mono", Menlo, Consolas, monospace; }
+  pre code { background: transparent; padding: 0; }
+  blockquote { margin: 8pt 0 8pt 0; padding-left: 12pt; border-left: 3pt solid #d8d8da; color: #515154; }
+  a { color: #0066cc; text-decoration: none; }
+  hr { border: 0; border-top: 1px solid #d8d8da; margin: 14pt 0; }
+</style></head><body>${bodyHtml}</body></html>`;
+
+  const browser = await getBrowser();
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  try {
+    await page.setContent(html, { waitUntil: "domcontentloaded" });
+    const full = resolve(config.vaultPath, opts.vaultRelPath);
+    mkdirSync(join(full, ".."), { recursive: true });
+    await page.pdf({
+      path: full,
+      format: "Letter",
+      landscape: !!opts.landscape,
+      printBackground: true,
+      margin: { top: "0", right: "0", bottom: "0", left: "0" },
+    });
+    const { statSync } = await import("node:fs");
+    const bytes = statSync(full).size;
+    return { path: opts.vaultRelPath, bytes };
+  } finally {
+    try { await page.close(); } catch {}
+    try { await context.close(); } catch {}
+  }
+}
+
 export async function scrape(opts: ScrapeOptions): Promise<ScrapeResult> {
   // SECURITY: same SSRF block as web.fetch. A headless browser fetching
   // 169.254.169.254 would happily return cloud metadata; the gate stops

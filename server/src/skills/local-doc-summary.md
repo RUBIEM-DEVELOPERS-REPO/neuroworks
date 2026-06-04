@@ -35,7 +35,7 @@ Default template when type is unclear:
 ```
 **Document:** <filename> · <pages or word count if known>
 
-**TL;DR:** <2-3 sentences on what the doc is and what it says>
+**Bottom line:** <2-3 sentences on what the doc is and what it says>
 
 **Key points:**
 - <Point 1 — with a quote or specific number if available>

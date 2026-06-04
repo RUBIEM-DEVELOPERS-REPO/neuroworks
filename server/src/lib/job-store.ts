@@ -40,6 +40,13 @@ export type PersistedJob = {
   title?: string;
   error?: string;
   retryOf?: string;
+  // Continuation lineage — when this job was a "Continue this task" reply
+  // to an earlier job that asked for missing context. Both fields are
+  // optional; the original-job's id lets a future reflection / report
+  // stitch the chain back together even across server restarts.
+  continuesJobId?: string;
+  continuesOriginalText?: string;
+  continuesSummary?: string;
   persona?: string;
   peer?: string;
   // One entry per tool invocation inside the job — used by reflection's
@@ -50,6 +57,13 @@ export type PersistedJob = {
   // existing jobs persisted before that patch are forward-compatible.
   skillUsed?: string;
   skillScore?: number;
+  // Synthesised answer + plan summary. Persisted so the Calendar's
+  // day-detail panel can deep-link an old job into /results/<id> and the
+  // Result page still has the actual report to show. Capped at 16 KB per
+  // record so the daily JSONL stays under a few MB even at high volume.
+  answer?: string;
+  planSummary?: string;
+  planSteps?: string[];
 };
 
 function ensureDir(): void {
@@ -81,7 +95,13 @@ export function persistJobRecord(j: Job): void {
       title: j.title,
       error: j.error,
       retryOf: inputs.retryOf,
-      persona: r.activePersona?.name ?? inputs.activePersona?.name ?? r.persona?.name,
+      continuesJobId: typeof inputs.continuesJobId === "string" ? inputs.continuesJobId : undefined,
+      continuesOriginalText: typeof inputs.continuesOriginalText === "string" ? inputs.continuesOriginalText.slice(0, 400) : undefined,
+      continuesSummary: typeof inputs.continuesSummary === "string" ? inputs.continuesSummary.slice(0, 200) : undefined,
+      // Prefer the dispatch-time name set on the job (canonical) over
+      // legacy result/input shapes. Pre-B5 records still read via the
+      // fallback chain for back-compat.
+      persona: j.personaName ?? r.activePersona?.name ?? inputs.activePersona?.name ?? r.persona?.name,
       peer: r.peer?.name,
       runs: Array.isArray(r.runs)
         ? r.runs.map((run: any) => ({
@@ -93,6 +113,14 @@ export function persistJobRecord(j: Job): void {
         : undefined,
       skillUsed: r.skillUsed,
       skillScore: typeof r.skillScore === "number" ? r.skillScore : undefined,
+      // The synthesised customer-facing answer. Cap at 16 KB so a single
+      // verbose job can't bloat the daily JSONL. Most answers come in
+      // well under 2 KB; the cap protects against the long tail.
+      answer: typeof r.answer === "string" ? r.answer.slice(0, 16 * 1024) : undefined,
+      planSummary: typeof r.plan?.summary === "string" ? r.plan.summary.slice(0, 400) : undefined,
+      planSteps: Array.isArray(r.plan?.steps)
+        ? r.plan.steps.slice(0, 16).map((s: any) => String(s?.tool ?? "unknown"))
+        : undefined,
     };
     const day = dateKey(j.startedAt);
     const path = join(JOBS_DIR, `${day}.jsonl`);
@@ -142,6 +170,47 @@ export function loadJobsInWindow(windowStartMs: number, windowEndMs: number): Pe
   }
 }
 
+// Look up a single persisted job by id. Used by the /api/templates/jobs/:id
+// fallback when a job is no longer in the in-memory map (e.g. evicted by
+// the RECENT cap, server restart, or just an old job linked from the
+// Calendar's day-detail panel). Scans the daily JSONL files newest-first
+// since recent jobs are the most likely target. Returns undefined when no
+// match is found across the whole journal.
+//
+// Note: the JSONL append-only design means there may be multiple records
+// for the same id if the job was updated more than once (e.g. running →
+// succeeded). We return the LAST occurrence — that's the most recent state.
+export function loadJobById(id: string): PersistedJob | undefined {
+  try {
+    if (!existsSync(JOBS_DIR)) return undefined;
+    const files = readdirSync(JOBS_DIR)
+      .filter(f => f.endsWith(".jsonl"))
+      .sort((a, b) => b.localeCompare(a)); // newest day first
+    for (const fname of files) {
+      const full = join(JOBS_DIR, fname);
+      let body: string;
+      try { body = readFileSync(full, "utf8"); } catch { continue; }
+      // Walk lines in reverse so the LAST record for the id wins. Most
+      // day files are small (hundreds of jobs); the cost is bounded.
+      const lines = body.split("\n");
+      for (let i = lines.length - 1; i >= 0; i--) {
+        const line = lines[i];
+        if (!line.trim()) continue;
+        // Cheap substring check before parse — saves JSON.parse on most lines.
+        if (!line.includes(`"${id}"`)) continue;
+        try {
+          const rec = JSON.parse(line) as PersistedJob;
+          if (rec.id === id) return rec;
+        } catch { /* tolerate malformed line */ }
+      }
+    }
+    return undefined;
+  } catch (e: any) {
+    console.warn(`[job-store] loadJobById failed: ${e?.message ?? e}`);
+    return undefined;
+  }
+}
+
 // Reflection wants a Job-shaped object (kind, status, startedAt,
 // finishedAt, result.runs, etc.) so it can reuse aggregate() unchanged.
 // This shim hydrates a PersistedJob into a synthetic Job.
@@ -156,7 +225,13 @@ export function asJob(rec: PersistedJob): Job {
     template: rec.template,
     title: rec.title,
     error: rec.error,
-    inputs: rec.retryOf ? { retryOf: rec.retryOf } : undefined,
+    personaName: rec.persona,
+    inputs: (rec.retryOf || rec.continuesJobId) ? {
+      ...(rec.retryOf ? { retryOf: rec.retryOf } : {}),
+      ...(rec.continuesJobId ? { continuesJobId: rec.continuesJobId } : {}),
+      ...(rec.continuesOriginalText ? { continuesOriginalText: rec.continuesOriginalText } : {}),
+      ...(rec.continuesSummary ? { continuesSummary: rec.continuesSummary } : {}),
+    } : undefined,
     result: {
       activePersona: rec.persona ? { name: rec.persona } : undefined,
       peer: rec.peer ? { name: rec.peer } : undefined,
@@ -168,6 +243,16 @@ export function asJob(rec: PersistedJob): Job {
       })),
       skillUsed: rec.skillUsed,
       skillScore: rec.skillScore,
+      // Hydrate the persisted answer + plan so the Result page renders
+      // the report when /api/templates/jobs/:id is served via the
+      // loadJobById fallback path (job evicted from in-memory cap).
+      answer: rec.answer,
+      plan: (rec.planSummary || rec.planSteps)
+        ? {
+            summary: rec.planSummary,
+            steps: (rec.planSteps ?? []).map(tool => ({ tool, args: {}, rationale: "" })),
+          }
+        : undefined,
     },
   };
 }

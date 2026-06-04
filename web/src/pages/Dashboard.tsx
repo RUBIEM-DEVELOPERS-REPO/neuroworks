@@ -19,21 +19,26 @@ export function Dashboard() {
   // /api/personas; the fleet comes from /api/peers (self + reachable peers).
   const [personas, setPersonas] = useState<any[]>([]);
   const [fleet, setFleet] = useState<{ self: any; peers: any[] } | null>(null);
+  // External (CLI / process-per-task) agents like Hermes — surfaced in the
+  // workforce card alongside clawbots so the operator sees a single roster.
+  const [externalAgents, setExternalAgents] = useState<any[]>([]);
   const [activating, setActivating] = useState<string | null>(null);
 
   async function load() {
     try {
-      const [t, j, p, peers] = await Promise.all([
+      const [t, j, p, peers, ext] = await Promise.all([
         api.listTemplates(),
         api.listJobs().catch(() => ({ jobs: [] as any[] })),
         api.listPersonas().catch(() => ({ active: null, personas: [] } as any)),
         api.peers().catch(() => null),
+        api.externalAgents().catch(() => ({ agents: [] as any[] })),
       ]);
       setTemplates(t.templates);
       setRecent(j.jobs.slice(0, 4));
       setPersona(p.active);
       setPersonas(Array.isArray(p.personas) ? p.personas : []);
       if (peers) setFleet(peers);
+      setExternalAgents(ext.agents ?? []);
     } catch (e: any) { setErr(e.message); }
   }
   useEffect(() => { load(); const i = setInterval(load, 6000); return () => clearInterval(i); }, []);
@@ -91,14 +96,14 @@ export function Dashboard() {
         </div>
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
           {(quickStart.length ? quickStart : Array(4).fill(null)).map((t: Template | null, i) => t ? (
-            <button key={t.id} onClick={() => setActive(t)} className="text-left bg-ink-900 hover:bg-ink-850 border border-ink-800 hover:border-violet-500/40 rounded-xl p-4 transition-colors">
+            <button key={t.id} onClick={() => setActive(t)} className={`text-left bg-ink-900 hover:bg-ink-850 border border-ink-800 hover:border-violet-500/40 rounded-xl p-4 transition-colors nw-card-hover nw-fade-up nw-delay-${Math.min(7, i + 1)}`}>
               <RoleIcon role={t.role} className="mb-3" />
               <div className="text-xs text-cream-300/60 uppercase tracking-wider">{t.role}</div>
               <div className="font-display text-lg text-cream-50 mt-0.5 leading-tight">{t.title}</div>
               <div className="text-xs text-cream-300/70 mt-2 line-clamp-2">{t.description}</div>
             </button>
           ) : (
-            <div key={i} className="bg-ink-900 border border-ink-800 rounded-xl p-4 h-32 animate-pulse" />
+            <div key={i} className="bg-ink-900 border border-ink-800 rounded-xl p-4 h-32 skeleton" />
           ))}
         </div>
       </section>
@@ -185,8 +190,8 @@ export function Dashboard() {
             </ul>
           )}
         </Card>
-        <Card title="Clawbot fleet">
-          <ClawbotFleet fleet={fleet} templatesCount={templates?.length} tasksToday={recent.length} personasCount={personas.length} />
+        <Card title="Workforce">
+          <ClawbotFleet fleet={fleet} externalAgents={externalAgents} templatesCount={templates?.length} tasksToday={recent.length} personasCount={personas.length} />
         </Card>
       </section>
 
@@ -200,8 +205,9 @@ export function Dashboard() {
 // or peer — with current inflight count, role, and ready state. Replaces the
 // previous hardcoded "1 (clawbot)" line which was a lie the moment a worker
 // peer came online.
-function ClawbotFleet({ fleet, templatesCount, tasksToday, personasCount }: {
+function ClawbotFleet({ fleet, externalAgents, templatesCount, tasksToday, personasCount }: {
   fleet: { self: any; peers: any[] } | null;
+  externalAgents: any[];
   templatesCount?: number;
   tasksToday: number;
   personasCount: number;
@@ -252,9 +258,31 @@ function ClawbotFleet({ fleet, templatesCount, tasksToday, personasCount }: {
             <span className={`text-[10px] font-mono shrink-0 ${b.inflight > 0 ? "text-flame-400" : "text-cream-300/60"}`}>{b.inflight > 0 ? `${b.inflight} working` : "idle"}</span>
           </div>
         ))}
+        {externalAgents.length > 0 && externalAgents.map((a, i) => {
+          const r = a.recentJobs ?? { last1h: 0, last24h: 0, total: 0 };
+          const live = r.last1h > 0;
+          return (
+            <div key={`ext-${i}`} className="flex items-center justify-between gap-2 px-2 py-1.5 rounded-md bg-ink-950 border border-ink-800">
+              <div className="flex items-center gap-2 min-w-0">
+                <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${a.installed ? (live ? "bg-flame-400 animate-pulse" : "bg-leaf-500") : "bg-coral-500"}`} />
+                <div className="min-w-0">
+                  <div className="text-xs text-cream-100 truncate">
+                    {a.name}
+                    <span className="text-[10px] text-cream-300/40 ml-1">· {a.kind}</span>
+                  </div>
+                  <div className="text-[10px] text-cream-300/50 truncate">
+                    {a.installed ? `external · ${r.total} run${r.total === 1 ? "" : "s"} tracked` : "not installed"}
+                  </div>
+                </div>
+              </div>
+              <span className={`text-[10px] font-mono shrink-0 ${live ? "text-flame-400" : "text-cream-300/60"}`}>{live ? `${r.last1h} in 1h` : "idle"}</span>
+            </div>
+          );
+        })}
       </div>
       <div className="border-t border-ink-800 pt-2.5 space-y-2 text-xs">
         <div className="flex justify-between"><span className="text-cream-300/70">Clawbots online</span><span className="text-cream-100 font-mono">{activeCount}/{bots.length}</span></div>
+        {externalAgents.length > 0 && <div className="flex justify-between"><span className="text-cream-300/70">External agents</span><span className="text-cream-100 font-mono">{externalAgents.filter(a => a.installed).length}/{externalAgents.length}</span></div>}
         <div className="flex justify-between"><span className="text-cream-300/70">Employees</span><span className="text-cream-100 font-mono">{personasCount}</span></div>
         <div className="flex justify-between"><span className="text-cream-300/70">Templates</span><span className="text-cream-100 font-mono">{templatesCount ?? "—"}</span></div>
         <div className="flex justify-between"><span className="text-cream-300/70">Tasks today</span><span className="text-cream-100 font-mono">{tasksToday}</span></div>

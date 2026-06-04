@@ -3,28 +3,48 @@ import { existsSync } from "node:fs";
 import { resolve, basename } from "node:path";
 import { simpleGit } from "simple-git";
 import { templates, roles, type Template } from "../lib/templates.js";
-import { newJob, getJob, listJobs, runJob } from "../lib/jobs.js";
+import { newJob, getJob, listJobs, runJob, SERVER_BOOT_AT } from "../lib/jobs.js";
+import { loadJobById, asJob } from "../lib/job-store.js";
 import { config } from "../config.js";
 import { dispatchWorkflow, recentCommits, openPRs, openIssues, readme, octokit } from "../lib/github.js";
-import { writeVaultFile, commitAndPush, searchVault } from "../lib/vault.js";
+import { writeVaultFile, commitAndPush, searchVault, VaultUnreachable } from "../lib/vault.js";
 import { ollamaGenerate } from "../lib/ollama.js";
 import { syncDownloads } from "../lib/sync-downloads.js";
 import { planAndExecute, executePlan } from "../lib/agent.js";
 import { loadCustomTemplates, saveCustomTemplate, findCustomTemplate, bumpRunCount, slugify, type CustomTemplate } from "../lib/custom-templates.js";
 import { getActivePersona, personaSystemSuffix } from "../lib/personas.js";
+import { classifyCustomTemplate, type TemplateRole } from "../lib/template-classifier.js";
+import { findPrimitive } from "../lib/primitives.js";
 
 export const templatesRouter = Router();
 
 const NEEDS_GITHUB = new Set(["summarize-repo", "run-digest", "publish-folder"]);
 
 templatesRouter.get("/", (_req, res) => {
+  // Custom templates persist with role: "Custom" because save-time didn't
+  // know which lane they belonged to. We re-classify on read so the UI
+  // shows them under Engineering / Knowledge / Operations / Insights
+  // when the id + title + description match a known lane. Unclassifiable
+  // saves still fall through to "Custom" for discoverability.
   const custom = loadCustomTemplates().map(c => ({
-    id: c.id, role: "Custom" as const, title: c.title, description: c.description,
-    icon: "saved", agent: "clawbot",
-    inputs: [], requiresApproval: false, estimateSeconds: 30,
-    runCount: c.runCount, lastRunAt: c.lastRunAt,
+    id: c.id,
+    role: classifyCustomTemplate(c),
+    title: c.title,
+    description: c.description,
+    icon: "saved",
+    agent: "clawbot",
+    inputs: [],
+    requiresApproval: false,
+    estimateSeconds: 30,
+    runCount: c.runCount,
+    lastRunAt: c.lastRunAt,
   }));
-  const allRoles = roles.map(r => r.id === "Custom" ? { ...r, count: custom.length } : r);
+  // Recount every role with the re-classified customs folded in. Built-in
+  // templates already have correct roles; we just need to add the custom
+  // contribution per bucket.
+  const customByRole: Record<TemplateRole, number> = { Engineering: 0, Knowledge: 0, Operations: 0, Insights: 0, Custom: 0 };
+  for (const c of custom) customByRole[c.role as TemplateRole]++;
+  const allRoles = roles.map(r => ({ ...r, count: (r.count ?? 0) + (customByRole[r.id as TemplateRole] ?? 0) }));
   res.json({ roles: allRoles, templates: [...templates, ...custom] });
 });
 
@@ -32,8 +52,24 @@ templatesRouter.get("/jobs", (_req, res) => res.json({ jobs: listJobs() }));
 
 templatesRouter.get("/jobs/:id", (req, res) => {
   const j = getJob(req.params.id);
-  if (!j) return res.status(404).json({ error: "not found" });
-  res.json(j);
+  if (j) return res.json(j);
+  // Fallback to the persisted journal — covers the Calendar's day-detail
+  // panel linking to old jobs that were evicted from the in-memory cap,
+  // server-restart cases, and direct deep-links into /results/<id> for
+  // anything older than the last few dozen jobs.
+  const rec = loadJobById(req.params.id);
+  if (rec) {
+    // asJob() hydrates the persisted record into the Job shape the UI
+    // expects, including answer + plan summary so the Result page renders
+    // the actual report. log[] is empty (we don't persist log lines) and
+    // runs[] is minimal (just tool + duration + ok flag).
+    return res.json(asJob(rec));
+  }
+  return res.status(404).json({
+    error: "not found",
+    serverBootAt: SERVER_BOOT_AT,
+    hint: "Job not found in memory or in the persisted journal. If this was a recent task, retry it — otherwise the journal may have been rotated.",
+  });
 });
 
 // Retry a failed job — replays the same task + inputs through the general-task
@@ -119,6 +155,15 @@ templatesRouter.post("/run/:id", async (req, res) => {
       // Persona-derived starter templates ship with an empty plan — they re-plan
       // each run against the active persona system suffix so output stays in role.
       // Saved-from-chat templates, by contrast, replay their concrete plan.
+      // Optional probe enrichment: callers (e.g. the stress harness) may pass
+      // a `contextHint` to give the run more framing than the terse origin.task
+      // carries. Absent → behaviour is unchanged. GATED TO PREPLAN BRANCH ONLY:
+      // empty-plan templates route through generalTaskRunner which re-plans
+      // every run — a longer task there expands planned scope and produced
+      // 74/84 timeouts + 4 catastrophic ~5400s outliers in the 2026-05-30
+      // sweep. The preplan branch replays a fixed plan, so richer task text
+      // there only enriches synthesis, not planning.
+      const contextHint = typeof inputs.contextHint === "string" ? inputs.contextHint.trim() : "";
       if (custom.plan.steps.length === 0 && custom.origin?.task) {
         return generalTaskRunner({ task: custom.origin.task, save_as_template: false }, push, progress);
       }
@@ -129,7 +174,8 @@ templatesRouter.post("/run/:id", async (req, res) => {
       // machine output.
       const persona = getActivePersona();
       const personaSuffix = personaSystemSuffix(persona);
-      const taskText = custom.origin?.task ?? `Replay saved plan: ${custom.title}`;
+      const baseTask = custom.origin?.task ?? `Replay saved plan: ${custom.title}`;
+      const taskText = contextHint ? `${baseTask}\n\nContext: ${contextHint}` : baseTask;
       const r = await planAndExecute(taskText, push, (patch) => progress(patch as Record<string, unknown>), {
         personaSystemSuffix: personaSuffix,
         preplan: custom.plan,
@@ -138,6 +184,26 @@ templatesRouter.post("/run/:id", async (req, res) => {
     }
     return runner(tpl.id, inputs, push, progress);
   });
+});
+
+// Grade an arbitrary (task, answer) with the deliverable-aware quality grader.
+// Used by the all-templates stress harness: template replays go through the
+// `preplan` path which skips the in-line QA gate, so we score their output
+// here instead. Thin wrapper over the quality.check primitive.
+templatesRouter.post("/grade", async (req, res) => {
+  try {
+    const task = String(req.body?.task ?? "");
+    const answer = String(req.body?.answer ?? "");
+    const sources = req.body?.sources ? String(req.body.sources) : "";
+    const context = req.body?.context ? String(req.body.context) : "";
+    if (!task || !answer) return res.status(400).json({ error: "task and answer required" });
+    const prim = findPrimitive("quality.check");
+    if (!prim) return res.status(500).json({ error: "quality.check primitive not found" });
+    const r = await prim.handler({ task, answer, sources, context });
+    res.json(r);
+  } catch (e: any) {
+    res.status(500).json({ error: String(e?.message ?? e) });
+  }
 });
 
 templatesRouter.post("/jobs/:id/approve", async (req, res) => {
@@ -323,7 +389,17 @@ async function publishFolderRunner(inputs: Record<string, unknown>, push: (m: st
 async function searchBrainRunner(inputs: Record<string, unknown>, push: (m: string) => void) {
   const q = String(inputs.query);
   push(`searching vault for "${q}"`);
-  const results = searchVault(q);
+  let results;
+  try {
+    results = searchVault(q);
+  } catch (e: any) {
+    if (e instanceof VaultUnreachable) {
+      push(`vault unreachable: ${e.vaultPath}`);
+      const answer = `I couldn't search your vault — the configured path **${e.vaultPath}** doesn't resolve on this machine. Common causes: the drive is unmounted (e.g. D: was unplugged on Windows), the folder was renamed, or \`VAULT_PATH\` in \`.env\` doesn't match your actual vault. Mount the drive (or fix the path) and try again.`;
+      return { query: q, results: [], count: 0, vaultUnreachable: true, vaultPath: e.vaultPath, answer };
+    }
+    throw e;
+  }
   push(`${results.length} match${results.length === 1 ? "" : "es"}`);
   // Build a human-readable `answer` so consumers (chat UI, harness, journal)
   // get a real summary instead of just a raw results array. Without this,

@@ -13,6 +13,12 @@ import { Personas } from "./pages/Personas";
 import { Team } from "./pages/Team";
 import { Results, ResultsIndex } from "./pages/Results";
 import { Skills } from "./pages/Skills";
+import { Schedules } from "./pages/Schedules";
+import { Governance } from "./pages/Governance";
+import { CalendarPage } from "./pages/CalendarPage";
+import { DocEditor } from "./pages/DocEditor";
+import { DataSources } from "./pages/DataSources";
+import { Terminal } from "./pages/Terminal";
 
 export default function App() {
   return (
@@ -29,7 +35,14 @@ export default function App() {
         <Route path="/skills" element={<Skills />} />
         <Route path="/approvals" element={<Approvals />} />
         <Route path="/activity" element={<Activity />} />
+        <Route path="/schedules" element={<Schedules />} />
+        <Route path="/calendar" element={<CalendarPage />} />
+        <Route path="/edit" element={<DocEditor />} />
+        <Route path="/edit/*" element={<DocEditor />} />
+        <Route path="/governance" element={<Governance />} />
         <Route path="/knowledge/*" element={<Knowledge />} />
+        <Route path="/data-sources" element={<DataSources />} />
+        <Route path="/terminal" element={<Terminal />} />
         <Route path="/admin" element={<Admin />} />
         <Route path="/personas" element={<Personas />} />
         <Route path="/settings" element={<Settings />} />
