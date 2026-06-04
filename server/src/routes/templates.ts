@@ -213,6 +213,19 @@ templatesRouter.post("/jobs/:id/approve", async (req, res) => {
   j.approvedAt = new Date().toISOString();
   j.log.push(`[${j.approvedAt}] approved`);
   res.json({ jobId: j.id, status: "approved" });
+
+  // Plan-approval job: execute the EXACT plan the user reviewed (no re-planning),
+  // then let planAndExecute finish the loop (synthesise → answer). Empty plans
+  // fall through to the normal plan/synth path.
+  if (j.plan) {
+    const task = j.task ?? j.title ?? "";
+    void runJob(j, async (push, progress) =>
+      planAndExecute(task, push, (patch) => progress(patch as Record<string, unknown>), {
+        personaSystemSuffix: j.personaSuffix,
+        preplan: j.plan && j.plan.steps.length > 0 ? j.plan : undefined,
+      }));
+    return;
+  }
   if (!j.template) return;
   void runJob(j, async (push) => runner(j.template!, j.inputs ?? {}, push));
 });

@@ -43,6 +43,8 @@ export function Approvals() {
       ) : (
         <ul className="space-y-2">
           {jobs.map(j => {
+            const planSteps = j.plan?.steps as { tool: string; label?: string; rationale?: string }[] | undefined;
+            const hasPlan = Array.isArray(planSteps) && planSteps.length > 0;
             const effects = describeEffects(j);
             return (
               <li key={j.id}>
@@ -51,6 +53,24 @@ export function Approvals() {
                     <div className="min-w-0 flex-1">
                       <div className="text-sm font-medium text-cream-50">{j.title ?? j.kind}</div>
                       <div className="text-xs text-cream-300/60 mt-0.5">{new Date(j.startedAt).toLocaleString()}</div>
+                      {hasPlan ? (
+                        <div className="mt-3 rounded-md border border-violet-500/30 bg-violet-500/5 p-3 text-xs">
+                          <div className="text-[10px] uppercase tracking-wider text-violet-300/70 mb-2">Proposed plan — {planSteps!.length} step{planSteps!.length === 1 ? "" : "s"}</div>
+                          <ol className="space-y-1.5">
+                            {planSteps!.map((s, i) => (
+                              <li key={i} className="flex gap-2">
+                                <span className="text-violet-400/70 font-mono shrink-0">{i + 1}.</span>
+                                <span className="min-w-0">
+                                  <span className="font-mono text-violet-200">{s.tool}</span>
+                                  {s.label && s.label !== s.tool && <span className="text-cream-200"> — {s.label}</span>}
+                                  {s.rationale && <span className="block text-cream-300/50 text-[11px]">{s.rationale}</span>}
+                                </span>
+                              </li>
+                            ))}
+                          </ol>
+                          <div className="text-[10px] text-cream-300/40 mt-2 pt-2 border-t border-violet-500/15">Approving runs these steps as-is, then synthesises the answer.</div>
+                        </div>
+                      ) : (
                       <div className={`mt-3 rounded-md border p-3 text-xs ${effects.severity === "high" ? "bg-flame-500/5 border-flame-500/30" : "bg-ink-950 border-ink-800"}`}>
                         <div className="text-[10px] uppercase tracking-wider text-cream-300/50 mb-1.5">If you approve, clawbot will:</div>
                         <ul className="space-y-1 text-cream-200">
@@ -60,6 +80,7 @@ export function Approvals() {
                           <div className="text-[10px] text-flame-400 mt-2 pt-2 border-t border-flame-500/20">⚠ This action is hard to reverse — double-check the inputs.</div>
                         )}
                       </div>
+                      )}
                       {j.inputs && Object.keys(j.inputs).length > 0 && (
                         <details className="mt-2">
                           <summary className="text-[11px] text-cream-300/60 cursor-pointer hover:text-cream-100">Raw inputs</summary>

@@ -126,3 +126,43 @@ tasksRouter.get("/workflow/latest", async (_req, res) => {
     res.json({ run });
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
+
+// Plan-approval flow — draft a plan for a task and PAUSE for human sign-off
+// instead of executing immediately. The job parks at awaiting-approval with the
+// planned steps attached; approving it (Approvals page) executes THIS plan via
+// the templates approve endpoint (which replays the preplan, no re-planning).
+tasksRouter.post("/plan", async (req, res) => {
+  const task = String(req.body?.task ?? "").trim();
+  if (!task) return res.status(400).json({ error: "task required" });
+  const job = newJob("insights:plan-approval");
+  job.title = task.slice(0, 120);
+  job.requiresApproval = true;
+  job.task = task;
+  job.status = "pending";
+  res.json({ jobId: job.id, status: "planning" });
+
+  // Draft the plan asynchronously; the client polls the job until it reaches
+  // awaiting-approval and the plan steps appear.
+  void (async () => {
+    try {
+      const { plan } = await import("../lib/agent.js");
+      const { getActivePersona, personaSystemSuffix } = await import("../lib/personas.js");
+      const persona = getActivePersona();
+      const suffix = personaSystemSuffix(persona);
+      job.status = "running";
+      job.personaId = persona?.id;
+      job.personaName = persona?.name;
+      job.log.push(`[${new Date().toISOString()}] drafting a plan…`);
+      const p = await plan(task, suffix, (m) => job.log.push(m));
+      job.plan = p;
+      job.personaSuffix = suffix;
+      job.status = "awaiting-approval";
+      job.log.push(`[${new Date().toISOString()}] plan ready — ${p.steps.length} step${p.steps.length === 1 ? "" : "s"}; waiting on your approval`);
+    } catch (e: any) {
+      job.status = "failed";
+      job.error = String(e?.message ?? e);
+      job.finishedAt = new Date().toISOString();
+      job.log.push(`[${new Date().toISOString()}] planning failed: ${job.error}`);
+    }
+  })();
+});

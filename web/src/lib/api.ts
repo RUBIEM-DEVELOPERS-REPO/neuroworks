@@ -214,6 +214,8 @@ export const api = {
     req<{ connection: IntegrationConnection }>("/api/integrations", { method: "POST", body: JSON.stringify({ providerId, label, values }) }),
   testIntegration: (id: string) => req<{ ok: boolean; detail: string }>(`/api/integrations/${encodeURIComponent(id)}/test`, { method: "POST" }),
   removeIntegration: (id: string) => req<{ ok: true }>(`/api/integrations/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  // Plan-approval: draft a plan for a task and park it for human sign-off.
+  planTask: (task: string) => req<{ jobId: string; status: string }>("/api/tasks/plan", { method: "POST", body: JSON.stringify({ task }) }),
   sttStatus: () => req<{ enabled: boolean; provider: string; hint?: string }>("/api/stt/status"),
   transcribe: (audioBase64: string) => req<{ ok: true; text: string; language: string | null }>("/api/stt", { method: "POST", body: JSON.stringify({ audioBase64 }) }),
   terminalStatus: () => req<{ enabled: boolean; cwd: string; shell: "powershell" | "bash"; platform: string; hint?: string }>("/api/terminal/status"),

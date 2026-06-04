@@ -3,7 +3,7 @@ import { Link } from "react-router-dom";
 import { marked } from "marked";
 import {
   Paperclip, X, Plus, Pause, RotateCcw, ArrowRight, AlertTriangle,
-  CheckCircle2, FileText, Send, Mic, Square, Loader2,
+  CheckCircle2, FileText, Send, Mic, Square, Loader2, ListChecks,
 } from "lucide-react";
 import { api } from "../lib/api";
 import { useAudioRecorder } from "../lib/useAudioRecorder";
@@ -93,6 +93,8 @@ export function Chat() {
   const [sttEnabled, setSttEnabled] = useState(false);
   const [transcribing, setTranscribing] = useState(false);
   const [sttError, setSttError] = useState<string | null>(null);
+  // Plan-first: draft a plan and route it to Approvals instead of running now.
+  const [planFirst, setPlanFirst] = useState(false);
   useEffect(() => { api.sttStatus().then(s => setSttEnabled(s.enabled)).catch(() => setSttEnabled(false)); }, []);
 
   async function toggleMic() {
@@ -303,6 +305,20 @@ export function Chat() {
     const sendText = activeTemplate
       ? `${activeTemplate.task.trim()}\n\nTopic: ${effectiveTopic}`
       : effectiveTopic;
+
+    // Plan-first mode: draft a plan and park it for approval instead of running.
+    if (planFirst) {
+      setMessages([...messages, { role: "user", content: displayText }]);
+      setDraft(""); setActiveTemplate(null); setPendingAttachments([]); setPendingContinuation(null); setErr(""); setBusy(true);
+      try {
+        const { jobId } = await api.planTask(sendText);
+        setMessages(prev => [...prev, { role: "assistant", content: "📋 Drafting a plan for this — review and approve the steps on the **Approvals** page. Once you approve, I'll run exactly that plan.", jobId }]);
+      } catch (e: any) {
+        setErr(e?.message ?? String(e));
+      } finally { setBusy(false); }
+      return;
+    }
+
     const next: Msg[] = [...messages, { role: "user", content: displayText }];
     const attachmentsToSend = pendingAttachments.map(a => ({ contextId: a.contextId }));
     const continuationToSend = pendingContinuation;
@@ -780,6 +796,15 @@ export function Chat() {
           )}
         </form>
         <div className="max-w-3xl mx-auto text-[10px] text-cream-300/40 mt-2 px-1 flex items-center gap-2 flex-wrap">
+          <button
+            type="button"
+            onClick={() => setPlanFirst(p => !p)}
+            title="Draft a plan and approve the steps before clawbot runs them"
+            className={`flex items-center gap-1 px-2 py-0.5 rounded-full border transition-colors ${planFirst ? "bg-violet-500/15 border-violet-500/40 text-violet-300" : "border-ink-700 text-cream-300/50 hover:text-cream-200 hover:border-ink-600"}`}
+          >
+            <ListChecks size={11} /> Plan first{planFirst ? " · on" : ""}
+          </button>
+          <span className="text-cream-300/30">·</span>
           <span className="flex items-center gap-1"><Kbd>↵</Kbd> send</span>
           <span className="text-cream-300/30">·</span>
           <span className="flex items-center gap-1"><Kbd>⇧</Kbd>+<Kbd>↵</Kbd> newline</span>

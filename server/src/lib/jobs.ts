@@ -3,6 +3,7 @@ import { EventEmitter } from "node:events";
 import { journal } from "./journal.js";
 import { getActivePersona } from "./personas.js";
 import { persistJobRecord } from "./job-store.js";
+import type { Plan } from "./agent.js"; // type-only — erased at runtime, no import cycle
 
 export type Job = {
   id: string;
@@ -19,6 +20,12 @@ export type Job = {
   requiresApproval?: boolean;
   approvedAt?: string;
   rejectedAt?: string;
+  // Plan-approval flow: the agent drafts a plan, the user reviews/approves the
+  // steps, then we execute THIS plan (no re-planning). task/personaSuffix are
+  // captured so approval can resume the loop exactly as planned.
+  plan?: Plan;
+  task?: string;
+  personaSuffix?: string;
   // Persona attribution at dispatch time. Populated by callers (chat, team)
   // so the reflection's byPersona bucket has a stable name to aggregate on.
   // Previously the reflection had to reach into result.activePersona.name
