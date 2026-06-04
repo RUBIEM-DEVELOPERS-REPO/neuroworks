@@ -36,6 +36,7 @@ import { calendarRouter } from "./routes/calendar.js";
 import { dataSourcesRouter } from "./routes/data-sources.js";
 import { terminalRouter } from "./routes/terminal.js";
 import { sttRouter } from "./routes/stt.js";
+import { integrationsRouter } from "./routes/integrations.js";
 import { startEmailBridge, stopEmailBridge } from "./lib/email.js";
 import { originGuard } from "./lib/origin-guard.js";
 
@@ -103,6 +104,7 @@ app.use("/api/calendar", calendarRouter);
 app.use("/api/data-sources", dataSourcesRouter);
 app.use("/api/terminal", terminalRouter);
 app.use("/api/stt", sttRouter);
+app.use("/api/integrations", integrationsRouter);
 
 // Global error handler — every route mounts before this so any throw bubbles
 // up here. We log the request method+url for debugability and return a

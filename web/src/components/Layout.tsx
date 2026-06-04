@@ -6,7 +6,7 @@ import {
   CheckCircle2, Activity as ActivityIcon, Library, Settings as SettingsIcon,
   ShieldCheck, Plus, Sun, Moon, Search as SearchIcon, ChevronRight,
   Calendar, Shield, CalendarDays, FileEdit, Database,
-  Terminal as TerminalIcon, FolderKanban, Wrench,
+  Terminal as TerminalIcon, FolderKanban, Wrench, Plug,
   type LucideIcon,
 } from "lucide-react";
 import { BrandMark } from "./BrandMark";
@@ -51,6 +51,7 @@ const libraryNav: NavItem[] = [
 ];
 
 const systemNav: NavItem[] = [
+  { to: "/integrations", label: "Integrations", icon: Plug },
   { to: "/terminal", label: "Terminal", icon: TerminalIcon },
   { to: "/governance", label: "Governance", icon: Shield },
   { to: "/admin", label: "Admin", icon: ShieldCheck },

@@ -2246,6 +2246,70 @@ When you're uncertain about citation_coverage, lean higher when you see [N] or [
       return { reports: reportsOf(String(args.query ?? "")) };
     },
   },
+  {
+    name: "integration.list",
+    description: "List the external services the user has connected on the Integrations page (Slack, Telegram, Discord, GitHub, Notion, Linear, Google, etc.). Use to discover what channels/tools you can act on before reaching for slack.post / telegram.send / discord.post. Returns provider, label, and category — never secrets.",
+    readonly: true,
+    args: [],
+    handler: async () => {
+      const { listConnections } = await import("./integrations.js");
+      return { connections: listConnections().map(c => ({ providerId: c.providerId, provider: c.providerName, label: c.label, category: c.category })) };
+    },
+  },
+  {
+    name: "slack.post",
+    description: "Post a message to the user's connected Slack (via the saved Incoming Webhook). Use to notify the user or a channel of a result/alert. Requires a Slack connection on the Integrations page.",
+    readonly: false,
+    args: [{ name: "text", type: "string", required: true, description: "Message text (Slack mrkdwn supported)" }],
+    handler: async (args) => {
+      const { getConnectionByProvider } = await import("./integrations.js");
+      const conn = getConnectionByProvider("slack");
+      if (!conn?.secrets?.webhookUrl) return { error: "no Slack connection — add one on the Integrations page" };
+      const text = String(args.text ?? "").trim();
+      if (!text) return { error: "text is required" };
+      const r = await fetch(conn.secrets.webhookUrl, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text }) });
+      return r.ok ? { ok: true, posted: true, chars: text.length } : { error: `slack ${r.status}: ${(await r.text()).slice(0, 200)}` };
+    },
+  },
+  {
+    name: "telegram.send",
+    description: "Send a message via the user's connected Telegram bot. Defaults to the saved chat id; pass chatId to override. Requires a Telegram connection on the Integrations page.",
+    readonly: false,
+    args: [
+      { name: "text", type: "string", required: true, description: "Message text" },
+      { name: "chatId", type: "string", required: false, description: "Override the default chat id" },
+    ],
+    handler: async (args) => {
+      const { getConnectionByProvider } = await import("./integrations.js");
+      const conn = getConnectionByProvider("telegram");
+      if (!conn?.secrets?.botToken) return { error: "no Telegram connection — add one on the Integrations page" };
+      const chatId = String(args.chatId ?? conn.config?.chatId ?? "").trim();
+      if (!chatId) return { error: "no chatId (set a default on the Integrations page or pass chatId)" };
+      const text = String(args.text ?? "").trim();
+      if (!text) return { error: "text is required" };
+      const r = await fetch(`https://api.telegram.org/bot${conn.secrets.botToken}/sendMessage`, {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ chat_id: chatId, text }),
+      });
+      const j: any = await r.json().catch(() => ({}));
+      return j?.ok ? { ok: true, sent: true, messageId: j.result?.message_id } : { error: `telegram: ${j?.description ?? `HTTP ${r.status}`}` };
+    },
+  },
+  {
+    name: "discord.post",
+    description: "Post a message to the user's connected Discord channel (via the saved webhook). Requires a Discord connection on the Integrations page.",
+    readonly: false,
+    args: [{ name: "text", type: "string", required: true, description: "Message content" }],
+    handler: async (args) => {
+      const { getConnectionByProvider } = await import("./integrations.js");
+      const conn = getConnectionByProvider("discord");
+      if (!conn?.secrets?.webhookUrl) return { error: "no Discord connection — add one on the Integrations page" };
+      const text = String(args.text ?? "").trim();
+      if (!text) return { error: "text is required" };
+      const r = await fetch(conn.secrets.webhookUrl, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ content: text.slice(0, 2000) }) });
+      return (r.ok || r.status === 204) ? { ok: true, posted: true } : { error: `discord ${r.status}: ${(await r.text()).slice(0, 200)}` };
+    },
+  },
 ];
 
 void sep;

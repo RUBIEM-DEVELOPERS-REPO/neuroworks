@@ -5,7 +5,7 @@ import {
   MessageSquare, Users, ListChecks, FileText, CheckCircle2, Activity as ActivityIcon,
   ShieldCheck, BookOpen, Library, Settings as SettingsIcon, Wrench, Sparkles,
   UserCircle, PlusCircle, Search as SearchIcon, LayoutDashboard, Calendar, Shield,
-  Terminal as TerminalIcon,
+  Terminal as TerminalIcon, Plug,
   type LucideIcon,
 } from "lucide-react";
 import { Kbd, MetaKey } from "./Kbd";
@@ -62,6 +62,7 @@ export function CommandPalette() {
     { id: "l-personas", group: "Library", label: "Personas", icon: UserCircle, onSelect: go("/personas") },
     { id: "l-governance", group: "Library", label: "Governance", icon: Shield, onSelect: go("/governance"), keywords: "policy guardrail compliance" },
     { id: "l-admin", group: "Library", label: "Admin", icon: ShieldCheck, onSelect: go("/admin") },
+    { id: "l-integrations", group: "Library", label: "Integrations", icon: Plug, onSelect: go("/integrations"), keywords: "connect slack telegram github notion social oauth api" },
     { id: "l-terminal", group: "Library", label: "Terminal", icon: TerminalIcon, onSelect: go("/terminal"), keywords: "shell command console run" },
     { id: "l-settings", group: "Library", label: "Settings", icon: SettingsIcon, onSelect: go("/settings") },
     { id: "l-tools", group: "Library", label: "Tools", icon: Wrench, onSelect: go("/admin"), keywords: "config" },

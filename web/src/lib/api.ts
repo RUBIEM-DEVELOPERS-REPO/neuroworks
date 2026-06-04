@@ -208,6 +208,12 @@ export const api = {
   updateSchedule: (id: string, patch: Partial<Pick<Schedule, "name" | "templateId" | "inputs" | "cadence" | "enabled">>) =>
     req<{ schedule: Schedule }>(`/api/schedules/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(patch) }),
   deleteSchedule: (id: string) => req<{ ok: true }>(`/api/schedules/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  integrationsCatalog: () => req<{ providers: IntegrationProvider[] }>("/api/integrations/catalog"),
+  listIntegrations: () => req<{ connections: IntegrationConnection[] }>("/api/integrations"),
+  addIntegration: (providerId: string, label: string, values: Record<string, string>) =>
+    req<{ connection: IntegrationConnection }>("/api/integrations", { method: "POST", body: JSON.stringify({ providerId, label, values }) }),
+  testIntegration: (id: string) => req<{ ok: boolean; detail: string }>(`/api/integrations/${encodeURIComponent(id)}/test`, { method: "POST" }),
+  removeIntegration: (id: string) => req<{ ok: true }>(`/api/integrations/${encodeURIComponent(id)}`, { method: "DELETE" }),
   sttStatus: () => req<{ enabled: boolean; provider: string; hint?: string }>("/api/stt/status"),
   transcribe: (audioBase64: string) => req<{ ok: true; text: string; language: string | null }>("/api/stt", { method: "POST", body: JSON.stringify({ audioBase64 }) }),
   terminalStatus: () => req<{ enabled: boolean; cwd: string; shell: "powershell" | "bash"; platform: string; hint?: string }>("/api/terminal/status"),
@@ -221,6 +227,28 @@ export const api = {
     cwd: string;
     elapsedMs: number;
   }>("/api/terminal/exec", { method: "POST", body: JSON.stringify({ command, ...(cwd ? { cwd } : {}) }) }),
+};
+
+export type IntegrationProvider = {
+  id: string;
+  name: string;
+  category: "messaging" | "social" | "productivity" | "dev";
+  auth: "token" | "webhook" | "oauth";
+  fields: { name: string; label: string; type: "text" | "password" | "url"; placeholder?: string; secret?: boolean; required?: boolean }[];
+  docsUrl?: string;
+  note?: string;
+  testable: boolean;
+};
+
+export type IntegrationConnection = {
+  id: string;
+  providerId: string;
+  providerName: string;
+  category: string;
+  label: string;
+  config: Record<string, string>;
+  secretFields: string[];
+  createdAt: string;
 };
 
 export type DataSource = {

@@ -19,6 +19,7 @@ import { CalendarPage } from "./pages/CalendarPage";
 import { DocEditor } from "./pages/DocEditor";
 import { DataSources } from "./pages/DataSources";
 import { Terminal } from "./pages/Terminal";
+import { Integrations } from "./pages/Integrations";
 
 export default function App() {
   return (
@@ -43,6 +44,7 @@ export default function App() {
         <Route path="/knowledge/*" element={<Knowledge />} />
         <Route path="/data-sources" element={<DataSources />} />
         <Route path="/terminal" element={<Terminal />} />
+        <Route path="/integrations" element={<Integrations />} />
         <Route path="/admin" element={<Admin />} />
         <Route path="/personas" element={<Personas />} />
         <Route path="/settings" element={<Settings />} />

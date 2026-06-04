@@ -1,0 +1,171 @@
+import { useEffect, useState } from "react";
+import { Plug, Plus, Trash2, CheckCircle2, AlertTriangle, Loader2, ExternalLink, X } from "lucide-react";
+import { api, type IntegrationProvider, type IntegrationConnection } from "../lib/api";
+import { Card, Button, showToast } from "../components/Card";
+
+// Integrations — the user connects external services (messaging, social,
+// productivity, dev tools) so agents can act on them. Secrets are encrypted
+// server-side and never returned here. Agents reach connected services via the
+// integration.list / slack.post / telegram.send / discord.post primitives.
+
+const CATEGORY_LABELS: Record<string, string> = {
+  messaging: "Messaging",
+  social: "Social",
+  productivity: "Productivity",
+  dev: "Dev & data",
+};
+const CATEGORY_ORDER = ["messaging", "productivity", "social", "dev"];
+
+export function Integrations() {
+  const [providers, setProviders] = useState<IntegrationProvider[]>([]);
+  const [connections, setConnections] = useState<IntegrationConnection[]>([]);
+  const [connecting, setConnecting] = useState<IntegrationProvider | null>(null);
+  const [testing, setTesting] = useState<string | null>(null);
+
+  async function refresh() {
+    try { const c = await api.integrationsCatalog(); setProviders(c.providers); } catch {}
+    try { const l = await api.listIntegrations(); setConnections(l.connections); } catch {}
+  }
+  useEffect(() => { void refresh(); }, []);
+
+  async function test(id: string) {
+    setTesting(id);
+    try {
+      const r = await api.testIntegration(id);
+      showToast(r.ok ? `✓ ${r.detail}` : `Test failed: ${r.detail}`, r.ok ? "success" : "error");
+    } catch (e: any) {
+      showToast(`Test error: ${e?.message ?? e}`, "error");
+    } finally { setTesting(null); }
+  }
+  async function remove(id: string, label: string) {
+    if (!confirm(`Disconnect "${label}"? Agents using it will stop being able to.`)) return;
+    try { await api.removeIntegration(id); showToast("Disconnected", "success"); refresh(); }
+    catch (e: any) { showToast(e?.message ?? String(e), "error"); }
+  }
+
+  const connByProvider = (pid: string) => connections.filter(c => c.providerId === pid);
+  const grouped = CATEGORY_ORDER
+    .map(cat => ({ cat, items: providers.filter(p => p.category === cat) }))
+    .filter(g => g.items.length > 0);
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <h1 className="font-display text-3xl text-cream-50 flex items-center gap-3"><Plug size={24} /> Integrations</h1>
+        <p className="text-sm text-cream-300/70 mt-1">
+          Connect your tools so agents can act on them — post to <span className="font-mono">Slack</span>/<span className="font-mono">Telegram</span>, read <span className="font-mono">Notion</span>/<span className="font-mono">GitHub</span>, and more.
+          Secrets are <span className="text-cream-200">encrypted at rest</span> and never leave the server.
+        </p>
+      </div>
+
+      {connections.length > 0 && (
+        <Card title={`Connected (${connections.length})`}>
+          <div className="space-y-2">
+            {connections.map(c => (
+              <div key={c.id} className="flex items-center gap-3 py-2 px-3 rounded-lg bg-ink-950/50 border border-ink-800">
+                <div className="w-8 h-8 rounded-md bg-violet-500/15 grid place-items-center text-violet-300 text-xs font-semibold">{c.providerName.slice(0, 2)}</div>
+                <div className="flex-1 min-w-0">
+                  <div className="text-sm text-cream-100 truncate">{c.label} <span className="text-cream-300/40">· {c.providerName}</span></div>
+                  <div className="text-[11px] text-cream-300/50">{CATEGORY_LABELS[c.category] ?? c.category}{c.config && Object.keys(c.config).length > 0 ? ` · ${Object.entries(c.config).map(([k, v]) => `${k}=${v}`).join(", ")}` : ""}</div>
+                </div>
+                <Button variant="subtle" onClick={() => test(c.id)} disabled={testing === c.id}>
+                  {testing === c.id ? <Loader2 size={13} className="animate-spin" /> : <CheckCircle2 size={13} />} Test
+                </Button>
+                <button onClick={() => remove(c.id, c.label)} className="text-cream-300/50 hover:text-coral-400 p-1.5" title="Disconnect"><Trash2 size={15} /></button>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
+
+      {grouped.map(({ cat, items }) => (
+        <div key={cat}>
+          <div className="text-[11px] uppercase tracking-wider text-cream-300/40 mb-2 mt-1">{CATEGORY_LABELS[cat] ?? cat}</div>
+          <div className="grid grid-cols-2 gap-3">
+            {items.map(p => {
+              const conns = connByProvider(p.id);
+              return (
+                <div key={p.id} className="flex items-center gap-3 p-3 rounded-xl border border-ink-800 bg-ink-900/40">
+                  <div className="w-9 h-9 rounded-lg bg-ink-800 grid place-items-center text-cream-200 text-xs font-semibold shrink-0">{p.name.slice(0, 2)}</div>
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm text-cream-100 flex items-center gap-1.5">
+                      {p.name}
+                      {conns.length > 0 && <span className="text-[10px] text-leaf-400 bg-leaf-500/10 px-1.5 py-0.5 rounded-full">{conns.length} connected</span>}
+                      {p.auth === "oauth" && <span className="text-[10px] text-amber-300/80 bg-amber-400/10 px-1.5 py-0.5 rounded-full">token</span>}
+                    </div>
+                    {p.note && <div className="text-[10px] text-cream-300/40 truncate">{p.note}</div>}
+                  </div>
+                  <Button variant="subtle" onClick={() => setConnecting(p)}><Plus size={13} /> Connect</Button>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      ))}
+
+      {connecting && (
+        <ConnectModal
+          provider={connecting}
+          onClose={() => setConnecting(null)}
+          onConnected={() => { setConnecting(null); refresh(); }}
+        />
+      )}
+    </div>
+  );
+}
+
+function ConnectModal({ provider, onClose, onConnected }: { provider: IntegrationProvider; onClose: () => void; onConnected: () => void }) {
+  const [label, setLabel] = useState(provider.name);
+  const [values, setValues] = useState<Record<string, string>>({});
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  async function submit() {
+    setErr(null); setSaving(true);
+    try {
+      await api.addIntegration(provider.id, label, values);
+      showToast(`${provider.name} connected`, "success");
+      onConnected();
+    } catch (e: any) {
+      setErr(e?.message ?? String(e));
+    } finally { setSaving(false); }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-center bg-black/60 p-4" onClick={onClose}>
+      <div className="w-full max-w-md bg-ink-900 border border-ink-700 rounded-2xl p-5 space-y-4" onClick={e => e.stopPropagation()}>
+        <div className="flex items-center justify-between">
+          <h2 className="text-lg text-cream-50 font-medium">Connect {provider.name}</h2>
+          <button onClick={onClose} className="text-cream-300/50 hover:text-cream-100"><X size={18} /></button>
+        </div>
+        {provider.note && <div className="text-[11px] text-amber-300/80 bg-amber-400/10 border border-amber-400/20 rounded-lg px-3 py-2">{provider.note}</div>}
+        <div className="space-y-3">
+          <div>
+            <label className="block text-[11px] text-cream-300/70 mb-1">Label</label>
+            <input value={label} onChange={e => setLabel(e.target.value)} className="w-full bg-ink-950 border border-ink-800 text-sm text-cream-100 rounded-lg px-3 py-2 focus:outline-none focus:border-violet-500/60" />
+          </div>
+          {provider.fields.map(f => (
+            <div key={f.name}>
+              <label className="block text-[11px] text-cream-300/70 mb-1">{f.label}{f.required && <span className="text-coral-400"> *</span>}</label>
+              <input
+                type={f.type === "password" ? "password" : "text"}
+                value={values[f.name] ?? ""}
+                onChange={e => setValues(v => ({ ...v, [f.name]: e.target.value }))}
+                placeholder={f.placeholder}
+                autoComplete="off" spellCheck={false}
+                className="w-full bg-ink-950 border border-ink-800 text-sm text-cream-100 rounded-lg px-3 py-2 font-mono focus:outline-none focus:border-violet-500/60 placeholder:text-cream-300/30"
+              />
+            </div>
+          ))}
+        </div>
+        {err && <div className="text-[12px] text-coral-400 flex items-center gap-1.5"><AlertTriangle size={13} /> {err}</div>}
+        <div className="flex items-center justify-between pt-1">
+          {provider.docsUrl
+            ? <a href={provider.docsUrl} target="_blank" rel="noopener noreferrer" className="text-[11px] text-violet-400 hover:text-violet-300 inline-flex items-center gap-1">Where do I get this? <ExternalLink size={11} /></a>
+            : <span />}
+          <Button onClick={submit} disabled={saving}>{saving ? <Loader2 size={14} className="animate-spin" /> : <Plug size={14} />} Connect</Button>
+        </div>
+      </div>
+    </div>
+  );
+}
