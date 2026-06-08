@@ -38,7 +38,7 @@ export function Results() {
   const isFailed = job.status === "failed" || job.status === "rejected";
   const answer = r.answer ?? r.partialAnswer ?? "";
   const persona = job.inputs?.activePersona ?? r.activePersona;
-  const personaName = (persona && (persona.name ?? persona.id)) ?? "Clawbot";
+  const personaName = (persona && (persona.name ?? persona.id)) ?? "Neuro";
   const startedAt = job.startedAt ? new Date(job.startedAt) : null;
   const finishedAt = job.finishedAt ? new Date(job.finishedAt) : null;
   const durationSec = startedAt && finishedAt
@@ -1051,7 +1051,7 @@ function ProcessTrace({ job }: { job: any }) {
   return (
     <section className="mt-10">
       <details>
-        <summary className="cursor-pointer text-sm text-cream-300/70 hover:text-cream-100">How clawbot arrived at this — {steps.length} {steps.length === 1 ? "step" : "steps"}</summary>
+        <summary className="cursor-pointer text-sm text-cream-300/70 hover:text-cream-100">How Neuro arrived at this — {steps.length} {steps.length === 1 ? "step" : "steps"}</summary>
         <ol className="mt-3 space-y-2 text-sm pl-1">
           {steps.map((s, i) => {
             const run = runs[i];

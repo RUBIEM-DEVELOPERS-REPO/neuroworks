@@ -45,6 +45,7 @@ export function CommandPalette() {
     { id: "n-dashboard", group: "Navigate", label: "Dashboard", icon: LayoutDashboard, onSelect: go("/dashboard"), keywords: "home overview" },
     { id: "n-chat", group: "Navigate", label: "Chat", icon: MessageSquare, onSelect: go("/chat"), keywords: "talk message" },
     { id: "n-team", group: "Navigate", label: "Team", icon: Users, onSelect: go("/team"), keywords: "personas employees dispatch" },
+    { id: "n-presets", group: "Navigate", label: "Hire a worker (Presets)", icon: Sparkles, onSelect: go("/presets"), keywords: "preset role hire onboard setup wizard sdr assistant recruiter" },
     { id: "n-tasks", group: "Navigate", label: "Tasks", icon: ListChecks, onSelect: go("/tasks"), keywords: "jobs queue" },
     { id: "n-reports", group: "Navigate", label: "Reports", icon: FileText, onSelect: go("/results"), keywords: "results outputs" },
     { id: "n-knowledge", group: "Navigate", label: "Knowledge vault", icon: BookOpen, onSelect: go("/knowledge"), keywords: "vault notes search" },

@@ -10,9 +10,12 @@
 //     worker gets its own port allocated sequentially from the base port.
 //   • External peers (registered via env or API) are untouched — the pool
 //     only tracks workers WE spawned.
-//   • Cross-platform: uses `pnpm` (or `pnpm.cmd` on Windows). The script
-//     spawned is the same `pnpm secondary` defined in package.json, with
-//     NEUROWORKS_PORT set per-worker so each binds to its own port.
+//   • Cross-platform: uses `pnpm` (or `pnpm.cmd` on Windows). Spawns the
+//     server dev script directly (`pnpm -F clawbot-server dev`) with
+//     NEUROWORKS_PORT set per-worker so each binds its own port. We do NOT use
+//     the root `secondary` script — it hardcodes NEUROWORKS_PORT=7473, which
+//     would make every extra worker collide on 7473 (EADDRINUSE) and cap the
+//     pool at one agent.
 //   • Lifecycle: spawned children are killed on graceful shutdown via
 //     shutdownManagedWorker(). The `detached: false` + ref-counted handle
 //     means a Ctrl+C on the primary tears every worker down with it.
@@ -27,6 +30,10 @@ import { registerPeer } from "./peer-registry.js";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // Walk up to the clawbot repo root — package.json lives there.
 const REPO_ROOT = resolve(__dirname, "../../../");
+// The server package dir (server/). We spawn workers by running THIS package's
+// own `dev` script from here, so there's no workspace filter to misfire and the
+// worker honours the NEUROWORKS_PORT we pass in its env.
+const SERVER_DIR = resolve(__dirname, "../../");
 
 // Use the base ChildProcess type rather than ChildProcessWithoutNullStreams.
 // We pass stdio: ["ignore", "pipe", "pipe"] which makes stdin null — so the
@@ -138,6 +145,31 @@ export async function ensureWorker(opts: { waitForReady?: boolean } = {}): Promi
   return { url: handle.url, spawned: true };
 }
 
+// Eager pool warm-up: bring the managed pool up to `target` workers (capped at
+// MAX_WORKERS), so multiple agents are ready BEFORE load arrives instead of the
+// pool lazily growing to 1. This is what makes "parallel agent use" real — with
+// >1 worker, pickExecutor / pickPeerByRole least-load concurrent tasks across
+// the whole pool instead of funnelling everything to a single worker (or the
+// primary). Workers share the host's Ollama, so the win is largest on
+// OpenRouter-routed and I/O-bound steps; local-LLM generation still serialises.
+//
+// Sequential spawn (not Promise.all) so the children don't all boot + warm their
+// model in the same instant and spike the box. Best-effort: a worker that fails
+// to come up is logged and skipped; the ones that did start still serve.
+export async function ensurePool(target: number): Promise<{ running: number }> {
+  const want = Math.max(1, Math.min(MAX_WORKERS, Math.floor(target)));
+  // First make sure at least one exists (also adopts a manually-started or
+  // surviving secondary on BASE_PORT instead of double-spawning).
+  try { await ensureWorker({ waitForReady: false }); }
+  catch (e: any) { console.warn(`  ⚠ pool: first worker spawn failed: ${e?.message ?? e}`); }
+  while (managedWorkerCount() < want) {
+    const before = managedWorkerCount();
+    const r = await ensureExtraWorker({ reason: `eager pool warm-up → target ${want}`, waitForReady: false }).catch(() => null);
+    if (!r || managedWorkerCount() <= before) break; // at cap, or spawn didn't add — stop
+  }
+  return { running: managedWorkerCount() };
+}
+
 // Scale UP: ensure one MORE managed worker exists, up to MAX_WORKERS.
 // Returns the new worker's URL, or null if we're already at the cap.
 // Caller typically fires this fire-and-forget (`void ensureExtraWorker()`)
@@ -159,11 +191,16 @@ export async function ensureExtraWorker(opts: { reason?: string; waitForReady?: 
     return { url: handle.url, spawned: false };
   }
   extraSpawnInFlight = (async () => {
-    // Find the lowest unused port in [BASE_PORT, BASE_PORT + MAX_WORKERS).
+    // Find the lowest port in [BASE_PORT, …) that's neither tracked in our pool
+    // NOR already serving (an adopted/external/leftover worker). Probing avoids
+    // the EADDRINUSE crash that killed extra workers when a port was taken by
+    // something we didn't spawn.
     const usedPorts = new Set([...workers.values()].filter(w => !w.child.killed).map(w => w.port));
     let nextPort: number | null = null;
     for (let p = BASE_PORT; p < BASE_PORT + MAX_WORKERS + 4; p++) {
-      if (!usedPorts.has(p)) { nextPort = p; break; }
+      if (usedPorts.has(p)) continue;
+      if (await isPortServing(p)) continue; // something already there — don't collide
+      nextPort = p; break;
     }
     if (nextPort === null) return null;
     console.log(`  ⓦ scaling up: spawning extra worker on port ${nextPort}${opts.reason ? ` (${opts.reason})` : ""}`);
@@ -220,8 +257,14 @@ function spawnWorker(port: number): Promise<WorkerHandle> {
     CLAWBOT_AUTO_SPAWN_WORKER: "0",
   };
   console.log(`  ⓦ spawning managed worker on port ${port}…`);
-  const child = spawn(cmd, ["secondary"], {
-    cwd: REPO_ROOT,
+  // Run the server package's OWN `dev` script from the server dir. We avoid the
+  // root `secondary` script (it hardcodes `cross-env NEUROWORKS_PORT=7473`, so
+  // every extra worker collided on 7473 → EADDRINUSE, capping the pool at one)
+  // AND avoid a `-F` workspace filter (it threw ERR_PNPM_RECURSIVE_RUN_NO_SCRIPT
+  // when spawned directly). Running `pnpm run dev` in SERVER_DIR honours the
+  // NEUROWORKS_PORT we set in env.
+  const child = spawn(cmd, ["run", "dev"], {
+    cwd: SERVER_DIR,
     env,
     shell: process.platform === "win32",
     stdio: ["ignore", "pipe", "pipe"],
@@ -243,6 +286,10 @@ function spawnWorker(port: number): Promise<WorkerHandle> {
   });
 
   const readyPromise = waitForWorkerReady(url, READY_TIMEOUT_MS);
+  // Mark the promise handled so a slow/failed boot doesn't surface as an
+  // unhandledRejection when the caller used waitForReady:false (eager pool).
+  // Awaiters can still attach their own .then/.catch.
+  void readyPromise.catch(() => { /* handled — registry/health drives recovery */ });
   return Promise.resolve({
     child,
     port,
@@ -254,6 +301,20 @@ function spawnWorker(port: number): Promise<WorkerHandle> {
 
 function prefixLines(s: string, prefix: string): string {
   return s.replace(/^/gm, prefix);
+}
+
+// Quick "is anything already listening + healthy here?" probe so we never try
+// to bind a port an external/leftover worker owns. Fast timeout — a refused
+// connection resolves immediately; we only wait on a silent port.
+async function isPortServing(port: number): Promise<boolean> {
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 1200);
+    try {
+      const r = await fetch(`http://127.0.0.1:${port}/api/health`, { signal: ctrl.signal });
+      return r.ok;
+    } finally { clearTimeout(t); }
+  } catch { return false; }
 }
 
 async function waitForWorkerReady(url: string, timeoutMs: number): Promise<{ url: string }> {

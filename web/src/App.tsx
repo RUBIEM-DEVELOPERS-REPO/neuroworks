@@ -20,6 +20,9 @@ import { DocEditor } from "./pages/DocEditor";
 import { DataSources } from "./pages/DataSources";
 import { Terminal } from "./pages/Terminal";
 import { Integrations } from "./pages/Integrations";
+import { Connectors } from "./pages/Connectors";
+import { Payments } from "./pages/Payments";
+import { Presets } from "./pages/Presets";
 
 export default function App() {
   return (
@@ -29,6 +32,7 @@ export default function App() {
         <Route path="/dashboard" element={<Dashboard />} />
         <Route path="/chat" element={<Chat />} />
         <Route path="/team" element={<Team />} />
+        <Route path="/presets" element={<Presets />} />
         <Route path="/tasks" element={<Tasks />} />
         <Route path="/results" element={<ResultsIndex />} />
         <Route path="/results/:jobId" element={<Results />} />
@@ -45,6 +49,8 @@ export default function App() {
         <Route path="/data-sources" element={<DataSources />} />
         <Route path="/terminal" element={<Terminal />} />
         <Route path="/integrations" element={<Integrations />} />
+        <Route path="/connectors" element={<Connectors />} />
+        <Route path="/payments" element={<Payments />} />
         <Route path="/admin" element={<Admin />} />
         <Route path="/personas" element={<Personas />} />
         <Route path="/settings" element={<Settings />} />

@@ -80,8 +80,8 @@ export type InteractAction =
 export type InteractStepResult = { action: InteractAction; ok: boolean; error?: string; text?: string; url?: string; screenshot?: { path: string; bytes: number } };
 
 export async function interact(opts: { startUrl: string; steps: InteractAction[]; totalTimeoutMs?: number; userAgent?: string }): Promise<{ url: string; title: string; results: InteractStepResult[]; finalText: string }>{
-  const { assertSafePublicUrl } = await import("./security-gates.js");
-  assertSafePublicUrl(opts.startUrl);
+  const { assertSafePublicUrlAsync } = await import("./security-gates.js");
+  await assertSafePublicUrlAsync(opts.startUrl);
   const totalDeadline = Date.now() + Math.min(120_000, Math.max(5_000, opts.totalTimeoutMs ?? 90_000));
   const browser = await getBrowser();
   const context = await browser.newContext({
@@ -102,7 +102,7 @@ export async function interact(opts: { startUrl: string; steps: InteractAction[]
       }
       try {
         if (step.type === "navigate") {
-          assertSafePublicUrl(step.url);
+          await assertSafePublicUrlAsync(step.url);
           await page.goto(step.url, { waitUntil: "domcontentloaded", timeout: 20_000 });
           results.push({ action: step, ok: true, url: page.url() });
         } else if (step.type === "fill") {
@@ -211,8 +211,8 @@ export async function scrape(opts: ScrapeOptions): Promise<ScrapeResult> {
   // SECURITY: same SSRF block as web.fetch. A headless browser fetching
   // 169.254.169.254 would happily return cloud metadata; the gate stops
   // that. Override via CLAWBOT_WEB_ALLOW_PRIVATE=1.
-  const { assertSafePublicUrl } = await import("./security-gates.js");
-  assertSafePublicUrl(opts.url);
+  const { assertSafePublicUrlAsync } = await import("./security-gates.js");
+  await assertSafePublicUrlAsync(opts.url);
   const timeoutMs = Math.min(60_000, Math.max(2_000, opts.timeoutMs ?? 20_000));
   const browser = await getBrowser();
   const context = await browser.newContext({

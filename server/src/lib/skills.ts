@@ -215,6 +215,15 @@ const SKILL_KEYWORDS: { skill: string; patterns: RegExp[] }[] = [
   { skill: "procurement-request",    patterns: [/\bprocurement\s+request|purchase\s+request|generate\s+(?:a\s+)?(?:procurement|purchase)\s+request|structured\s+purchase\s+(?:order|request)\b/i] },
   { skill: "training-quiz",          patterns: [/\btraining\s+quiz|generate\s+(?:a\s+)?quiz\s+from|quiz\s+from\s+(?:this\s+)?(?:policy|training|doc)|quiz\s+(?:questions?|with\s+answer\s+key)/i] },
   { skill: "tomorrow-plan",          patterns: [/\btomorrow(?:'s|\s+work)?\s+plan|plan\s+(?:for\s+)?tomorrow|tomorrow'?s?\s+(?:schedule|priorities|tasks?)|prioriti[sz]ed\s+schedule\s+(?:for\s+)?tomorrow|unfinished\s+tasks?\s+(?:for|to)\s+tomorrow/i] },
+  // ─── 2026-06-05: integrations + data-source skills ───
+  { skill: "channel-notify",         patterns: [/\b(?:notify|ping|alert|message|post|send|drop)\b.{0,30}\b(?:slack|teams|telegram|discord|google\s*chat|webhook|channel|the\s+team)\b/i, /\b(?:post|send)\s+(?:this|it|that|a\s+message)\s+to\b/i, /\blet\s+(?:the\s+team|everyone|\w+)\s+know\s+(?:on|in|via)\b/i] },
+  { skill: "database-lookup",        patterns: [/\b(?:query|look\s*up|pull|fetch|count|how\s+many)\b.{0,30}\b(?:database|db|table|collection|records?|rows?|mongo(?:db)?|postgres|mysql|sql\s*server)\b/i, /\bfrom\s+(?:our|the|my)\s+(?:database|db|crm|warehouse)\b/i] },
+  // ─── 2026-06-06: media-production skills (MiniMax media.* primitives) ───
+  { skill: "voiceover-script",       patterns: [/\b(?:voice[\s-]?over|voiceover)\b/i, /\b(?:narrat(?:e|ion)|read (?:this|it|aloud))\b/i, /\btext[\s-]?to[\s-]?speech\b/i, /\bTTS\b/, /\b(?:audio|spoken)\s+(?:version|briefing|summary|clip)\b/i, /\bIVR\b/, /\bphone\s+(?:prompt|menu|greeting)\b/i] },
+  { skill: "video-prompt",           patterns: [/\b(?:make|create|generate|produce|render)\s+(?:a\s+|an\s+|the\s+)?(?:short\s+)?(?:video|clip|reel|teaser|ad)\b/i, /\b(?:video|reel|tiktok|shorts)\s+(?:clip|ad|teaser|prompt)\b/i, /\bimage[\s-]?to[\s-]?video\b/i, /\bstoryboard\b/i, /\bproduct\s+teaser\b/i] },
+  { skill: "music-brief",            patterns: [/\b(?:compose|generate|produce|write|make)\s+(?:a\s+|an\s+|some\s+)?(?:jingle|music|track|theme|soundtrack|beat|tune)\b/i, /\b(?:background|hold)\s+music\b/i, /\bjingle\b/i, /\bsoundtrack\b/i, /\b(?:theme|backing)\s+(?:song|track|music)\b/i] },
+  { skill: "multimedia-package",     patterns: [/\b(?:content|media|video|ad)\s+package\b/i, /\b(?:script|storyboard)\s+(?:\+|and)\s+(?:voice(?:over)?|video|music|audio)\b/i, /\bexplainer\s+(?:video|with\s+(?:voice|narration|music))\b/i, /\b(?:social|video|content)\s+ad\b.{0,30}\b(?:voice(?:over)?|narration|music|audio)\b/i, /\b(?:voice(?:over)?|narration)\s+(?:\+|and)\s+(?:video|music)\b/i, /\b(?:video|music)\s+(?:\+|and)\s+(?:voice(?:over)?|narration|music)\b/i] },
+  { skill: "aiia-finance-readout",   patterns: [/\bAIIA\b/i, /\bfinancial dashboard\b/i, /\b(?:finance|financial|revenue|expense)\s+(?:dashboard|overview|figures?|numbers?|position)\b/i, /\b(?:pull|fetch|read|show me|get)\s+(?:the\s+|our\s+|my\s+)?(?:live\s+)?(?:financials?|finance|dashboard)\b/i, /\bdashboard\s+for\s+(?:year\s+)?\d{4}\b/i] },
 ];
 
 // Combined picker: matches BOTH on intent AND on doc-type keywords in the
@@ -404,8 +413,8 @@ export async function fetchRemoteSkill(url: string): Promise<{ saved: string; sk
   // SECURITY: SSRF block — opt-in CLAWBOT_REMOTE_SKILLS=1 doesn't imply
   // "and also reach internal services". Anyone wanting to pull a skill from
   // a private host must additionally set CLAWBOT_WEB_ALLOW_PRIVATE=1.
-  const { assertSafePublicUrl } = await import("./security-gates.js");
-  assertSafePublicUrl(url);
+  const { assertSafePublicUrlAsync } = await import("./security-gates.js");
+  await assertSafePublicUrlAsync(url);
   const r = await fetch(url, { redirect: "follow" });
   if (!r.ok) throw new Error(`Failed to fetch ${url}: HTTP ${r.status}`);
   const raw = await r.text();

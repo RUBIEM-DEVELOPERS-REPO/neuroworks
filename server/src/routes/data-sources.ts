@@ -52,7 +52,7 @@ dataSourcesRouter.post("/", (req, res) => {
     const notes = req.body?.notes ? String(req.body.notes).slice(0, 500) : undefined;
     const readonly = req.body?.readonly !== false;
     if (!label) return res.status(400).json({ error: "label required" });
-    if (!["postgres", "mysql", "sqlite"].includes(kind)) return res.status(400).json({ error: "kind must be postgres | mysql | sqlite" });
+    if (!["postgres", "mysql", "sqlite", "mssql", "mongodb"].includes(kind)) return res.status(400).json({ error: "kind must be postgres | mysql | sqlite | mssql | mongodb" });
     if (!connection) return res.status(400).json({ error: "connection required" });
     if (label.length > 100) return res.status(400).json({ error: "label too long (max 100 chars)" });
     if (connection.length > 1000) return res.status(400).json({ error: "connection too long (max 1000 chars)" });
@@ -71,8 +71,14 @@ dataSourcesRouter.post("/:id/test", async (req, res) => {
   const src = getSource(String(req.params.id));
   if (!src) return res.status(404).json({ error: "source not found" });
   try {
-    const r = await runQuery(src, "SELECT 1 AS ok", 1);
-    res.json({ ok: true, rowCount: r.rowCount });
+    if (src.kind === "mongodb") {
+      // No SQL — prove connectivity by listing collections instead.
+      const schema = await describeSource(src);
+      res.json({ ok: true, rowCount: schema.tables.length });
+    } else {
+      const r = await runQuery(src, "SELECT 1 AS ok", 1);
+      res.json({ ok: true, rowCount: r.rowCount });
+    }
   } catch (e: any) {
     res.status(400).json({ ok: false, error: e?.message ?? String(e) });
   }

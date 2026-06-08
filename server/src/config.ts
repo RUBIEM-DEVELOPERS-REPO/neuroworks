@@ -60,6 +60,48 @@ const openrouterAppName = pick("OPENROUTER_APP_NAME", "NeuroWorks Clawbot");
 const firecrawlApiKey = pick("FIRECRAWL_API_KEY", "");
 const firecrawlBaseUrl = pick("FIRECRAWL_BASE_URL", "https://api.firecrawl.dev");
 
+// MiniMax — optional hosted multimodal provider. Gives NeuroWorks a frontier
+// cloud LLM (MiniMax-M3/M2.7, exposed over an Anthropic-compatible /messages
+// endpoint) PLUS generative media the local stack can't do: text-to-speech,
+// text/image-to-video, and music generation. All gated on MINIMAX_API_KEY —
+// absent = these capabilities simply aren't offered (no behaviour change).
+// The media endpoints live under the v1 REST base; the chat model uses the
+// Anthropic-compatible base. Both share the one API key.
+const minimaxApiKey = pick("MINIMAX_API_KEY", "");
+const minimaxBaseUrl = pick("MINIMAX_BASE_URL", "https://api.minimax.io/v1");
+const minimaxAnthropicUrl = pick("MINIMAX_ANTHROPIC_URL", "https://api.minimax.io/anthropic");
+// Default chat model. M3 is the frontier 1M-context coder; M2.7-highspeed is
+// the low-latency tier. Override per deployment.
+const minimaxModel = pick("MINIMAX_MODEL", "MiniMax-M2.7");
+const minimaxTtsModel = pick("MINIMAX_TTS_MODEL", "speech-2.8-hd");
+const minimaxVideoModel = pick("MINIMAX_VIDEO_MODEL", "MiniMax-Hailuo-2.3");
+const minimaxMusicModel = pick("MINIMAX_MUSIC_MODEL", "music-2.6");
+// Optional — required only by the media (TTS/video/music) endpoints, which key
+// outputs to a group. Chat works without it.
+const minimaxGroupId = pick("MINIMAX_GROUP_ID", "");
+
+// Payments — Stripe gateway for outbound billing (agents create payment links
+// to bill clients) AND platform subscriptions (checkout sessions + billing
+// portal). Implemented over the Stripe REST API via fetch — no SDK dependency.
+// Gated on STRIPE_SECRET_KEY; absent = payments simply aren't offered. The
+// webhook secret authenticates inbound Stripe events (signature, not origin).
+const stripeSecretKey = pick("STRIPE_SECRET_KEY", "");
+const stripePublishableKey = pick("STRIPE_PUBLISHABLE_KEY", "");
+const stripeWebhookSecret = pick("STRIPE_WEBHOOK_SECRET", "");
+// Default settlement currency. ZAR — rubiem.com is a South African operation.
+const paymentsCurrency = pick("PAYMENTS_CURRENCY", "zar").toLowerCase();
+// Where Stripe-hosted checkout returns the payer after success/cancel.
+const paymentsSuccessUrl = pick("PAYMENTS_SUCCESS_URL", "https://neuroworks.local/paid");
+const paymentsCancelUrl = pick("PAYMENTS_CANCEL_URL", "https://neuroworks.local/cancelled");
+
+// Hermes executor — when the primary executor is switched to Hermes (runtime
+// toggle, see executor-mode.ts), tasks run through the Hermes CLI instead of
+// clawbot's plan/execute pipeline. Hermes's own configured default model
+// (claude-opus-4.6) is broken on the bundled key, so we pin a model that works.
+// Override with HERMES_MODEL. Provider is OpenRouter to match.
+const hermesModel = pick("HERMES_MODEL", "openai/gpt-oss-20b:free");
+const hermesProvider = pick("HERMES_PROVIDER", "openrouter");
+
 const port = Number(pick("NEUROWORKS_PORT", "7471"));
 // Comma-separated list of peer clawbot base URLs. Each peer is another running
 // instance of this same server (different port, optionally different model).
@@ -93,6 +135,25 @@ export const config = {
   firecrawlApiKey,
   firecrawlBaseUrl,
   firecrawlEnabled: firecrawlApiKey.length > 0,
+  minimaxApiKey,
+  minimaxBaseUrl,
+  minimaxAnthropicUrl,
+  minimaxModel,
+  minimaxTtsModel,
+  minimaxVideoModel,
+  minimaxMusicModel,
+  minimaxGroupId,
+  minimaxEnabled: minimaxApiKey.length > 0,
+  stripeSecretKey,
+  stripePublishableKey,
+  stripeWebhookSecret,
+  paymentsCurrency,
+  paymentsSuccessUrl,
+  paymentsCancelUrl,
+  paymentsEnabled: stripeSecretKey.length > 0,
+  paymentsProvider: "stripe" as const,
+  hermesModel,
+  hermesProvider,
   port,
   peers,
   name,

@@ -77,14 +77,39 @@ async function pointRouteAt(publicUrl) {
 let child = null;
 let lastUrl = null;
 let stopping = false;
+// Exponential backoff between restarts. Cloudflare rate-limits (HTTP 429 /
+// error 1015) the account-less quick-tunnel provisioning endpoint, and a tight
+// fixed restart loop will trip it — banning us for longer. Start at 5s, double
+// on each failed start, cap at 5min, and reset to 5s once a tunnel comes up.
+const BACKOFF_MIN = 5_000;
+const BACKOFF_MAX = 300_000;
+let backoffMs = BACKOFF_MIN;
+let sawUrlThisRun = false;
+
+let urlAt = 0;          // when the current URL was first seen (warm-up timer)
+let everHealthy = false; // has THIS tunnel ever passed a health probe?
+const WARMUP_MS = 45_000; // quick tunnels take time to become reachable
 
 function startTunnel() {
   console.log(`[tunnel] starting cloudflared → http://127.0.0.1:${PORT}`);
+  sawUrlThisRun = false;
+  urlAt = 0;
+  everHealthy = false;
   child = spawn(CFD, ["tunnel", "--url", `http://127.0.0.1:${PORT}`, "--no-autoupdate"], { stdio: ["ignore", "pipe", "pipe"] });
   const onData = (buf) => {
-    const m = String(buf).match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/);
+    const s = String(buf);
+    if (/error code: 1015|429 Too Many Requests/i.test(s)) {
+      console.warn("[tunnel] Cloudflare rate-limited the quick-tunnel request (1015/429) — backing off");
+    }
+    // Match ONLY a real quick-tunnel host: random multi-word hyphenated
+    // subdomain. Excludes api.trycloudflare.com (the provisioning host, which
+    // appears in rate-limit/error output and must never be registered).
+    const m = s.match(/https:\/\/[a-z0-9]+(?:-[a-z0-9]+)+\.trycloudflare\.com/);
     if (m && m[0] !== lastUrl) {
       lastUrl = m[0];
+      urlAt = Date.now();
+      sawUrlThisRun = true;
+      backoffMs = BACKOFF_MIN; // healthy start → reset backoff
       console.log(`[tunnel] public URL: ${lastUrl}`);
       pointRouteAt(lastUrl).catch(e => console.error(`[tunnel] route update failed: ${e.message}`));
     }
@@ -94,13 +119,59 @@ function startTunnel() {
   child.on("exit", (code) => {
     child = null; lastUrl = null;
     if (stopping) return;
-    console.warn(`[tunnel] cloudflared exited (${code}) — restarting in 5s`);
-    setTimeout(startTunnel, 5000);
+    // If the run never produced a URL, it failed fast (likely rate-limited) —
+    // grow the backoff. If it ran fine for a while then died, start gentle.
+    if (!sawUrlThisRun) backoffMs = Math.min(backoffMs * 2, BACKOFF_MAX);
+    else backoffMs = BACKOFF_MIN;
+    console.warn(`[tunnel] cloudflared exited (${code}) — restarting in ${Math.round(backoffMs / 1000)}s`);
+    setTimeout(startTunnel, backoffMs);
   });
 }
 
+// Liveness probe — a cloudflared *quick* tunnel can have its edge hostname
+// silently dropped (the process keeps running but the public URL stops
+// resolving), so the child.on("exit") restart never fires and Mailjet keeps
+// POSTing into a black hole. We GET the public /health through the tunnel on
+// an interval; after two consecutive failures we kill cloudflared so the exit
+// handler rebuilds a fresh URL and re-points the Mailjet route. DNS-not-found
+// vs timeout both count as failures.
+let healthFails = 0;
+async function probe() {
+  if (stopping || !child || !lastUrl) return;     // nothing to probe yet
+  if (Date.now() - urlAt < WARMUP_MS) return;     // give a fresh tunnel time to come up
+  const ac = new AbortController();
+  const t = setTimeout(() => ac.abort(), 10_000);
+  let ok = false;
+  try {
+    const res = await fetch(`${lastUrl}/health`, { signal: ac.signal });
+    ok = res.ok;
+  } catch { ok = false; }
+  finally { clearTimeout(t); }
+
+  if (ok) {
+    if (healthFails) console.log("[tunnel] health recovered");
+    healthFails = 0;
+    everHealthy = true;
+    return;
+  }
+  // Only treat failures as a real outage once the tunnel has proven itself
+  // healthy at least once. Before that, it's still warming up (or Cloudflare
+  // is slow to publish the route) — recycling would just thrash and risk the
+  // 1015 rate-limit. cloudflared's own reconnection covers the warm-up.
+  if (!everHealthy) return;
+  healthFails += 1;
+  console.warn(`[tunnel] health check failed (${healthFails}/3) for ${lastUrl}`);
+  if (healthFails >= 3) {
+    console.warn("[tunnel] tunnel was healthy but is now unreachable — recycling for a fresh URL");
+    healthFails = 0;
+    try { child?.kill(); } catch {} // exit handler restarts + re-registers
+  }
+}
+const probeTimer = setInterval(() => { void probe(); }, 60_000);
+probeTimer.unref?.();
+
 for (const sig of ["SIGINT", "SIGTERM"]) {
-  process.on(sig, () => { stopping = true; try { child?.kill(); } catch {} process.exit(0); });
+  process.on(sig, () => { stopping = true; clearInterval(probeTimer); try { child?.kill(); } catch {} process.exit(0); });
 }
 
 startTunnel();

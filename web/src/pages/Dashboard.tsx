@@ -23,6 +23,9 @@ export function Dashboard() {
   // workforce card alongside clawbots so the operator sees a single roster.
   const [externalAgents, setExternalAgents] = useState<any[]>([]);
   const [activating, setActivating] = useState<string | null>(null);
+  // Running jobs — the Workforce card derives live sub-agents (in-flight plan
+  // steps; parallel waves = several sub-agents) from these.
+  const [running, setRunning] = useState<any[]>([]);
 
   async function load() {
     try {
@@ -35,6 +38,7 @@ export function Dashboard() {
       ]);
       setTemplates(t.templates);
       setRecent(j.jobs.slice(0, 4));
+      setRunning((j.jobs ?? []).filter((x: any) => x.status === "running" || x.status === "pending"));
       setPersona(p.active);
       setPersonas(Array.isArray(p.personas) ? p.personas : []);
       if (peers) setFleet(peers);
@@ -191,7 +195,7 @@ export function Dashboard() {
           )}
         </Card>
         <Card title="Workforce">
-          <ClawbotFleet fleet={fleet} externalAgents={externalAgents} templatesCount={templates?.length} tasksToday={recent.length} personasCount={personas.length} />
+          <ClawbotFleet fleet={fleet} externalAgents={externalAgents} running={running} templatesCount={templates?.length} tasksToday={recent.length} personasCount={personas.length} />
         </Card>
       </section>
 
@@ -205,14 +209,33 @@ export function Dashboard() {
 // or peer — with current inflight count, role, and ready state. Replaces the
 // previous hardcoded "1 (clawbot)" line which was a lie the moment a worker
 // peer came online.
-function ClawbotFleet({ fleet, externalAgents, templatesCount, tasksToday, personasCount }: {
+function ClawbotFleet({ fleet, externalAgents, running, templatesCount, tasksToday, personasCount }: {
   fleet: { self: any; peers: any[] } | null;
   externalAgents: any[];
+  running: any[];
   templatesCount?: number;
   tasksToday: number;
   personasCount: number;
 }) {
   if (!fleet) return <div className="text-sm text-cream-300/60">Loading fleet…</div>;
+
+  // Derive live sub-agents from running jobs: each in-flight plan step is a
+  // spawned sub-agent; a wave with >1 step is several working in parallel.
+  const subAgents: { job: string; label: string; parallel: boolean }[] = [];
+  for (const job of running ?? []) {
+    const r = job.result ?? {};
+    const steps: any[] = r.plan?.steps ?? [];
+    const runs: any[] = r.runs ?? [];
+    const waves: number[][] = (r.plan?.waves && r.plan.waves.length > 0) ? r.plan.waves : steps.map((_: any, i: number) => [i]);
+    for (const ids of waves) {
+      const parallel = ids.length > 1;
+      for (const i of ids) {
+        const run = runs[i];
+        const inflight = run?.startedAt && !run?.ok && !run?.error;
+        if (inflight) subAgents.push({ job: job.title ?? job.kind ?? "task", label: steps[i]?.label ?? steps[i]?.tool ?? "step", parallel });
+      }
+    }
+  }
   const bots: { name: string; role: string; url?: string; ok: boolean; ready: boolean; inflight: number; model?: string; isSelf: boolean }[] = [];
   if (fleet.self) {
     bots.push({
@@ -242,7 +265,7 @@ function ClawbotFleet({ fleet, externalAgents, templatesCount, tasksToday, perso
   return (
     <div className="space-y-3 text-sm">
       <div className="space-y-1.5">
-        {bots.length === 0 && <div className="text-cream-300/60">No clawbots reachable.</div>}
+        {bots.length === 0 && <div className="text-cream-300/60">No neuros reachable.</div>}
         {bots.map((b, i) => (
           <div key={i} className="flex items-center justify-between gap-2 px-2 py-1.5 rounded-md bg-ink-950 border border-ink-800">
             <div className="flex items-center gap-2 min-w-0">
@@ -280,8 +303,32 @@ function ClawbotFleet({ fleet, externalAgents, templatesCount, tasksToday, perso
           );
         })}
       </div>
+
+      {/* Live sub-agents spawned by running tasks. */}
+      {subAgents.length > 0 && (
+        <div className="border-t border-ink-800 pt-2.5">
+          <div className="flex items-center gap-1.5 text-[10px] uppercase tracking-wider text-violet-300/70 mb-1.5">
+            <span className="w-1.5 h-1.5 rounded-full bg-violet-500 animate-pulse" /> Sub-agents · {subAgents.length} live
+          </div>
+          <div className="space-y-1">
+            {subAgents.slice(0, 6).map((s, i) => (
+              <div key={i} className="flex items-center gap-2 px-2 py-1 rounded-md bg-violet-500/5 border border-violet-500/20">
+                <span className="w-1.5 h-1.5 rounded-full bg-violet-500 animate-pulse shrink-0" />
+                <span className="text-xs text-cream-200 truncate flex-1">
+                  {s.label}
+                  {s.parallel && <span className="text-[10px] text-violet-400/70 ml-1">· parallel</span>}
+                </span>
+                <span className="text-[10px] text-cream-300/40 truncate max-w-[45%]" title={s.job}>{s.job}</span>
+              </div>
+            ))}
+            {subAgents.length > 6 && <div className="text-[10px] text-cream-300/40 px-2">+{subAgents.length - 6} more</div>}
+          </div>
+        </div>
+      )}
+
       <div className="border-t border-ink-800 pt-2.5 space-y-2 text-xs">
-        <div className="flex justify-between"><span className="text-cream-300/70">Clawbots online</span><span className="text-cream-100 font-mono">{activeCount}/{bots.length}</span></div>
+        <div className="flex justify-between"><span className="text-cream-300/70">Neuros online</span><span className="text-cream-100 font-mono">{activeCount}/{bots.length}</span></div>
+        {subAgents.length > 0 && <div className="flex justify-between"><span className="text-cream-300/70">Sub-agents active</span><span className="text-violet-300 font-mono">{subAgents.length}</span></div>}
         {externalAgents.length > 0 && <div className="flex justify-between"><span className="text-cream-300/70">External agents</span><span className="text-cream-100 font-mono">{externalAgents.filter(a => a.installed).length}/{externalAgents.length}</span></div>}
         <div className="flex justify-between"><span className="text-cream-300/70">Employees</span><span className="text-cream-100 font-mono">{personasCount}</span></div>
         <div className="flex justify-between"><span className="text-cream-300/70">Templates</span><span className="text-cream-100 font-mono">{templatesCount ?? "—"}</span></div>

@@ -31,6 +31,8 @@ import { simpleParser, type ParsedMail } from "mailparser";
 import { marked } from "marked";
 import { config } from "../config.js";
 import { startInboundWebhook, stopInboundWebhook, getInboundWebhookStatus } from "./email-inbound.js";
+import { verifyInboundDkim, type AuthVerdict } from "./email-auth.js";
+import { lookup as dnsLookup } from "node:dns/promises";
 
 // How inbound email requests reach clawbot:
 //   "webhook" — Mailjet Parse API POSTs to our token-gated webhook (no Gmail).
@@ -55,6 +57,12 @@ type EmailEnv = {
   mailjetApiKey: string;
   mailjetApiSecret: string;
   inboundMode: InboundMode;
+  // Reply-To address. Set to the Mailjet Parse inbound address
+  // (…@parse-in1.mailjet.com) so when a recipient hits "Reply", the message
+  // routes into the inbound webhook pipeline — even though From shows the
+  // friendly arthur@rubiem.com. Without this, replies go to the From mailbox
+  // and never reach Mailjet Parse, so they can't trigger a task.
+  replyTo: string;
 };
 
 function readEnv(): EmailEnv {
@@ -72,7 +80,8 @@ function readEnv(): EmailEnv {
   const mailjetApiSecret = (process.env.CLAWBOT_MAILJET_API_SECRET ?? "").trim();
   const rawMode = (process.env.CLAWBOT_EMAIL_INBOUND_MODE ?? "").trim().toLowerCase();
   const inboundMode: InboundMode = rawMode === "webhook" || rawMode === "off" ? rawMode : "imap";
-  return { user, pass, from, allowedSenders, pollMs, imapHost, imapPort, smtpHost, smtpPort, mailjetApiKey, mailjetApiSecret, inboundMode };
+  const replyTo = (process.env.CLAWBOT_EMAIL_REPLY_TO ?? "").trim();
+  return { user, pass, from, allowedSenders, pollMs, imapHost, imapPort, smtpHost, smtpPort, mailjetApiKey, mailjetApiSecret, inboundMode, replyTo };
 }
 
 // Mailjet HTTPS sender — POSTs to api.mailjet.com/v3.1/send. Used instead
@@ -97,6 +106,7 @@ async function sendViaMailjet(env: EmailEnv, opts: {
     Subject: opts.subject,
     TextPart: opts.text,
   };
+  if (env.replyTo) message.ReplyTo = { Email: env.replyTo };
   if (opts.html) message.HTMLPart = opts.html;
   if (Object.keys(headers).length) message.Headers = headers;
 
@@ -156,6 +166,7 @@ async function sendOutbound(env: EmailEnv, opts: {
     to: opts.to,
     subject: opts.subject,
     text: opts.text,
+    ...(env.replyTo ? { replyTo: env.replyTo } : {}),
     ...(opts.html ? { html: opts.html } : {}),
     ...(opts.inReplyTo ? { inReplyTo: opts.inReplyTo } : {}),
     ...(opts.references?.length ? { references: opts.references } : {}),
@@ -207,6 +218,7 @@ export function getEmailStatus() {
     webhook: env?.inboundMode === "webhook" ? getInboundWebhookStatus() : null,
     user: env?.user ?? null,
     from: env?.from ?? null,
+    replyTo: env?.replyTo || null,
     allowedSenders: env?.allowedSenders ?? [],
     pollMs: env?.pollMs ?? null,
     ...status,
@@ -266,11 +278,22 @@ function extractNewBody(parsed: ParsedMail): string {
 
 type Route = "team" | "chat";
 
+// Drop repeated Re:/Fwd:/Fw: (and common non-English AW:/WG:) reply markers so
+// a reply to an email Neuro itself sent is seen as the actual topic — not
+// "Re: Re: …" — and so the prompt we build isn't polluted with the prefix.
+// Threading is preserved independently via the In-Reply-To / References headers.
+function stripSubjectPrefixes(s: string): string {
+  let out = s ?? "";
+  let prev: string;
+  do { prev = out; out = out.replace(/^\s*(?:re|fwd?|aw|wg)\s*:\s*/i, ""); } while (out !== prev);
+  return out.trim();
+}
+
 function routeFromSubject(subject: string): { route: Route; cleanSubject: string } {
   const s = subject ?? "";
-  if (/\[team\]/i.test(s)) return { route: "team", cleanSubject: s.replace(/\[team\]/i, "").trim() };
-  if (/\[chat\]/i.test(s)) return { route: "chat", cleanSubject: s.replace(/\[chat\]/i, "").trim() };
-  return { route: "chat", cleanSubject: s.trim() };
+  if (/\[team\]/i.test(s)) return { route: "team", cleanSubject: stripSubjectPrefixes(s.replace(/\[team\]/i, "")) };
+  if (/\[chat\]/i.test(s)) return { route: "chat", cleanSubject: stripSubjectPrefixes(s.replace(/\[chat\]/i, "")) };
+  return { route: "chat", cleanSubject: stripSubjectPrefixes(s) };
 }
 
 function refs(parsed: ParsedMail): string[] {
@@ -296,9 +319,65 @@ function mdToPlainText(md: string): string {
     .trim();
 }
 
+// Branded, email-client-safe HTML shell. Structural styles are INLINE (Gmail
+// strips most <style> rules) and content-element styling rides in a <head>
+// <style> block as progressive enhancement — clients that drop it still get a
+// clean, readable layout from sane element defaults. Renders as: a soft grey
+// canvas, a violet wordmark header, a white content card, and a muted footer
+// that tells the recipient they can just reply to assign Neuro another task.
+function buildEmailHtml(innerHtml: string): string {
+  const accent = "#6d4aff";
+  const ink = "#1a1a22";
+  const muted = "#6b6b76";
+  const font = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif";
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light">
+<style>
+  .nw-body h1,.nw-body h2,.nw-body h3{color:${ink};font-weight:600;line-height:1.3;margin:1.2em 0 .5em}
+  .nw-body h1{font-size:20px}.nw-body h2{font-size:17px}.nw-body h3{font-size:15px}
+  .nw-body p{margin:0 0 .85em}
+  .nw-body ul,.nw-body ol{margin:0 0 .85em;padding-left:1.4em}
+  .nw-body li{margin:.2em 0}
+  .nw-body a{color:${accent};text-decoration:underline}
+  .nw-body code{font-family:'SF Mono',Consolas,Menlo,monospace;font-size:13px;background:#f1f0f6;border-radius:4px;padding:1px 5px}
+  .nw-body pre{background:#f6f5fb;border:1px solid #e7e5f0;border-radius:8px;padding:12px 14px;overflow:auto;font-size:13px}
+  .nw-body pre code{background:none;padding:0}
+  .nw-body blockquote{margin:0 0 .85em;padding:.2em 0 .2em 14px;border-left:3px solid #e0ddee;color:${muted}}
+  .nw-body table{border-collapse:collapse;width:100%;margin:0 0 1em;font-size:13px}
+  .nw-body th,.nw-body td{border:1px solid #e7e5f0;padding:7px 10px;text-align:left}
+  .nw-body th{background:#f6f5fb;font-weight:600}
+  .nw-body hr{border:none;border-top:1px solid #ececf2;margin:1.4em 0}
+</style>
+</head>
+<body style="margin:0;padding:0;background:#f4f3f8;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f4f3f8;">
+    <tr><td align="center" style="padding:28px 16px;">
+      <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="width:600px;max-width:100%;background:#ffffff;border:1px solid #ebeaf1;border-radius:14px;overflow:hidden;">
+        <tr><td style="padding:20px 28px;border-bottom:1px solid #f0eff5;">
+          <span style="font-family:${font};font-size:18px;font-weight:700;color:${ink};letter-spacing:-.2px;">Neuro</span>
+          <span style="font-family:${font};font-size:12px;color:${muted};margin-left:8px;">· NeuroWorks AI workforce</span>
+        </td></tr>
+        <tr><td class="nw-body" style="padding:24px 28px;font-family:${font};font-size:14px;line-height:1.6;color:${ink};">
+          ${innerHtml}
+        </td></tr>
+        <tr><td style="padding:16px 28px 22px;border-top:1px solid #f0eff5;font-family:${font};font-size:12px;line-height:1.5;color:${muted};">
+          Sent by <strong style="color:${ink};">Neuro</strong>, your AI workforce. Just reply to this email to assign another task — add <span style="font-family:monospace;">[team]</span> to the subject to route it to a specialist.
+        </td></tr>
+      </table>
+      <div style="font-family:${font};font-size:11px;color:#a7a6b3;margin-top:14px;">NeuroWorks by RUBIEM Innovations · AIIA</div>
+    </td></tr>
+  </table>
+</body>
+</html>`;
+}
+
 async function renderHtml(md: string): Promise<string> {
   const inner = await Promise.resolve(marked.parse(md, { breaks: true }) as string | Promise<string>);
-  return `<div style="font-family:-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:14px;line-height:1.55;color:#1a1a1a;max-width:640px">${inner}</div>`;
+  return buildEmailHtml(inner);
 }
 
 async function sendReply(env: EmailEnv, opts: {
@@ -333,6 +412,11 @@ export type InboundMessage = {
   body: string;              // new message body (quoted history already stripped)
   messageId?: string;
   references?: string[];
+  inReplyTo?: string;        // In-Reply-To header — threads a reply to its parent
+  // SPF/DKIM verdict for the sender (IMAP path computes it cryptographically via
+  // mailauth; webhook path verifies upstream and leaves this undefined). "fail"
+  // is rejected as a spoof; "unknown" is rejected only in strict mode.
+  authVerdict?: AuthVerdict;
 };
 
 // Core inbound handler — SHARED by the IMAP poll and the Mailjet Parse webhook.
@@ -353,11 +437,27 @@ export async function processInboundEmail(msg: InboundMessage): Promise<{ status
     return { status: "ignored", reason: "sender not allow-listed" }; // silent — no backscatter to a possibly-spoofed From
   }
 
+  // Anti-spoofing: an allow-listed From is attacker-controlled until verified.
+  // The IMAP path supplies a cryptographic DKIM/DMARC verdict; reject explicit
+  // failures (a spoof), and unverifiable mail too when REQUIRE_AUTH=strict.
+  const strictAuth = (process.env.CLAWBOT_EMAIL_REQUIRE_AUTH ?? "").trim().toLowerCase() === "strict";
+  if (msg.authVerdict === "fail" || (msg.authVerdict === "unknown" && strictAuth)) {
+    status.skippedUnauthorized += 1;
+    console.warn(`[email] rejected ${sender}: email auth ${msg.authVerdict} (DKIM/DMARC) — possible spoof`);
+    return { status: "ignored", reason: `email auth ${msg.authVerdict}` }; // silent — don't backscatter a spoof
+  }
+  if (msg.authVerdict === "unknown") console.warn(`[email] ${sender}: DKIM/DMARC UNVERIFIED — relying on allow-list`);
+
   const subject = msg.subject ?? "";
   const { route, cleanSubject } = routeFromSubject(subject);
   const prompt = [cleanSubject, msg.body].filter(Boolean).join("\n\n").trim();
+  // Thread key — groups this message with prior turns in the same mail thread so
+  // an email back-and-forth keeps context (computed even when the body is empty
+  // so the reply below still threads).
+  const { threadKeyFor, getThreadHistory, appendThreadTurn } = await import("./email-threads.js");
+  const threadKey = threadKeyFor({ references: msg.references, inReplyTo: msg.inReplyTo, messageId: msg.messageId, sender, subject });
   if (!prompt) {
-    await sendReply(env, { to: sender, subject, body: "I received an empty message — put a question or task in the subject or body and I'll get on it.\n\n— clawbot", inReplyTo: msg.messageId, references: msg.references });
+    await sendReply(env, { to: sender, subject, body: "I received an empty message — put a question or task in the subject or body and I'll get on it.\n\n— Neuro", inReplyTo: msg.messageId, references: msg.references });
     return { status: "empty" };
   }
 
@@ -373,31 +473,45 @@ export async function processInboundEmail(msg: InboundMessage): Promise<{ status
         answer = `I couldn't dispatch that as a team brief (${r?.error ?? "no job created"}).`;
       } else {
         const j = await pollJob(jobId);
-        answer = (j?.result?.answer && String(j.result.answer).trim())
+        answer = coerceEmailBody(j?.result?.answer).trim()
           || (j?.error ? `The task hit an error: ${j.error}` : "I wasn't able to produce an answer for that one.");
       }
     } else {
-      // New chat session. Pin the generalist (clawbot) so an email on any topic
+      // Chat session — thread-aware. Replay any prior turns in this mail thread
+      // so a reply continues the conversation (the web chat does the same with
+      // its message list). Pin the generalist (clawbot) so an email on any topic
       // is handled rather than refused by whatever specialist persona happens to
       // be active in the UI (their lane gate would bounce off-topic requests).
-      const r = await apiPost("/api/chat", { messages: [{ role: "user", content: prompt }], persona: "clawbot" });
+      const history = getThreadHistory(threadKey);
+      const messages = [...history.map(h => ({ role: h.role, content: h.content })), { role: "user", content: prompt }];
+      const r = await apiPost("/api/chat", { messages, persona: "clawbot" });
       if (r?.kind === "message") {
         // Direct answer or a clarification question — reply with it as-is.
         answer = String(r.text ?? "").trim() || "I couldn't process that request.";
       } else if ((r?.kind === "task" || r?.kind === "approval") && r.jobId) {
         jobId = String(r.jobId);
         const j = await pollJob(jobId);
-        answer = (j?.result?.answer && String(j.result.answer).trim())
+        answer = coerceEmailBody(j?.result?.answer).trim()
           || (j?.error ? `The task hit an error: ${j.error}` : (r.text ? String(r.text) : "I wasn't able to produce an answer for that one."));
       } else {
         answer = String(r?.text ?? "").trim() || "I couldn't process that request.";
       }
     }
 
+    // Persist this exchange to the thread so the next reply has context. Only
+    // the chat route carries a conversational thread; team briefs are one-shot
+    // dispatches, so we skip them.
+    if (route === "chat" && answer) {
+      try {
+        appendThreadTurn(threadKey, "user", prompt);
+        appendThreadTurn(threadKey, "assistant", answer);
+      } catch (e: any) { console.warn(`[email] thread append failed: ${e?.message ?? e}`); }
+    }
+
     await sendReply(env, {
       to: sender,
       subject: cleanSubject || subject,
-      body: `${answer}\n\n— clawbot`,
+      body: `${answer}\n\n— Neuro`,
       inReplyTo: msg.messageId,
       references: msg.references,
     });
@@ -407,7 +521,7 @@ export async function processInboundEmail(msg: InboundMessage): Promise<{ status
   } catch (e: any) {
     console.error(`[email] processInboundEmail failed for ${sender}: ${e?.stack ?? e}`);
     try {
-      await sendReply(env, { to: sender, subject: cleanSubject || subject, body: `Sorry — I hit an error handling that: ${String(e?.message ?? e).slice(0, 200)}\n\n— clawbot`, inReplyTo: msg.messageId, references: msg.references });
+      await sendReply(env, { to: sender, subject: cleanSubject || subject, body: `Sorry — I hit an error handling that: ${String(e?.message ?? e).slice(0, 200)}\n\n— Neuro`, inReplyTo: msg.messageId, references: msg.references });
     } catch { /* tolerate */ }
     return { status: "error", reason: String(e?.message ?? e) };
   } finally {
@@ -418,13 +532,21 @@ export async function processInboundEmail(msg: InboundMessage): Promise<{ status
 // IMAP adapter — extract structured fields off a parsed message and hand to the
 // shared core. Fired async from the poll loop (the message is already \Seen) so
 // a multi-minute job doesn't block the inbox poll.
-async function processMessage(_env: EmailEnv, parsed: ParsedMail): Promise<void> {
+async function processMessage(_env: EmailEnv, parsed: ParsedMail, rawSource: Buffer): Promise<void> {
+  const sender = parsed.from?.value?.[0]?.address ?? "";
+  // Cryptographically verify DKIM/DMARC from the raw message before trusting the
+  // From against the allow-list. mailauth fetches the signing key from DNS.
+  let authVerdict: AuthVerdict = "unknown";
+  try { authVerdict = await verifyInboundDkim(rawSource, sender); }
+  catch { authVerdict = "unknown"; }
   await processInboundEmail({
-    sender: parsed.from?.value?.[0]?.address ?? "",
+    sender,
     subject: parsed.subject ?? "",
     body: extractNewBody(parsed),
     messageId: parsed.messageId,
     references: refs(parsed),
+    inReplyTo: parsed.inReplyTo,
+    authVerdict,
   });
 }
 
@@ -432,9 +554,30 @@ async function processMessage(_env: EmailEnv, parsed: ParsedMail): Promise<void>
 // async processing. IMPORTANT: \Seen is flagged AFTER the fetch generator
 // finishes — issuing another IMAP command (messageFlagsAdd) WHILE the fetch is
 // still streaming deadlocks the connection (imapflow serialises commands).
+// IMAP host IP cache. This box's resolver intermittently NXDOMAINs the mail
+// host (it has several DNS servers across interfaces), which would stall inbound
+// every time a poll's getaddrinfo fails. Resolve once and reconnect by IP — TLS
+// SNI + cert validation still use the real hostname — falling back to the
+// last-known-good IP when DNS hiccups. Re-resolve hourly so a real IP change
+// still propagates.
+let cachedImapHost: { name: string; ip: string; at: number } | null = null;
+async function resolveImapHostIp(host: string): Promise<string | null> {
+  if (cachedImapHost && cachedImapHost.name === host && Date.now() - cachedImapHost.at < 3_600_000) return cachedImapHost.ip;
+  try {
+    const r = await dnsLookup(host, { family: 4 });
+    cachedImapHost = { name: host, ip: r.address, at: Date.now() };
+    return r.address;
+  } catch {
+    if (cachedImapHost && cachedImapHost.name === host) return cachedImapHost.ip; // survive transient DNS failure
+    return null;
+  }
+}
+
 async function pollOnce(env: EmailEnv): Promise<void> {
+  const ip = await resolveImapHostIp(env.imapHost);
   const client = new ImapFlow({
-    host: env.imapHost,
+    host: ip ?? env.imapHost,    // connect by cached IP — immune to a transient resolver miss
+    servername: env.imapHost,    // SNI + TLS cert hostname stay the real name
     port: env.imapPort,
     secure: true,
     auth: { user: env.user, pass: env.pass },
@@ -444,14 +587,16 @@ async function pollOnce(env: EmailEnv): Promise<void> {
   try {
     const lock = await client.getMailboxLock("INBOX");
     try {
-      const pending: ParsedMail[] = [];
+      // Keep the raw source alongside the parsed message — DKIM verification
+      // needs the exact bytes the sender signed, not the re-serialised parse.
+      const pending: { parsed: ParsedMail; raw: Buffer }[] = [];
       const seenUids: number[] = [];
       const uids = await client.search({ seen: false }, { uid: true });
       if (uids && uids.length) {
         for await (const msg of client.fetch(uids, { uid: true, source: true }, { uid: true })) {
           if (!msg.source) continue;
           try {
-            pending.push(await simpleParser(msg.source));
+            pending.push({ parsed: await simpleParser(msg.source), raw: msg.source });
             seenUids.push(msg.uid);
           } catch (e: any) {
             console.warn(`[email] failed to parse message uid=${msg.uid}: ${e?.message ?? e}`);
@@ -463,8 +608,8 @@ async function pollOnce(env: EmailEnv): Promise<void> {
         if (seenUids.length) await client.messageFlagsAdd(seenUids, ["\\Seen"], { uid: true });
       }
       // Process outside the mailbox lock — jobs take minutes; don't hold IMAP.
-      for (const parsed of pending) {
-        void processMessage(env, parsed).catch(e =>
+      for (const { parsed, raw } of pending) {
+        void processMessage(env, parsed, raw).catch(e =>
           console.error(`[email] processMessage rejected: ${e?.stack ?? e}`));
       }
     } finally {
@@ -557,6 +702,27 @@ export function stopEmailBridge(): void {
   started = false;
 }
 
+/** Coerce whatever a caller hands us as an email body into markdown text.
+ *  The planner sometimes wires a PRIOR STEP'S RESULT OBJECT into email.send's
+ *  `body` (e.g. a synth step's `{ answer, sources, … }`) instead of its
+ *  `.answer` string — naive `String(obj)` then renders as "[object Object]".
+ *  We dig out the human-readable field; only fall back to JSON for genuinely
+ *  structureless objects. Exported so the email.send primitive uses the same
+ *  logic before it ever stringifies. */
+export function coerceEmailBody(v: unknown): string {
+  if (v == null) return "";
+  if (typeof v === "string") return v;
+  if (Array.isArray(v)) return v.map(coerceEmailBody).filter(Boolean).join("\n\n");
+  if (typeof v === "object") {
+    const o = v as Record<string, unknown>;
+    for (const key of ["answer", "text", "body", "markdown", "content", "message"]) {
+      if (typeof o[key] === "string" && (o[key] as string).trim()) return o[key] as string;
+    }
+    try { return JSON.stringify(v, null, 2); } catch { return String(v); }
+  }
+  return String(v);
+}
+
 /** Public outbound email primitive. Used by the `email.send` agent
  *  primitive AND by /api/email/test. Routes through whichever outbound
  *  transport is configured (Mailjet HTTPS > nodemailer SMTP). Returns a
@@ -575,7 +741,11 @@ export async function sendEmail(opts: {
   if (!emailConfigured()) throw new Error("email not configured — set CLAWBOT_MAILJET_API_KEY + _SECRET, or CLAWBOT_EMAIL_USER + _APP_PASSWORD");
   if (!opts.to || !opts.to.includes("@")) throw new Error(`email.send: invalid 'to' address "${opts.to}"`);
   if (!opts.subject?.trim()) throw new Error("email.send: subject required");
-  if (!opts.body?.trim()) throw new Error("email.send: body required");
+  // Safety net for EVERY caller (schedules, replies, the email.send primitive):
+  // never let a non-string body render as "[object Object]".
+  const body = coerceEmailBody(opts.body);
+  if (!body.trim()) throw new Error("email.send: body required");
+  opts = { ...opts, body };
 
   const useMailjet = !!(env.mailjetApiKey && env.mailjetApiSecret);
   if (!useMailjet && !transporter) {
@@ -618,9 +788,13 @@ export async function sendTestEmail(to: string): Promise<void> {
       auth: { user: env.user, pass: env.pass },
     });
   }
+  const testMd = `Your Neuro email bridge is **live**. Transport: ${useMailjet ? "Mailjet HTTPS API" : "SMTP"}.\n\nReply to any message from Neuro to assign a task — for example:\n\n- **\\[chat\\] what's on my plate today?**\n- **\\[team\\] draft our Q3 launch plan**\n\nNeuro will run it and email you back the result.\n\n— Neuro`;
+  let testHtml: string | undefined;
+  try { testHtml = await renderHtml(testMd); } catch { testHtml = undefined; }
   await sendOutbound(env, {
     to,
-    subject: "clawbot email bridge — test",
-    text: `This is a test message from your clawbot email bridge. Transport: ${useMailjet ? "Mailjet HTTPS API" : "SMTP"}.\n\nReply with a subject like '[chat] what's on my plate today?' or '[team] draft our Q3 launch plan' and clawbot will run it and reply.\n\n— clawbot`,
+    subject: "Neuro email bridge — test",
+    text: mdToPlainText(testMd),
+    html: testHtml,
   });
 }

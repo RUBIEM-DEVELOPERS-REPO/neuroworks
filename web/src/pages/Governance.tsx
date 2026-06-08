@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { marked } from "marked";
-import { Shield, Upload, Trash2, FileText, AlertTriangle, CheckCircle2, ChevronRight } from "lucide-react";
+import { Shield, Upload, Trash2, FileText, AlertTriangle, CheckCircle2, ChevronRight, Download, BookOpen } from "lucide-react";
 import { api, type GovernancePolicy } from "../lib/api";
 import { Card, Button } from "../components/Card";
 
@@ -47,7 +47,7 @@ export function Governance() {
       <div>
         <h1 className="text-2xl font-semibold tracking-tight text-cream-50">Governance</h1>
         <p className="text-sm text-cream-300/70 mt-1">
-          Upload company policies, codes of conduct, data-handling rules, brand voice guides. Every file here becomes a guardrail prepended to clawbot's system prompt on every task. The agent honors them as overrides when a user request conflicts.
+          Upload company policies, codes of conduct, data-handling rules, brand voice guides. Every file here becomes a guardrail prepended to Neuro's system prompt on every task. The agent honors them as overrides when a user request conflicts.
         </p>
       </div>
 
@@ -92,10 +92,16 @@ export function Governance() {
                     >
                       <ChevronRight size={12} className={`transition-transform ${openPolicy?.name === p.name ? "rotate-90" : ""}`} />
                       {p.name}
+                      {p.reference && (
+                        <span className="ml-1 inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-full bg-violet-500/15 text-violet-300" title="Reference manual — available to agents on demand, not injected as a guardrail">
+                          <BookOpen size={9} /> reference
+                        </span>
+                      )}
                     </button>
                     <div className="text-[11px] text-cream-300/60 mt-0.5">
                       {(p.bytes / 1024).toFixed(1)} KB · uploaded {new Date(p.lastModified).toLocaleString()}
                       <Link to={`/knowledge/${p.path}`} className="ml-2 text-violet-400 hover:text-violet-500">view in vault</Link>
+                      <a href={api.governanceDownloadUrl(p.name)} download={`${p.name}.md`} className="ml-2 inline-flex items-center gap-1 text-violet-400 hover:text-violet-500"><Download size={11} /> download</a>
                     </div>
                     {openPolicy?.name === p.name && (
                       <div className="mt-3 bg-ink-950 border border-ink-800 rounded p-3 prose-vault text-sm" dangerouslySetInnerHTML={{ __html: marked.parse(openPolicy.body) as string }} />

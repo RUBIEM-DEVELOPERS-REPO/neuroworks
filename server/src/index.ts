@@ -15,7 +15,7 @@ import { shutdownCommitQueue } from "./lib/commit-queue.js";
 import { startVaultWatcher, stopVaultWatcher, startVaultPullScheduler, stopVaultPullScheduler, getVaultHealth } from "./lib/vault.js";
 import { buildIndex } from "./lib/vault-index.js";
 import { autodiscoverLocalPeers } from "./lib/peer-registry.js";
-import { ensureWorker, shutdownManagedWorker } from "./lib/worker-manager.js";
+import { ensurePool, shutdownManagedWorker } from "./lib/worker-manager.js";
 import { loadPersonas } from "./lib/personas.js";
 import { ensureAllPersonasHaveTemplates } from "./lib/persona-templates.js";
 import { startReflectionScheduler, stopReflectionScheduler } from "./lib/reflection.js";
@@ -37,10 +37,19 @@ import { dataSourcesRouter } from "./routes/data-sources.js";
 import { terminalRouter } from "./routes/terminal.js";
 import { sttRouter } from "./routes/stt.js";
 import { integrationsRouter } from "./routes/integrations.js";
+import { presetsRouter } from "./routes/presets.js";
+import { connectorsRouter } from "./routes/connectors.js";
+import { paymentsRouter } from "./routes/payments.js";
+import { executorRouter } from "./routes/executor.js";
+import { primitivesRouter } from "./routes/primitives.js";
 import { startEmailBridge, stopEmailBridge } from "./lib/email.js";
 import { originGuard } from "./lib/origin-guard.js";
 
 const app = express();
+// Stripe webhook needs the RAW request body to verify the signature — mount a
+// raw parser for that ONE path BEFORE the JSON parser (body-parser sets
+// req._body once read, so the JSON parser below then skips it).
+app.use("/api/payments/webhook", express.raw({ type: "*/*", limit: "2mb" }));
 // JSON body, but also accept text/plain (navigator.sendBeacon defaults to
 // it when given a plain JSON Blob) so the chat unmount-save reaches us.
 // 25 MB limit accommodates base64-encoded document uploads (a 15 MB PDF
@@ -105,6 +114,11 @@ app.use("/api/data-sources", dataSourcesRouter);
 app.use("/api/terminal", terminalRouter);
 app.use("/api/stt", sttRouter);
 app.use("/api/integrations", integrationsRouter);
+app.use("/api/presets", presetsRouter);
+app.use("/api/connectors", connectorsRouter);
+app.use("/api/payments", paymentsRouter);
+app.use("/api/executor", executorRouter);
+app.use("/api/primitives", primitivesRouter);
 
 // Global error handler — every route mounts before this so any throw bubbles
 // up here. We log the request method+url for debugability and return a
@@ -200,15 +214,19 @@ app.listen(config.port, "127.0.0.1", () => {
     console.warn(`  ⚠ persona template backfill failed: ${e?.message ?? e}`);
   }
 
-  // Auto-spawn a managed worker if we are the primary (CLAWBOT_ROLE) and
-  // no external peer is reachable within the grace period. The user gets
-  // parallel sub-agents + the curation gate "for free" — they never have
-  // to know `pnpm secondary` exists. Disable with CLAWBOT_AUTO_SPAWN_WORKER=0.
+  // Auto-spawn a managed worker POOL if we are the primary. With >1 worker,
+  // concurrent tasks fan out across the pool (least-loaded routing) instead of
+  // funnelling to a single agent — the "only one agent working" fix. Pool size
+  // is CLAWBOT_POOL_WORKERS (default 2; capped at CLAWBOT_MAX_WORKERS). Set
+  // CLAWBOT_AUTO_SPAWN_WORKER=0 to disable spawning entirely, or
+  // CLAWBOT_POOL_WORKERS=1 to keep a single worker. The user gets parallel
+  // sub-agents + the curation gate "for free" — no need to know `pnpm secondary`.
   if (process.env.CLAWBOT_AUTO_SPAWN_WORKER !== "0" && config.role === "primary") {
+    const poolTarget = Math.max(1, Number(process.env.CLAWBOT_POOL_WORKERS ?? "2") || 2);
     setTimeout(() => {
-      void ensureWorker({ waitForReady: false }).catch(e =>
-        console.warn(`  ⚠ worker auto-spawn failed: ${e?.message ?? e}`)
-      );
+      void ensurePool(poolTarget)
+        .then(r => console.log(`  ⓦ worker pool warm — ${r.running} managed worker(s) ready (target ${poolTarget})`))
+        .catch(e => console.warn(`  ⚠ worker pool warm-up failed: ${e?.message ?? e}`));
     }, 5_000);
   }
 

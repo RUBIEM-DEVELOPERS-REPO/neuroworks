@@ -15,6 +15,13 @@ export type Cadence = {
   minute: number;         // 0..59 in local time
 };
 
+// Optional delivery — when set, the schedule's result is pushed somewhere the
+// moment the job finishes (not just left on the Tasks page). Today we support
+// email; the shape is an object so channels (slack, teams) can be added later.
+export type ScheduleDelivery = {
+  email?: string;          // address to email the finished result to
+};
+
 export type Schedule = {
   id: string;
   name: string;            // user-facing label, e.g. "Weekly digest"
@@ -22,6 +29,7 @@ export type Schedule = {
   inputs: Record<string, unknown>;
   cadence: Cadence;
   enabled: boolean;
+  deliver?: ScheduleDelivery;
   createdAt: string;
   lastFiredAt?: string;    // ISO, set after a successful fire
   lastJobId?: string;      // last job id triggered
@@ -75,6 +83,7 @@ export function createSchedule(input: Omit<Schedule, "id" | "createdAt" | "fireC
     inputs: input.inputs ?? {},
     cadence: input.cadence,
     enabled: input.enabled ?? true,
+    ...(input.deliver ? { deliver: input.deliver } : {}),
     createdAt: new Date().toISOString(),
     fireCount: 0,
   };
@@ -83,7 +92,7 @@ export function createSchedule(input: Omit<Schedule, "id" | "createdAt" | "fireC
   return fresh;
 }
 
-export function updateSchedule(id: string, patch: Partial<Pick<Schedule, "name" | "templateId" | "inputs" | "cadence" | "enabled">>): Schedule | null {
+export function updateSchedule(id: string, patch: Partial<Pick<Schedule, "name" | "templateId" | "inputs" | "cadence" | "enabled" | "deliver">>): Schedule | null {
   const s = load();
   const idx = s.schedules.findIndex(x => x.id === id);
   if (idx === -1) return null;
@@ -178,9 +187,59 @@ async function fireSchedule(s: Schedule): Promise<void> {
     }
     recordFire(s.id, body.jobId);
     console.log(`[schedules] fired ${s.id} (${s.name}) → job ${String(body.jobId).slice(0, 8)}`);
+    // Optional delivery — if this schedule is configured to email its result,
+    // wait (in the background) for the job to finish, then send. Fire-and-forget
+    // so a slow job doesn't stall the scheduler tick.
+    if (s.deliver?.email) {
+      void deliverScheduleResult(s, String(body.jobId), s.deliver.email);
+    }
   } catch (e: any) {
     console.warn(`[schedules] fire crashed: ${s.id} (${s.name}) — ${e?.message ?? e}`);
     recordFireError(s.id, String(e?.message ?? e));
+  }
+}
+
+// Poll a fired job to completion, then email the synthesised answer to the
+// configured address. Best-effort: failures are logged but never crash the
+// scheduler (the result still lives on the Tasks page). Used by the
+// "email me a daily briefing" pattern that Role Presets wire up.
+async function deliverScheduleResult(s: Schedule, jobId: string, to: string): Promise<void> {
+  const base = `http://127.0.0.1:${config.port}`;
+  const deadline = Date.now() + 15 * 60_000;
+  let answer = "";
+  try {
+    while (Date.now() < deadline) {
+      await new Promise(r => setTimeout(r, 5000));
+      const r = await fetch(`${base}/api/tasks/jobs/${jobId}`).catch(() => null);
+      if (!r || !r.ok) continue;
+      const j: any = await r.json().catch(() => ({}));
+      if (j.status === "succeeded") {
+        // result.answer is usually a string, but coerce defensively so a
+        // structured result never lands in the email as "[object Object]".
+        const { coerceEmailBody } = await import("./email.js");
+        answer = coerceEmailBody(j?.result?.answer ?? j?.result).trim();
+        break;
+      }
+      if (j.status === "failed" || j.status === "rejected") {
+        answer = `The scheduled task "${s.name}" didn't complete (${j.status}${j.error ? `: ${String(j.error).slice(0, 160)}` : ""}).`;
+        break;
+      }
+    }
+    if (!answer) answer = `Your scheduled task "${s.name}" is still running — check the Tasks page for the result.`;
+    const { sendEmail, emailConfigured } = await import("./email.js");
+    if (!emailConfigured()) {
+      console.warn(`[schedules] deliver skipped for ${s.id} — email not configured`);
+      return;
+    }
+    const today = new Date().toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric" });
+    await sendEmail({
+      to,
+      subject: `${s.name} — ${today}`,
+      body: `${answer}\n\n— Neuro`,
+    });
+    console.log(`[schedules] delivered ${s.id} (${s.name}) result → ${to}`);
+  } catch (e: any) {
+    console.warn(`[schedules] deliver failed for ${s.id} (${s.name}): ${e?.message ?? e}`);
   }
 }
 

@@ -6,7 +6,8 @@ import {
   CheckCircle2, Activity as ActivityIcon, Library, Settings as SettingsIcon,
   ShieldCheck, Plus, Sun, Moon, Search as SearchIcon, ChevronRight,
   Calendar, Shield, CalendarDays, FileEdit, Database,
-  Terminal as TerminalIcon, FolderKanban, Wrench, Plug,
+  Terminal as TerminalIcon, FolderKanban, Wrench, Plug, Eye, Sparkles,
+  Boxes, CreditCard,
   type LucideIcon,
 } from "lucide-react";
 import { BrandMark } from "./BrandMark";
@@ -27,14 +28,13 @@ const primaryNav: NavItem[] = [
   { to: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
   { to: "/chat", label: "Chat", icon: MessageSquare },
   { to: "/team", label: "Team", icon: Users },
-  { to: "/tasks", label: "Tasks", icon: ListChecks },
+  { to: "/presets", label: "Hire a worker", icon: Sparkles },
 ];
 
 const workspaceNav: NavItem[] = [
+  { to: "/tasks", label: "Tasks", icon: ListChecks },
   { to: "/calendar", label: "Calendar", icon: CalendarDays },
   { to: "/results", label: "Reports", icon: FileText },
-  { to: "/knowledge", label: "Knowledge", icon: BookOpen },
-  { to: "/data-sources", label: "Company data", icon: Database },
   { to: "/edit", label: "Doc editor", icon: FileEdit },
 ];
 
@@ -51,7 +51,11 @@ const libraryNav: NavItem[] = [
 ];
 
 const systemNav: NavItem[] = [
+  { to: "/knowledge", label: "Knowledge", icon: BookOpen },
+  { to: "/data-sources", label: "Company data", icon: Database },
+  { to: "/connectors", label: "Connectors", icon: Boxes },
   { to: "/integrations", label: "Integrations", icon: Plug },
+  { to: "/payments", label: "Payments", icon: CreditCard },
   { to: "/terminal", label: "Terminal", icon: TerminalIcon },
   { to: "/governance", label: "Governance", icon: Shield },
   { to: "/admin", label: "Admin", icon: ShieldCheck },
@@ -112,7 +116,7 @@ export function Layout({ children }: { children: ReactNode }) {
   // Collapsible nav group (same pattern the Library used). Open when the user
   // has toggled it open, or — until they touch it — whenever it holds the
   // active route so the current page never hides inside a closed group.
-  const renderGroup = (key: string, label: string, Icon: LucideIcon, items: NavItem[]) => {
+  const renderGroup = (key: string, label: string, Icon: LucideIcon, items: NavItem[], badge = 0) => {
     const hasActive = items.some(n => location.pathname.startsWith(n.to));
     const open = openGroups[key] ?? hasActive;
     return (
@@ -124,6 +128,10 @@ export function Layout({ children }: { children: ReactNode }) {
         >
           <Icon size={16} className="text-cream-300/70 shrink-0" />
           <span className="flex-1 text-left">{label}</span>
+          {/* Aggregate badge — keeps a pending count visible even when collapsed. */}
+          {badge > 0 && !open && (
+            <span className="bg-violet-500/20 text-violet-400 text-[10px] px-1.5 py-0.5 rounded-full font-mono">{badge}</span>
+          )}
           <ChevronRight size={14} className={`text-cream-300/50 transition-transform ${open ? "rotate-90" : ""}`} />
         </button>
         {open && (
@@ -157,10 +165,7 @@ export function Layout({ children }: { children: ReactNode }) {
         <nav className="flex-1 px-3 space-y-0.5 overflow-y-auto scrollbar-thin">
           {primaryNav.map(renderNavItem)}
           {renderGroup("workspace", "Workspace", FolderKanban, workspaceNav)}
-
-          <div className="pt-3 pb-1 px-3 text-[10px] uppercase tracking-wider text-cream-300/40">Watch</div>
-          {watchNav.map(renderNavItem)}
-
+          {renderGroup("watch", "Watch", Eye, watchNav, counts.approvals + counts.activity)}
           {renderGroup("library", "Library", Library, libraryNav)}
           {renderGroup("system", "System", Wrench, systemNav)}
         </nav>

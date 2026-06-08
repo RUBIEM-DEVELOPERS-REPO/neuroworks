@@ -39,9 +39,19 @@ schedulesRouter.get("/:id", (req, res) => {
   res.json({ schedule: { ...s, nextFireAt: s.enabled ? nextFireAt(s.cadence) : null } });
 });
 
-// Create a schedule. Body: { name, templateId, inputs?, cadence: {daysOfWeek, hour, minute}, enabled? }
+// Parse an optional delivery block. Today only { email } — a syntactically
+// valid address is required when present, otherwise we drop it silently rather
+// than fail the whole create.
+function parseDeliver(raw: any): { email?: string } | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const email = typeof raw.email === "string" ? raw.email.trim() : "";
+  if (email && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return { email };
+  return undefined;
+}
+
+// Create a schedule. Body: { name, templateId, inputs?, cadence: {daysOfWeek, hour, minute}, enabled?, deliver?: { email } }
 schedulesRouter.post("/", (req, res) => {
-  const { name, templateId, inputs, cadence: rawCadence, enabled } = req.body ?? {};
+  const { name, templateId, inputs, cadence: rawCadence, enabled, deliver } = req.body ?? {};
   if (!name || typeof name !== "string") return res.status(400).json({ error: "name is required" });
   if (!templateId || typeof templateId !== "string") return res.status(400).json({ error: "templateId is required" });
   const v = validateCadence(rawCadence);
@@ -52,6 +62,7 @@ schedulesRouter.post("/", (req, res) => {
     inputs: inputs && typeof inputs === "object" ? inputs : {},
     cadence: v.cadence,
     enabled: enabled === false ? false : true,
+    deliver: parseDeliver(deliver),
   });
   res.json({ schedule: fresh });
 });
@@ -70,6 +81,7 @@ schedulesRouter.patch("/:id", (req, res) => {
     patch.cadence = v.cadence;
   }
   if (typeof req.body?.enabled === "boolean") patch.enabled = req.body.enabled;
+  if ("deliver" in (req.body ?? {})) patch.deliver = parseDeliver(req.body.deliver);
   const updated = updateSchedule(req.params.id, patch);
   if (!updated) return res.status(404).json({ error: "not found" });
   res.json({ schedule: updated });

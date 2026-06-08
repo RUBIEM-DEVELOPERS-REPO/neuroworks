@@ -56,6 +56,10 @@ const ALLOWED_ORIGINS = new Set<string>(
 const EXEMPT_PATHS = new Set<string>([
   "/api/health",
   "/api/peers/self",
+  // Stripe webhook — posts from Stripe's servers (cross-host, no browser
+  // Origin). Authenticity is enforced by the signature check in the handler,
+  // which is strictly stronger than a Host/Origin allow-list here.
+  "/api/payments/webhook",
 ]);
 
 const DISABLED = process.env.CLAWBOT_ORIGIN_GUARD === "0";

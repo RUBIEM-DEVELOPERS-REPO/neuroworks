@@ -30,7 +30,15 @@ export type LLMCallOptions = {
   onRoutingDecision?: (info: { backend: Backend; model: string; reason?: string; tokenEstimate: number }) => void;
 };
 
-export type Backend = "ollama" | "openrouter";
+export type Backend = "ollama" | "openrouter" | "minimax";
+
+// MiniMax chat model names start with "MiniMax-" (e.g. MiniMax-M3,
+// MiniMax-M2.7-highspeed). A caller can pin one explicitly (opts.model) and we
+// route to the MiniMax Anthropic-compatible client. Gated on minimaxEnabled so
+// an accidental pin without a key falls through to local rather than throwing.
+function looksMiniMax(modelName: string): boolean {
+  return /^minimax[-/]/i.test(modelName);
+}
 
 const PROFILE_ENV_KEYS: Record<NonNullable<LLMCallOptions["profile"]>, string> = {
   planning:   "OPENROUTER_PLAN_MODEL",
@@ -133,6 +141,9 @@ async function chooseBackendAndModel(opts: LLMCallOptions, prompt: string, syste
   const isComplex = opts.complexity === "high" || sizeTriggered;
 
   if (opts.model) {
+    if (looksMiniMax(opts.model) && config.minimaxEnabled) {
+      return { backend: "minimax", model: opts.model, reason: `explicit MiniMax model "${opts.model}"` };
+    }
     if (looksRemote(opts.model) && config.openrouterEnabled) {
       return { backend: "openrouter", model: opts.model, reason: `explicit remote model "${opts.model}"` };
     }
@@ -266,6 +277,25 @@ export async function llmGenerateWithMeta(prompt: string, system?: string, opts:
   if (reason && (reason.includes("auto-routed") || reason.includes("auto-handoff") || reason.includes("complex task"))) {
     console.log(`[llm] ${reason} (profile=${opts.profile ?? "none"})`);
   }
+  if (backend === "minimax") {
+    // MiniMax chat is non-streaming on our client; emit the whole answer as a
+    // single token so onToken consumers still get it. A transient failure
+    // falls back to the local model (no tokens have streamed).
+    try {
+      const { minimaxGenerate } = await import("./minimax.js");
+      const text = await minimaxGenerate(prompt, system, { model, maxTokens: opts.maxTokens, temperature: opts.temperature });
+      if (opts.onToken) { try { opts.onToken(text, text); } catch { /* consumer error */ } }
+      return { text, model };
+    } catch (e: any) {
+      const fallbackOn = process.env.CLAWBOT_OR_FALLBACK_OLLAMA !== "0";
+      if (fallbackOn) {
+        const localModel = opts.profile ? await pickModelFor(opts.profile, config.ollamaModel) : config.ollamaModel;
+        console.warn(`[llm] MiniMax failure — falling back to local ${localModel}: ${String(e?.message ?? e).slice(0, 140)}`);
+        return callOllamaStream(prompt, system, localModel, opts.onToken, opts.maxTokens, opts.temperature);
+      }
+      throw e;
+    }
+  }
   if (backend === "openrouter") {
     // Track whether any token reached the consumer. A transient failure
     // (429/5xx) BEFORE streaming starts can fall back to the local model
@@ -309,9 +339,10 @@ export type { LLMCallOptions as OllamaCallOptions };
 export async function llmHealth(): Promise<{
   ollama: { ok: boolean; model: string; error?: string };
   openrouter: { enabled: boolean; ok: boolean; model: string; error?: string };
+  minimax: { enabled: boolean; ok: boolean; model: string; error?: string };
   primary: Backend;
 }> {
-  const [ollama, or] = await Promise.all([
+  const [ollama, or, mm] = await Promise.all([
     (async () => {
       try {
         const res = await fetch(`${config.ollamaHost}/api/tags`);
@@ -324,6 +355,9 @@ export async function llmHealth(): Promise<{
       }
     })(),
     config.openrouterEnabled ? openrouterHealth() : Promise.resolve({ ok: false, model: config.openrouterModel, error: "disabled (no OPENROUTER_API_KEY)" }),
+    config.minimaxEnabled
+      ? import("./minimax.js").then(m => m.minimaxHealth())
+      : Promise.resolve({ ok: false, model: config.minimaxModel, error: "disabled (no MINIMAX_API_KEY)" }),
   ]);
   // "Primary" reflects which backend handles a generic /balanced call. If OR is
   // enabled AND set as the balanced profile, it's primary. Otherwise Ollama.
@@ -331,6 +365,7 @@ export async function llmHealth(): Promise<{
   return {
     ollama,
     openrouter: { enabled: config.openrouterEnabled, ...or },
+    minimax: { enabled: config.minimaxEnabled, ...mm },
     primary,
   };
 }

@@ -106,8 +106,8 @@ export async function fetchWeb(url: string, opts: FetchOptions = {}): Promise<{ 
   // SECURITY: block private / loopback / metadata-service addresses to
   // prevent SSRF via a prompt-injected agent. Override with
   // CLAWBOT_WEB_ALLOW_PRIVATE=1 for legitimate local-host fetches.
-  const { assertSafePublicUrl } = await import("./security-gates.js");
-  assertSafePublicUrl(url);
+  const { assertSafePublicUrlAsync } = await import("./security-gates.js");
+  await assertSafePublicUrlAsync(url);
   const timeoutMs = opts.timeoutMs ?? 8_000;
   const maxBytes = opts.maxBytes ?? 100_000;
   const useCache = opts.cache !== false;

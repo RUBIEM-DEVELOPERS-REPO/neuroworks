@@ -31,6 +31,22 @@ governanceRouter.get("/:name", (req, res) => {
   }
 });
 
+// Download a policy as a file (Content-Disposition: attachment). Distinct path
+// segment from GET /:name so it isn't captured as a name.
+governanceRouter.get("/:name/download", (req, res) => {
+  const name = String(req.params.name);
+  if (!/^[A-Za-z0-9._-]+$/.test(name)) return res.status(400).json({ error: "invalid policy name" });
+  const path = join(config.vaultPath, "_governance", `${name}.md`);
+  if (!existsSync(path)) return res.status(404).json({ error: "not found" });
+  try {
+    res.setHeader("Content-Type", "text/markdown; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename="${name}.md"`);
+    res.send(readFileSync(path, "utf8"));
+  } catch (e: any) {
+    res.status(500).json({ error: e?.message ?? String(e) });
+  }
+});
+
 // Delete a policy. The upload flow uses the existing /api/uploads endpoint
 // with target=vault and vaultFolder=_governance, so we only need delete here.
 governanceRouter.delete("/:name", (req, res) => {

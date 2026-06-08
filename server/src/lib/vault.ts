@@ -178,7 +178,24 @@ export function writeVaultFile(rel: string, content: string) {
   writeFileSync(full, content, "utf8");
   // Vault changed — drop the search cache so the next searchVault picks up
   // the new note instead of returning stale results from the 60s window.
-  invalidateSearchCache();
+  //
+  // EXCEPT for `_neuroworks/` machine state (job journals, reflections, etc.).
+  // Those are append-only audit records, not user knowledge — and EVERY job
+  // completion writes one. Invalidating the index on each of them created a
+  // feedback loop under concurrent load: 80 jobs → 80 index busts → every
+  // in-flight searchVault fell back to the synchronous 10-15s full-vault walk,
+  // blocking the event loop (load test: search p50 went 0.2s → 20s, with the
+  // server returning "fetch failed" on dispatch). Skipping invalidation here
+  // keeps the index hot during job storms; real user-note writes still bust it.
+  if (!isMachineStatePath(rel)) invalidateSearchCache();
+}
+
+// `_neuroworks/` (and its OS path-separator variants) is NeuroWorks's own
+// audit/state tree inside the vault — not user knowledge. Writes there must not
+// disturb the user-knowledge search index.
+function isMachineStatePath(rel: string): boolean {
+  const norm = rel.replace(/\\/g, "/").replace(/^\.?\//, "");
+  return norm === "_neuroworks" || norm.startsWith("_neuroworks/");
 }
 
 // Copy a binary file INTO the vault. PDFs, DOCXs, images — anything the
@@ -436,6 +453,10 @@ export function startVaultWatcher(): void {
       // / pull) fire a flood of events that would invalidate the cache
       // for no useful reason.
       if (name.startsWith(".git") || name.includes(`${sep}.git${sep}`) || name.includes("/.git/")) return;
+      // Skip `_neuroworks/` — our own audit/journal tree. Every job completion
+      // writes a note there; letting the watcher invalidate on those recreates
+      // the same index-bust storm writeVaultFile now avoids (see isMachineStatePath).
+      if (name.startsWith("_neuroworks") || name.includes(`${sep}_neuroworks${sep}`) || name.includes("/_neuroworks/")) return;
       if (watchInvalidateTimer) clearTimeout(watchInvalidateTimer);
       watchInvalidateTimer = setTimeout(() => {
         watchInvalidateTimer = null;

@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { PROVIDERS, listConnections, addConnection, removeConnection, testConnection } from "../lib/integrations.js";
+import { PROVIDERS, listConnections, addConnection, removeConnection, testConnection, testAllConnections } from "../lib/integrations.js";
 
 // Integrations API — the user connects external services so agents can act on
 // them. Secret values are encrypted at rest by the lib and NEVER returned here;
@@ -23,6 +23,16 @@ integrationsRouter.post("/", (req, res) => {
     res.json({ connection });
   } catch (e: any) {
     res.status(400).json({ error: String(e?.message ?? e) });
+  }
+});
+
+// Test ALL connections at once (used by the "Test all" button). Defined before
+// the :id route so "test-all" isn't captured as an id.
+integrationsRouter.post("/test-all", async (_req, res) => {
+  try {
+    res.json({ results: await testAllConnections() });
+  } catch (e: any) {
+    res.status(500).json({ error: String(e?.message ?? e) });
   }
 });
 

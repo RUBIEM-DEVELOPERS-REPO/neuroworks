@@ -4,7 +4,7 @@ import { resolve, basename } from "node:path";
 import { simpleGit } from "simple-git";
 import { templates, roles, type Template } from "../lib/templates.js";
 import { newJob, getJob, listJobs, runJob, SERVER_BOOT_AT } from "../lib/jobs.js";
-import { loadJobById, asJob } from "../lib/job-store.js";
+import { loadJobById, loadJobsInWindow, asJob } from "../lib/job-store.js";
 import { config } from "../config.js";
 import { dispatchWorkflow, recentCommits, openPRs, openIssues, readme, octokit } from "../lib/github.js";
 import { writeVaultFile, commitAndPush, searchVault, VaultUnreachable } from "../lib/vault.js";
@@ -48,7 +48,31 @@ templatesRouter.get("/", (_req, res) => {
   res.json({ roles: allRoles, templates: [...templates, ...custom] });
 });
 
-templatesRouter.get("/jobs", (_req, res) => res.json({ jobs: listJobs() }));
+// Jobs feed for the Tasks / Reports pages. MERGES the in-memory jobs with the
+// persisted journal so reports SURVIVE a server restart / tsx-watch reload —
+// previously this returned only the in-memory map (RECENT cap, wiped on
+// reload), so scheduled runs and any older task had "no report" even though the
+// record was on disk. In-memory wins on id collision (it's the freshest state).
+templatesRouter.get("/jobs", (_req, res) => {
+  const mem = listJobs();
+  const seen = new Set(mem.map(j => j.id));
+  // Look back 30 days of persisted records — enough for the Reports history
+  // without scanning the whole journal. asJob() hydrates answer + plan so each
+  // row deep-links to a renderable report.
+  const windowStart = Date.now() - 30 * 24 * 60 * 60 * 1000;
+  let persisted: ReturnType<typeof asJob>[] = [];
+  try {
+    persisted = loadJobsInWindow(windowStart, Date.now() + 60_000)
+      .filter(rec => !seen.has(rec.id))
+      .map(asJob);
+  } catch { /* tolerate — fall back to in-memory only */ }
+  // Dedup persisted-vs-persisted too (append-only journal can hold running→
+  // succeeded for one id); keep the last (latest status) per id.
+  const byId = new Map<string, ReturnType<typeof asJob>>();
+  for (const j of persisted) byId.set(j.id, j);
+  const jobs = [...mem, ...byId.values()].sort((a, b) => b.startedAt.localeCompare(a.startedAt));
+  res.json({ jobs });
+});
 
 templatesRouter.get("/jobs/:id", (req, res) => {
   const j = getJob(req.params.id);
@@ -308,6 +332,7 @@ async function runner(templateId: string, inputs: Record<string, unknown>, push:
     case "add-note":       return addNoteRunner(inputs, push);
     case "browse-vault":   return { redirect: "/knowledge" };
     case "sync-downloads": return syncDownloadsRunner(inputs, push);
+    case "daily-briefing": return dailyBriefingRunner(inputs, push, progress);
     case "general-task":   return generalTaskRunner(inputs, push, progress);
     default: throw new Error(`no runner for ${templateId}`);
   }
@@ -507,6 +532,25 @@ async function generalTaskRunner(inputs: Record<string, unknown>, push: (m: stri
     skillScore: r.skillScore,
     savedTemplateId,
   };
+}
+
+// Daily briefing — a thin wrapper over the general-task agent with a fixed,
+// briefing-shaped prompt. Runs against the active persona so a hired EA (Evie)
+// gives an EA-flavoured briefing. Doesn't auto-save as a template (it's already
+// a built-in) and never re-asks for clarification — it's a scheduled, headless
+// run. The optional `focus` input narrows the briefing to one area.
+async function dailyBriefingRunner(inputs: Record<string, unknown>, push: (m: string) => void, progress?: (p: Record<string, unknown>) => void) {
+  const focus = String(inputs.focus ?? "").trim();
+  const today = new Date().toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric" });
+  const task =
+    `Produce my briefing for ${today}.${focus ? ` Focus area: ${focus}.` : ""}\n\n` +
+    `Look at the last 5 days of activity in my vault (recent notes in _neuroworks/jobs/ and anything in 0-Inbox/), plus any items flagged for follow-up. ` +
+    `Then write a short, scannable briefing with these sections:\n` +
+    `## Focus today — the 3-5 things that matter most, each one line with WHY it matters\n` +
+    `## Open loops — anything waiting on me or flagged for follow-up\n` +
+    `## Worth knowing — short notes on recent changes or context\n\n` +
+    `Keep it tight — this is a morning glance, not a report. If the vault is quiet, say so honestly rather than padding.`;
+  return generalTaskRunner({ task, save_as_template: false }, push, progress);
 }
 
 async function syncDownloadsRunner(inputs: Record<string, unknown>, push: (m: string) => void) {

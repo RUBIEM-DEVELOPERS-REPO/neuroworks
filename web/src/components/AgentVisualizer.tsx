@@ -58,7 +58,7 @@ export function AgentVisualizer() {
     <div className="bg-ink-900 border border-ink-800 rounded-xl p-5">
       <div className="flex items-baseline justify-between mb-4">
         <div className="text-xs uppercase tracking-[0.25em] text-cream-300/60">Workforce</div>
-        <div className="text-[11px] text-cream-300/50">{allBots.length} {allBots.length === 1 ? "clawbot" : "clawbots"} · {running.length} active {running.length === 1 ? "task" : "tasks"}</div>
+        <div className="text-[11px] text-cream-300/50">{allBots.length} {allBots.length === 1 ? "neuro" : "neuros"} · {running.length} active {running.length === 1 ? "task" : "tasks"}</div>
       </div>
 
       {/* Clawbot row */}
@@ -98,7 +98,7 @@ function BotChip({ bot }: { bot: Peer }) {
         <span className={`absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full ${dot} ring-2 ring-ink-950`} />
       </div>
       <div className="leading-tight">
-        <div className="text-sm text-cream-100 font-medium">{bot.name ?? "clawbot"}</div>
+        <div className="text-sm text-cream-100 font-medium">{bot.name ?? "Neuro"}</div>
         <div className="text-[10px] text-cream-300/60 font-mono">{bot.model ?? "?"} · {dead ? "offline" : busy ? `${bot.inflightJobs} task${bot.inflightJobs === 1 ? "" : "s"}` : "idle"}</div>
       </div>
     </div>

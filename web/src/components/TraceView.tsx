@@ -132,7 +132,7 @@ function rephraseLine(rawText: string, toolName?: string): string {
   if (/Thinking about the best approach/i.test(rawText)) return "Thinking about the best approach…";
   if (/Handling this myself/i.test(rawText)) return "Taking this on directly (no peer needed).";
   if (/Working as ([\w\s—-]+?)\./i.test(rawText)) {
-    const persona = rawText.match(/Working as ([^.]+)\./i)?.[1] ?? "Clawbot";
+    const persona = rawText.match(/Working as ([^.]+)\./i)?.[1] ?? "Neuro";
     return `Working as ${persona.replace(/—.*/, "").trim()}.`;
   }
   if (/Planning with ([\w/\-.:]+)/i.test(rawText)) {

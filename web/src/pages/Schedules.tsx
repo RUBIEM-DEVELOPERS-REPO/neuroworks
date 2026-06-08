@@ -172,6 +172,7 @@ function CreateScheduleForm({ templates, onCreated, onError }: {
   const [days, setDays] = useState<number[]>([1, 2, 3, 4, 5]);
   const [submitting, setSubmitting] = useState(false);
   const [inputs, setInputs] = useState<Record<string, string>>({});
+  const [deliverEmail, setDeliverEmail] = useState("");
 
   const tpl = useMemo(() => templates.find(t => t.id === templateId), [templates, templateId]);
 
@@ -198,9 +199,10 @@ function CreateScheduleForm({ templates, onCreated, onError }: {
         inputs: coerced,
         cadence: { daysOfWeek: days, hour, minute },
         enabled: true,
+        ...(deliverEmail.trim() ? { deliver: { email: deliverEmail.trim() } } : {}),
       });
       await onCreated();
-      setName(""); setTemplateId(""); setInputs({});
+      setName(""); setTemplateId(""); setInputs({}); setDeliverEmail("");
     } catch (e: any) {
       onError(e?.message ?? String(e));
     } finally {
@@ -319,6 +321,19 @@ function CreateScheduleForm({ templates, onCreated, onError }: {
             />
             <span className="text-[11px] text-cream-300/50 ml-2">24-hour clock</span>
           </div>
+        </div>
+
+        <div>
+          <label htmlFor="sched-email" className="block text-[11px] uppercase tracking-wider text-cream-300/60 mb-1">Email the result to (optional)</label>
+          <input
+            id="sched-email"
+            type="email"
+            value={deliverEmail}
+            onChange={e => setDeliverEmail(e.target.value)}
+            placeholder="you@example.com — leave blank to keep results on the Tasks page"
+            className="w-full bg-ink-950 border border-ink-800 focus:border-violet-500/60 rounded-md px-3 py-2 text-sm focus:outline-none placeholder:text-cream-300/40"
+          />
+          <p className="text-[11px] text-cream-300/50 mt-1">When set, the finished result is emailed to this address the moment the job completes (needs the email bridge configured).</p>
         </div>
 
         <div className="flex items-center gap-3 pt-2 border-t border-ink-800">

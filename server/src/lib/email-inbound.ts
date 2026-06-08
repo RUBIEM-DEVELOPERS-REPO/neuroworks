@@ -2,6 +2,7 @@ import express from "express";
 import { timingSafeEqual } from "node:crypto";
 import type { Server } from "node:http";
 import { processInboundEmail, stripQuotedReply } from "./email.js";
+import { evaluateAuthResultsHeader } from "./email-auth.js";
 
 // Dedicated, minimal HTTP listener for Mailjet's inbound Parse API. Runs on its
 // OWN port (CLAWBOT_EMAIL_INBOUND_PORT, default 7475) exposing ONLY this webhook
@@ -53,38 +54,7 @@ function safeEqual(a: string, b: string): boolean {
   return timingSafeEqual(ba, bb);
 }
 
-// The From header is attacker-controlled and Mailjet forwards spoofed mail as-is,
-// so we must not trust it for the allow-list on faith. The receiving MX stamps an
-// `Authentication-Results` header with the real SPF/DKIM verdict — read it and
-// require the authenticated domain to match the claimed From domain.
-//   "pass"    → SPF or DKIM passed AND aligns with the From domain.
-//   "fail"    → an explicit spf=fail / dkim=fail with no aligned pass (a spoof).
-//   "unknown" → no usable Authentication-Results (can't tell).
-function evaluateInboundAuth(headers: Record<string, any>, fromAddr: string): "pass" | "fail" | "unknown" {
-  // Header lookup is case-insensitive; Mailjet may also nest under 'Headers'.
-  let ar = "";
-  for (const [k, v] of Object.entries(headers ?? {})) {
-    if (k.toLowerCase() === "authentication-results") { ar = Array.isArray(v) ? v.join(" ") : String(v); break; }
-  }
-  if (!ar) return "unknown";
-  const lc = ar.toLowerCase();
-  const fromDomain = (fromAddr.split("@")[1] ?? "").toLowerCase();
-  if (!fromDomain) return "fail";
-
-  // DKIM: look for "dkim=pass ... header.d=<domain>" or "header.i=@<domain>".
-  const dkimPass = /\bdkim=pass\b/.test(lc);
-  const dkimDomains = [...lc.matchAll(/header\.(?:d|i)=@?([a-z0-9.-]+)/g)].map(m => m[1]);
-  const dkimAligned = dkimPass && dkimDomains.some(d => d === fromDomain || fromDomain.endsWith("." + d) || d.endsWith("." + fromDomain));
-
-  // SPF: "spf=pass ... smtp.mailfrom=...@<domain>" (envelope domain).
-  const spfPass = /\bspf=pass\b/.test(lc);
-  const spfDomains = [...lc.matchAll(/smtp\.(?:mailfrom|helo)=(?:[^@\s]*@)?([a-z0-9.-]+)/g)].map(m => m[1]);
-  const spfAligned = spfPass && spfDomains.some(d => d === fromDomain || fromDomain.endsWith("." + d) || d.endsWith("." + fromDomain));
-
-  if (dkimAligned || spfAligned) return "pass";
-  if (/\bdkim=fail\b/.test(lc) || /\bspf=fail\b/.test(lc) || /\bspf=softfail\b/.test(lc) || dkimPass || spfPass) return "fail";
-  return "unknown";
-}
+// SPF/DKIM evaluation lives in email-auth.ts (shared with the IMAP path).
 
 export function startInboundWebhook(): void {
   if (server) return;
@@ -123,6 +93,7 @@ export function startInboundWebhook(): void {
     const messageId = pick(headers, "Message-ID", "Message-Id", "MessageID") || pick(p, "MessageID", "messageId") || undefined;
     const refHeader = pick(headers, "References", "references");
     const references = refHeader ? refHeader.split(/\s+/).filter(Boolean) : undefined;
+    const inReplyTo = pick(headers, "In-Reply-To", "In-Reply-to", "in-reply-to") || undefined;
 
     if (!sender) {
       state.rejected += 1;
@@ -132,7 +103,7 @@ export function startInboundWebhook(): void {
     // Anti-spoofing: the From is attacker-controlled, so verify SPF/DKIM before
     // it can satisfy the allow-list. Reject explicit auth failures (a spoof);
     // in strict mode also reject when we can't verify at all.
-    const auth = evaluateInboundAuth(headers, sender);
+    const auth = evaluateAuthResultsHeader(headers, sender);
     const strict = (process.env.CLAWBOT_EMAIL_REQUIRE_AUTH ?? "").trim().toLowerCase() === "strict";
     if (auth === "fail" || (auth === "unknown" && strict)) {
       state.rejected += 1;
@@ -145,7 +116,7 @@ export function startInboundWebhook(): void {
     // (it would time out and retry, double-running the job). Process async.
     res.json({ ok: true });
     state.accepted += 1;
-    void processInboundEmail({ sender, subject, body: stripQuotedReply(text), messageId, references })
+    void processInboundEmail({ sender, subject, body: stripQuotedReply(text), messageId, references, inReplyTo })
       .then(r => console.log(`[inbound-webhook] ${sender}: ${r.status}${r.jobId ? ` (job ${r.jobId.slice(0, 8)})` : ""}${r.reason ? ` — ${r.reason}` : ""}`))
       .catch(e => console.error(`[inbound-webhook] processing failed: ${e?.stack ?? e}`));
   });

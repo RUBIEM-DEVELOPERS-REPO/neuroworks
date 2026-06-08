@@ -5,3 +5,5 @@
 declare module "pg";
 declare module "mysql2/promise";
 declare module "better-sqlite3";
+declare module "mssql";
+declare module "mongodb";

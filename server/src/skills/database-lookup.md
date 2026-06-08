@@ -24,10 +24,16 @@ operator probably connected.
 3. **Learn the schema.** Call `db.schema(source_id)` once. Cache the table
    list in your reasoning; do NOT call schema again for the same source in
    the same plan.
-4. **Write ONE read-only query.** SELECT / WITH / SHOW / EXPLAIN / DESCRIBE
-   only. Engine-aware quoting:
-   - Postgres / MySQL: `"table_name"` or backticks for MySQL identifiers.
-   - SQLite: PRAGMA for column info, no schema prefix needed.
+4. **Write ONE read-only query.** Engine-aware:
+   - **Postgres / MySQL / SQL Server / SQLite** — SELECT / WITH / SHOW /
+     EXPLAIN / DESCRIBE only. Quoting: `"table_name"` (Postgres/SQL Server),
+     backticks for MySQL, `[table]` also works for SQL Server. SQL Server has
+     no `LIMIT` — use `SELECT TOP 200 …`. SQLite uses PRAGMA for column info.
+   - **MongoDB** — the `kind` is `mongodb`, so pass a JSON document, NOT SQL:
+     `{"collection":"orders","filter":{"status":"open"},"sort":{"created_at":-1},"limit":50}`.
+     For rollups use `{"collection":"orders","aggregate":[{"$group":{"_id":"$status","n":{"$sum":1}}}]}`.
+     For a count: `{"collection":"users","count":true,"filter":{"active":true}}`.
+     `db.schema` returns each collection's fields sampled from one document.
 5. **Cap rows server-side.** Add `LIMIT 200` (the runner caps at 200 anyway
    but explicit limits make slow queries cheaper).
 6. **Narrate the result.** Don't dump rows raw. Pull out the headline number

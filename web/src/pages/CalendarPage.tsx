@@ -6,7 +6,15 @@ import { Card, Button } from "../components/Card";
 
 const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
-function ymd(d: Date): string { return d.toISOString().slice(0, 10); }
+// Format a Date as its LOCAL calendar day. Using toISOString() here would
+// convert to UTC and shift the date by the timezone offset (e.g. local midnight
+// in UTC+2 becomes the previous day) — the classic calendar off-by-one.
+function ymd(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
 function todayLocal(): Date { const d = new Date(); return new Date(d.getFullYear(), d.getMonth(), d.getDate()); }
 function startOfMonth(d: Date): Date { return new Date(d.getFullYear(), d.getMonth(), 1); }
 function endOfMonth(d: Date): Date { return new Date(d.getFullYear(), d.getMonth() + 1, 0); }
@@ -165,7 +173,7 @@ export function CalendarPage() {
               <AgendaSection
                 icon={<Users size={14} />}
                 title="Scheduled"
-                empty="No clawbot schedules run on this day-of-week."
+                empty="No Neuro schedules run on this day-of-week."
                 items={agenda.schedules.map((s: any) => ({
                   title: s.label ?? s.templateId,
                   meta: `${s.cadence?.hour?.toString().padStart(2, "0") ?? "?"}:${s.cadence?.minute?.toString().padStart(2, "0") ?? "?"} · ${s.enabled === false ? "paused" : "active"}`,

@@ -45,6 +45,26 @@ const SESSION_ID_KEY = "neuroworks.chat.sessionId";
 const RECENT_SESSIONS_KEY = "neuroworks.chat.recent";
 const RECENT_MAX = 3;
 
+// Slash-commands — typing "/" in the composer opens this menu. Picking one
+// fills the textarea with a natural-language prompt prefix that routes well
+// through the existing chat pipeline (no special server parsing needed); the
+// user then types the argument and sends. The media commands surface the
+// MiniMax generative primitives the agent can now call.
+type SlashCommand = { cmd: string; label: string; hint: string; prefix: string };
+const SLASH_COMMANDS: SlashCommand[] = [
+  { cmd: "research", label: "Research", hint: "deep, multi-perspective, cited", prefix: "Research the following in depth — multiple perspectives, cite every claim with sources: " },
+  { cmd: "summarize", label: "Summarize", hint: "tighten to the essentials", prefix: "Summarize the following clearly and concisely, keeping the key points: " },
+  { cmd: "email", label: "Draft email", hint: "professional email draft", prefix: "Draft a professional email. " },
+  { cmd: "plan", label: "Action plan", hint: "steps, owners, dates", prefix: "Turn this into a step-by-step action plan with owners and by-when dates: " },
+  { cmd: "table", label: "Make a table", hint: "structured markdown table", prefix: "Present this as a clean, well-labelled markdown table: " },
+  { cmd: "factcheck", label: "Fact-check", hint: "verify a claim", prefix: "Fact-check the following claim against reliable sources and give a verdict: " },
+  { cmd: "translate", label: "Translate", hint: "to another language", prefix: "Translate the following (ask which language if unclear): " },
+  { cmd: "code", label: "Write code", hint: "with a short explanation", prefix: "Write code for the following, with a short explanation: " },
+  { cmd: "speak", label: "Speak (TTS)", hint: "MiniMax text-to-speech audio", prefix: "Use media.tts to generate spoken audio of the following text: " },
+  { cmd: "video", label: "Make a video", hint: "MiniMax Hailuo clip", prefix: "Use media.video to generate a short video of: " },
+  { cmd: "music", label: "Compose music", hint: "MiniMax music track", prefix: "Use media.music to compose a track: " },
+];
+
 type RecentSession = {
   id: string;
   title: string;
@@ -450,7 +470,7 @@ export function Chat() {
     <div className="flex flex-col h-[calc(100vh-66px)] -my-7 -mx-8">
       <div className="flex items-center justify-between px-8 py-4 border-b border-ink-800 gap-4">
         <div className="min-w-0">
-          <h1 className="text-2xl font-semibold tracking-tight text-cream-50">Chat with clawbot</h1>
+          <h1 className="text-2xl font-semibold tracking-tight text-cream-50">Chat with Neuro</h1>
           <div className="flex items-center gap-2 mt-0.5 flex-wrap">
             <p className="text-xs text-cream-300/60">Type what you want done; I'll delegate and report back.</p>
             <span className="text-[10px] text-cream-300/40 font-mono">session {sessionId.slice(0, 18)}</span>
@@ -530,7 +550,7 @@ export function Chat() {
           <div className="max-w-2xl mx-auto text-center py-16">
             <div className="grid place-items-center mb-4"><BrandMark size={56} /></div>
             <h2 className="text-3xl font-semibold tracking-tight text-cream-50 mb-2">
-              {activePersona ? `Hi, I'm ${activePersona.name}.` : "Hi, I'm clawbot."}
+              {activePersona ? `Hi, I'm ${activePersona.name}.` : "Hi, I'm Neuro."}
             </h2>
             <p className="text-sm text-cream-300/70 mb-2">
               {activePersona
@@ -659,6 +679,31 @@ export function Chat() {
             </div>
           )}
           <div className="flex items-end gap-2 relative">
+            {/* Slash-command menu — appears while typing the command word ("/re…"). */}
+            {(() => {
+              const m = /^\/(\w*)$/.exec(draft);
+              if (!m) return null;
+              const q = m[1].toLowerCase();
+              const matches = SLASH_COMMANDS.filter(c => c.cmd.startsWith(q) || c.label.toLowerCase().includes(q));
+              if (matches.length === 0) return null;
+              return (
+                <div className="absolute bottom-14 left-14 z-30 w-80 bg-ink-900 border border-ink-700 rounded-xl shadow-xl p-1.5 max-h-72 overflow-y-auto scrollbar-thin">
+                  <div className="text-[10px] uppercase tracking-wider text-cream-300/50 px-2 py-1">Commands</div>
+                  {matches.map(c => (
+                    <button
+                      key={c.cmd}
+                      type="button"
+                      onClick={() => { setDraft(c.prefix); document.querySelector<HTMLTextAreaElement>("textarea")?.focus(); }}
+                      className="w-full text-left flex items-center gap-2 px-2 py-1.5 rounded-md hover:bg-ink-800 text-sm"
+                    >
+                      <span className="font-mono text-violet-300">/{c.cmd}</span>
+                      <span className="text-cream-100">{c.label}</span>
+                      <span className="text-cream-300/50 text-[11px] ml-auto truncate">{c.hint}</span>
+                    </button>
+                  ))}
+                </div>
+              );
+            })()}
             <input
               ref={fileInputRef}
               type="file"
@@ -755,7 +800,7 @@ export function Chat() {
                 activeTemplate?.placeholder
                 ?? (pendingContinuation ? "Add the missing context, like the file path, the recipient, the topic..."
                 : pendingAttachments.length > 0 ? "Add a note (optional). Press Send to ask about the attachment..."
-                : "Message clawbot...")
+                : "Message Neuro...")
               }
               className="flex-1 bg-ink-900 border border-ink-800 focus:border-violet-500/60 rounded-xl px-4 py-3 text-sm resize-none focus:outline-none placeholder:text-cream-300/40 max-h-52"
               aria-label="Message"
@@ -799,13 +844,15 @@ export function Chat() {
           <button
             type="button"
             onClick={() => setPlanFirst(p => !p)}
-            title="Draft a plan and approve the steps before clawbot runs them"
+            title="Draft a plan and approve the steps before Neuro runs them"
             className={`flex items-center gap-1 px-2 py-0.5 rounded-full border transition-colors ${planFirst ? "bg-violet-500/15 border-violet-500/40 text-violet-300" : "border-ink-700 text-cream-300/50 hover:text-cream-200 hover:border-ink-600"}`}
           >
             <ListChecks size={11} /> Plan first{planFirst ? " · on" : ""}
           </button>
           <span className="text-cream-300/30">·</span>
           <span className="flex items-center gap-1"><Kbd>↵</Kbd> send</span>
+          <span className="text-cream-300/30">·</span>
+          <span className="flex items-center gap-1"><Kbd>/</Kbd> commands</span>
           <span className="text-cream-300/30">·</span>
           <span className="flex items-center gap-1"><Kbd>⇧</Kbd>+<Kbd>↵</Kbd> newline</span>
           <span className="text-cream-300/30">·</span>

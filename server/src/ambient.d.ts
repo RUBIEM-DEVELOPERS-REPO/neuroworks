@@ -3,6 +3,16 @@
 // out of scope. Keep them tight so the rest of the codebase still benefits
 // from strict checks.
 
+declare module "adm-zip" {
+  class AdmZip {
+    constructor(path?: string | Buffer);
+    getEntries(): Array<{ entryName: string; isDirectory: boolean; header?: { size?: number } }>;
+    extractAllTo(targetPath: string, overwrite?: boolean): void;
+    readAsText(entryName: string): string;
+  }
+  export default AdmZip;
+}
+
 declare module "pdf-parse-fork" {
   type ParseResult = { text: string; numpages: number; info?: unknown; metadata?: unknown };
   function parse(buffer: Buffer, opts?: { max?: number }): Promise<ParseResult>;

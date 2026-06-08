@@ -314,6 +314,126 @@ const CURATED: Record<string, (personaId: string) => Omit<CustomTemplate, "id" |
       runCount: 0,
     },
   ],
+
+  // ───────── Media-production roster (MiniMax media.* primitives) ─────────
+  // Each template's task names the media.* tool explicitly so the planner wires
+  // it. They degrade gracefully — without a MINIMAX_API_KEY the tool returns a
+  // friendly "not configured" and the persona still delivers the script/prompt.
+  "voice-producer": () => [
+    {
+      title: "Narrate this as audio",
+      description: "Turn any text into a clean spoken script and synthesise it to an audio file with text-to-speech.",
+      origin: { task: "Rewrite the following text as a clean SPOKEN script (short sentences, contractions, no markdown read aloud), then use media.tts to synthesise it to audio. Pick a fitting voice and emotion, and state your choice. Return BOTH the script and the audio file path.", createdAt: new Date().toISOString() },
+      plan: { steps: [], summary: undefined, waves: [] },
+      runCount: 0,
+    },
+    {
+      title: "Audio briefing from notes",
+      description: "Condense notes/a report into a listenable 60-90 second briefing and produce the narration audio.",
+      origin: { task: "Condense the following into a 60-90 second SPOKEN briefing — only what matters, written for the ear. Then use media.tts to narrate it (neutral, clear voice). Return the script + the audio path, and note anything you trimmed.", createdAt: new Date().toISOString() },
+      plan: { steps: [], summary: undefined, waves: [] },
+      runCount: 0,
+    },
+    {
+      title: "Welcome / IVR voice prompt",
+      description: "Write and voice a short phone-menu or welcome prompt — warm, clear, and short.",
+      origin: { task: "Write a short phone/IVR or welcome voice prompt for the following scenario. Keep it under 20 seconds spoken, warm and clear, spelling out anything that could be misheard. Then use media.tts with a warm voice to produce the audio. Return the script + audio path.", createdAt: new Date().toISOString() },
+      plan: { steps: [], summary: undefined, waves: [] },
+      runCount: 0,
+    },
+  ],
+  "video-producer": () => [
+    {
+      title: "Short social clip",
+      description: "Write a tight visual prompt and generate a short vertical clip for social (Reels/TikTok/Shorts).",
+      origin: { task: "Create a short social video for the following idea. Write a tight visual prompt (subject, action, setting, camera, mood), state the channel + aspect (default 9:16) and the first-second hook, then use media.video to generate it. Return the prompt + the video URL.", createdAt: new Date().toISOString() },
+      plan: { steps: [], summary: undefined, waves: [] },
+      runCount: 0,
+    },
+    {
+      title: "Product teaser from a brief",
+      description: "Storyboard a multi-shot product teaser, then render the key shot.",
+      origin: { task: "Storyboard a product teaser for the following brief: a numbered shot list, each shot with its own concrete visual prompt. Then use media.video to render the single most important shot. Return the full storyboard, the prompt you rendered, and the video URL.", createdAt: new Date().toISOString() },
+      plan: { steps: [], summary: undefined, waves: [] },
+      runCount: 0,
+    },
+    {
+      title: "Animate an image",
+      description: "Take a supplied image as the first frame and generate a short motion clip from it.",
+      origin: { task: "Using the supplied image as the first frame, write a motion prompt describing how the scene should move, then use media.video with that image as first_frame_image to generate a short clip. If no image was supplied, ask for one. Return the prompt + the video URL.", createdAt: new Date().toISOString() },
+      plan: { steps: [], summary: undefined, waves: [] },
+      runCount: 0,
+    },
+  ],
+  "music-producer": () => [
+    {
+      title: "Brand jingle",
+      description: "Translate a brand brief into a music prompt and generate a short jingle.",
+      origin: { task: "Compose a short brand jingle for the following brief. Write a concrete music prompt (genre, tempo/bpm, instruments, mood), add short singable lyrics if the brief wants vocals, then use media.music to generate it. Return the prompt (and lyrics) + the audio path.", createdAt: new Date().toISOString() },
+      plan: { steps: [], summary: undefined, waves: [] },
+      runCount: 0,
+    },
+    {
+      title: "Background track / bed",
+      description: "Produce a loopable instrumental bed matched to a placement (podcast, hold music, ad).",
+      origin: { task: "Produce a loopable instrumental background track for the following placement. Specify genre, tempo, instruments, and energy matched to the use, keep it unobtrusive, then use media.music (instrumental, no lyrics) to generate it. Return the prompt + the audio path.", createdAt: new Date().toISOString() },
+      plan: { steps: [], summary: undefined, waves: [] },
+      runCount: 0,
+    },
+    {
+      title: "Theme track from a mood",
+      description: "Turn a one-line mood/genre into a finished theme track.",
+      origin: { task: "Turn the following mood/genre description into a finished theme track. Expand it into a precise music prompt (genre, tempo, key/mood, instruments, feel), then use media.music to generate it. Return the prompt + the audio path, and suggest one variation worth trying.", createdAt: new Date().toISOString() },
+      plan: { steps: [], summary: undefined, waves: [] },
+      runCount: 0,
+    },
+  ],
+  "multimedia-producer": () => [
+    {
+      title: "Full content package",
+      description: "From one brief: script + voiceover + video clip + music bed, with an assembly note.",
+      origin: { task: "Produce a complete content package for the following brief. 1) A tight content plan (hook, message, CTA, format + length). 2) The script. 3) A voiceover via media.tts. 4) A video clip via media.video. 5) A music bed via media.music. Keep the tone cohesive across all three. End with an ASSEMBLY note (what plays when, where music ducks under voice, where the CTA lands). Return every prompt + every asset path/URL.", createdAt: new Date().toISOString() },
+      plan: { steps: [], summary: undefined, waves: [] },
+      runCount: 0,
+    },
+    {
+      title: "Social ad (voice + video)",
+      description: "A short ad: scripted voiceover over a generated video clip, tonally matched.",
+      origin: { task: "Make a short social ad for the following product/offer. Write a punchy script, narrate it with media.tts, and generate a matching vertical video clip with media.video (state aspect + first-second hook). Keep voice and visuals on-brand. Return the script, both prompts, and both asset paths, plus a one-line note on how they overlay.", createdAt: new Date().toISOString() },
+      plan: { steps: [], summary: undefined, waves: [] },
+      runCount: 0,
+    },
+    {
+      title: "Explainer with narration + music",
+      description: "An explainer: narrated script over a music bed, optionally with a visual.",
+      origin: { task: "Build a short explainer for the following topic. Write a clear spoken script, narrate it with media.tts, and produce a soft instrumental bed with media.music that sits under the voice. Optionally generate a supporting visual with media.video. Return the script, all prompts, all asset paths, and an assembly note on levels (voice over a quiet bed).", createdAt: new Date().toISOString() },
+      plan: { steps: [], summary: undefined, waves: [] },
+      runCount: 0,
+    },
+  ],
+  "aiia-finance": () => [
+    {
+      title: "AIIA financial dashboard (year)",
+      description: "Pull the AIIA yearly dashboard and explain the headline numbers, sourced.",
+      origin: { task: "Read the company's AIIA financial dashboard for the requested year (default to the current year if none is given). Use connector.call on the 'AIIA Finance' connector: GET /api/agent/dashboard?year=YYYY. Then explain the headline figures in plain cash terms — lead with the top number, then the breakdown, then what it means. Cite the endpoint + year for every figure. If the connector errors or returns no data, say so and stop rather than estimating.", createdAt: new Date().toISOString() },
+      plan: { steps: [], summary: undefined, waves: [] },
+      runCount: 0,
+    },
+    {
+      title: "AIIA finance overview",
+      description: "Fetch the AIIA agent/finance overview and summarise the current position.",
+      origin: { task: "Fetch the AIIA finance overview via connector.call on the 'AIIA Finance' connector: GET /api/agent. Summarise the current financial position from what AIIA returns — key balances/metrics first, then notable movements. Ground every number in the AIIA response and cite it. If AIIA is unreachable, report that plainly.", createdAt: new Date().toISOString() },
+      plan: { steps: [], summary: undefined, waves: [] },
+      runCount: 0,
+    },
+    {
+      title: "Year-over-year from AIIA",
+      description: "Compare two years from the AIIA dashboard and explain the variance.",
+      origin: { task: "Compare the company's finances across the two years the customer names (or the current year vs. the prior year). Use connector.call on the 'AIIA Finance' connector twice: GET /api/agent/dashboard?year=YYYY for each year. Present a side-by-side of the key lines with absolute and percentage variance, and a one-line explanation per material change. Cite the endpoint + each year. Do not estimate any figure AIIA can provide.", createdAt: new Date().toISOString() },
+      plan: { steps: [], summary: undefined, waves: [] },
+      runCount: 0,
+    },
+  ],
 };
 
 // The id namespace for persona-derived templates: `custom-<personaId>-...`.

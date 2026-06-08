@@ -27,7 +27,20 @@ export type GovernancePolicy = {
   name: string;        // filename without extension, used as the section header
   bytes: number;
   lastModified: string;
+  reference?: boolean; // true = a manual/reference doc — listed + downloadable, but NOT injected into the prompt prefix
 };
+
+// A doc can opt out of the guardrail prefix with frontmatter `reference: true`
+// (e.g. the API-creation blueprint — useful to agents on demand, but pure noise
+// prepended to every task). We only need to peek at the leading frontmatter.
+function isReferenceDoc(full: string): boolean {
+  try {
+    const head = readFileSync(full, "utf8").slice(0, 1024);
+    const m = head.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+    if (!m) return false;
+    return /^\s*reference\s*:\s*true\s*$/im.test(m[1]);
+  } catch { return false; }
+}
 
 let prefixCache: { value: string; builtAt: number } | null = null;
 let listCache: { value: GovernancePolicy[]; builtAt: number } | null = null;
@@ -61,6 +74,7 @@ export function listGovernance(): GovernancePolicy[] {
           name: f.replace(/\.md$/i, ""),
           bytes: st.size,
           lastModified: st.mtime.toISOString(),
+          reference: isReferenceDoc(full),
         });
       } catch { /* tolerate one bad file */ }
     }
@@ -93,6 +107,9 @@ export function loadGovernancePrefix(): string {
   let included = 0;
   let skipped = 0;
   for (const p of policies) {
+    // Reference/manual docs are listed + downloadable on the page but are NOT
+    // guardrails — keep them out of the system-prompt prefix.
+    if (p.reference) continue;
     try {
       const body = readFileSync(join(root, p.path.replace(`${POLICY_DIR_REL}/`, "")), "utf8").trim();
       const header = `--- Policy: ${p.name} ---`;

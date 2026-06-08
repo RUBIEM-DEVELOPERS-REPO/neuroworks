@@ -9,6 +9,7 @@
 // disable it. Default is locked-down.
 
 import { resolve, basename } from "node:path";
+import { lookup } from "node:dns/promises";
 
 // Path patterns that look like they target known sensitive files. Matched
 // against the FULL resolved path so an LLM that hands us "../../.env" gets
@@ -159,6 +160,60 @@ export function assertSafeExternalPath(rawPath: string): void {
 
 export function assertSafePublicUrl(url: string): void {
   const check = checkPrivateAddress(url);
+  if (check.blocked) {
+    throw new Error(
+      `Refused to fetch "${url}" — target ${check.host ?? "address"} is ${check.reason}. ` +
+      `Agent web tools are restricted to the public internet to prevent SSRF. ` +
+      `Set CLAWBOT_WEB_ALLOW_PRIVATE=1 in .env if you genuinely need to reach internal hosts.`,
+    );
+  }
+}
+
+// Async SSRF check that ALSO resolves the hostname and re-checks the resolved
+// IP(s) against the private ranges. The sync checkPrivateAddress only catches
+// IP literals + internal TLDs — a public hostname (e.g. attacker.com or an
+// xip.io-style name) pointing at 169.254.169.254 / 127.0.0.1 / 10.x would slip
+// past it and hit cloud metadata or an internal service. This closes that
+// DNS-based bypass. Not fully TOCTOU-proof (DNS can change between this check
+// and the actual fetch), but strong defense-in-depth.
+export async function checkPrivateAddressAsync(url: string): Promise<PrivateAddressCheck> {
+  const sync = checkPrivateAddress(url);
+  if (sync.blocked) return sync;
+  if (process.env.CLAWBOT_WEB_ALLOW_PRIVATE === "1") return { blocked: false };
+  let host = "";
+  try { host = new URL(url).hostname.toLowerCase().replace(/^\[|\]$/g, ""); } catch { return { blocked: false }; }
+  // Already an IP literal (v4 or v6) → the sync pass already evaluated it.
+  if (!host || ipToInt(host) !== null || host.includes(":")) return { blocked: false };
+
+  let addrs: { address: string; family: number }[] = [];
+  try { addrs = await lookup(host, { all: true }); }
+  catch { return { blocked: false }; } // resolution failure → let the fetch fail naturally
+
+  const v4Private = (ip: string): string | null => {
+    const n = ipToInt(ip);
+    if (n === null) return null;
+    for (const r of IPV4_PRIVATE_RANGES) if (n >= r.from && n <= r.to) return r.reason;
+    return null;
+  };
+  for (const a of addrs) {
+    const ip = a.address.toLowerCase();
+    if (a.family === 4) {
+      const why = v4Private(ip);
+      if (why) return { blocked: true, reason: `${host} resolves to ${ip} (${why})`, host };
+    } else {
+      if (ip === "::1" || ip.startsWith("fe80:") || ip.startsWith("fc") || ip.startsWith("fd")) {
+        return { blocked: true, reason: `${host} resolves to ${ip} (IPv6 loopback/link-local/unique-local)`, host };
+      }
+      const mapped = ip.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/); // IPv4-mapped IPv6
+      const why = mapped ? v4Private(mapped[1]) : null;
+      if (why) return { blocked: true, reason: `${host} resolves to ${ip} (${why})`, host };
+    }
+  }
+  return { blocked: false };
+}
+
+export async function assertSafePublicUrlAsync(url: string): Promise<void> {
+  const check = await checkPrivateAddressAsync(url);
   if (check.blocked) {
     throw new Error(
       `Refused to fetch "${url}" — target ${check.host ?? "address"} is ${check.reason}. ` +

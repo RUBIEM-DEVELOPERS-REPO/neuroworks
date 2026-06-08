@@ -1,6 +1,6 @@
 import { existsSync, readdirSync, readFileSync, statSync, appendFileSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
-import { resolve, basename, extname, sep, join } from "node:path";
+import { resolve, basename, extname, sep, join, dirname } from "node:path";
 import { config } from "../config.js";
 import { ollamaGenerate, ollamaGenerateWithMeta } from "./ollama.js";
 import { listVault, readVaultFile, searchVault, writeVaultFile, importBinaryIntoVault } from "./vault.js";
@@ -82,6 +82,22 @@ export function cacheListing(roots: string[], depth: number, files: FindCacheEnt
     rootMtimes: currentRootMtimes(roots),
     files,
   });
+}
+
+// Editor / OS junk that should never be returned as a "document" by file search.
+// The big one: Office owner-lock stubs named "~$<file>.docx" — tiny (~162-byte)
+// non-document files Office writes while a doc is open. They share the real
+// file's name, sort newest-first, and aren't valid zip/docx, so an extractor
+// hits "zip container cannot be read". Also: temp/partial downloads and
+// Windows Thumbs.db. Caller already skips dotfiles separately.
+export function isJunkFileName(name: string): boolean {
+  return (
+    /^~\$/.test(name) ||                         // Office owner-lock stub (~$Report.docx)
+    /^~wrl\d+\.tmp$/i.test(name) ||              // Word temp file
+    /\.(tmp|temp|crdownload|part|partial|download)$/i.test(name) || // in-progress / temp
+    name.toLowerCase() === "thumbs.db" ||
+    name.toLowerCase() === "desktop.ini"
+  );
 }
 
 export const primitives: Primitive[] = [
@@ -495,6 +511,7 @@ export const primitives: Primitive[] = [
         try { xs = readdirSync(dir, { withFileTypes: true }); } catch { return; }
         for (const e of xs) {
           if (e.name.startsWith(".")) continue;
+          if (isJunkFileName(e.name)) continue; // hide Office lock stubs / temp / Thumbs.db
           const full = join(dir, e.name);
           let st: any; try { st = statSync(full); } catch { continue; }
           entries.push({ path: full, name: e.name, type: e.isDirectory() ? "dir" : "file", size: st.size, modified: st.mtime?.toISOString() });
@@ -504,6 +521,66 @@ export const primitives: Primitive[] = [
       }
       walk(root, 1);
       return { root, count: entries.length, entries };
+    },
+  },
+  {
+    name: "fs.extract_zip",
+    description: "Extract a .zip archive on the user's machine into a folder, then return the list of files it contained. Use when the user says 'extract/unzip X', or when a task needs the contents of a .zip you found. Path MUST be an absolute path (e.g. $step_N.matches.0.path from fs.find_in). Extracts to a sibling '<name>-extracted/' folder unless 'dest' is given; read the resulting files with fs.read_external afterward. NOTE: .docx/.xlsx/.pptx are technically zips too but are handled by fs.read_external / doc.ocr — use this only for real .zip archives.",
+    readonly: false,
+    args: [
+      { name: "path", type: "string", required: true, description: "Absolute path to the .zip file" },
+      { name: "dest", type: "string", required: false, description: "Destination folder (default: a sibling '<name>-extracted' folder beside the archive)" },
+    ],
+    handler: async (args) => {
+      const raw = String(args.path ?? "").trim();
+      if (!raw) throw new Error("fs.extract_zip: 'path' is required");
+      const zipPath = resolve(raw);
+      const { assertSafeExternalPath } = await import("./security-gates.js");
+      assertSafeExternalPath(zipPath);
+      if (!existsSync(zipPath) || !statSync(zipPath).isFile()) throw new Error(`fs.extract_zip: no file at ${zipPath}`);
+      const dest = resolve(String(args.dest ?? "").trim() || join(dirname(zipPath), `${basename(zipPath, extname(zipPath))}-extracted`));
+      assertSafeExternalPath(dest);
+
+      let AdmZip: any;
+      try { AdmZip = (await import("adm-zip")).default ?? (await import("adm-zip")); }
+      catch { throw new Error("zip support not installed — run `pnpm -C server add adm-zip`"); }
+      let zip: any;
+      try { zip = new AdmZip(zipPath); }
+      catch (e: any) { return { error: `not a readable zip archive (it may be corrupt or not actually a zip): ${e?.message ?? e}` }; }
+
+      let entries: any[];
+      try { entries = zip.getEntries(); }
+      catch (e: any) { return { error: `could not read the zip directory: ${e?.message ?? e}` }; }
+
+      // Zip-bomb guard: cap entry count + total uncompressed size.
+      const MAX_ENTRIES = 2000, MAX_TOTAL = 500 * 1024 * 1024;
+      let total = 0;
+      for (const en of entries) total += Number(en?.header?.size ?? 0);
+      if (entries.length > MAX_ENTRIES) return { error: `refused: archive has ${entries.length} entries (cap ${MAX_ENTRIES})` };
+      if (total > MAX_TOTAL) return { error: `refused: archive expands to ~${Math.round(total / 1048576)}MB (cap ${Math.round(MAX_TOTAL / 1048576)}MB)` };
+
+      // Zip-slip guard: every entry must resolve INSIDE dest (no "../" escapes,
+      // no absolute paths). Validate ALL before extracting anything.
+      const destPrefix = dest.endsWith(sep) ? dest : dest + sep;
+      for (const en of entries) {
+        const target = resolve(dest, en.entryName);
+        if (target !== dest && !target.startsWith(destPrefix)) {
+          return { error: `refused: archive entry "${en.entryName}" would write outside the destination (zip-slip attempt)` };
+        }
+      }
+      try { zip.extractAllTo(dest, /* overwrite */ true); }
+      catch (e: any) { return { error: `extraction failed: ${e?.message ?? e}` }; }
+
+      const files = entries
+        .filter((en: any) => !en.isDirectory)
+        .map((en: any) => ({ name: String(en.entryName), size: Number(en?.header?.size ?? 0) }));
+      return {
+        ok: true,
+        extractedTo: dest,
+        fileCount: files.length,
+        files: files.slice(0, 200),
+        truncated: files.length > 200,
+      };
     },
   },
   {
@@ -723,6 +800,7 @@ export const primitives: Primitive[] = [
           try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return; }
           for (const e of entries) {
             if (e.name.startsWith(".")) continue; // skip hidden / dotfiles
+            if (isJunkFileName(e.name)) continue;  // skip Office lock stubs (~$x.docx), temp/partial downloads, Thumbs.db
             const full = join(dir, e.name);
             if (e.isDirectory()) {
               // Directories are now candidate matches too — "summarize
@@ -1461,10 +1539,12 @@ ${vaultHits.slice(0, 8).map(h => `- [[${h.path}]] (line ${h.line})`).join("\n") 
       { name: "in_reply_to", type: "string", required: false, description: "Optional Message-ID of the message being replied to" },
     ],
     handler: async (args) => {
-      const { sendEmail } = await import("./email.js");
+      const { sendEmail, coerceEmailBody } = await import("./email.js");
       const to = String(args.to ?? "").trim();
       const subject = String(args.subject ?? "").trim();
-      const body = String(args.body ?? "").trim();
+      // Body may arrive as a prior step's result OBJECT, not a string — coerce
+      // to readable markdown (pulls .answer/.text/etc.) instead of "[object Object]".
+      const body = coerceEmailBody(args.body).trim();
       const inReplyTo = args.in_reply_to ? String(args.in_reply_to).trim() : undefined;
       return await sendEmail({ to, subject, body, inReplyTo });
     },
@@ -1513,11 +1593,11 @@ ${vaultHits.slice(0, 8).map(h => `- [[${h.path}]] (line ${h.line})`).join("\n") 
   },
   {
     name: "db.query",
-    description: "Run a read-only SQL query (SELECT / WITH / SHOW / EXPLAIN / DESCRIBE / PRAGMA) against a registered company database. Pass source_id from db.list_sources. Returns { rows, columns, rowCount, truncated } — first 200 rows.",
+    description: "Run a read-only query against a registered company database. Pass source_id from db.list_sources. For SQL engines (postgres/mysql/sqlite/mssql) pass a SELECT/WITH/SHOW/EXPLAIN/DESCRIBE/PRAGMA statement. For MongoDB pass a JSON document instead of SQL — e.g. {\"collection\":\"orders\",\"filter\":{\"status\":\"open\"},\"limit\":50}, or {\"collection\":\"x\",\"aggregate\":[...]}, or {\"collection\":\"x\",\"count\":true,\"filter\":{...}}. Returns { rows, columns, rowCount, truncated } — first 200 rows.",
     readonly: true,
     args: [
       { name: "source_id", type: "string", required: true, description: "id from db.list_sources" },
-      { name: "sql", type: "string", required: true, description: "Read-only SQL query" },
+      { name: "sql", type: "string", required: true, description: "Read-only SQL statement, OR a MongoDB JSON query document for mongodb sources" },
     ],
     handler: async (args) => {
       const { getSource, runQuery } = await import("./data-sources.js");
@@ -1919,13 +1999,16 @@ When you're uncertain about citation_coverage, lean higher when you see [N] or [
     handler: async (args) => {
       const { loadJobsInWindow } = await import("./job-store.js");
       const { listJobs } = await import("./jobs.js");
+      // Bucket by LOCAL calendar day (server timezone == operator's) so "today"
+      // / "yesterday" line up with the wall clock, not UTC.
+      const localYmd = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
       const today = new Date();
-      const defTo = today.toISOString().slice(0, 10);
-      const def = new Date(today.getTime() - 13 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+      const defTo = localYmd(today);
+      const def = localYmd(new Date(today.getTime() - 13 * 24 * 60 * 60 * 1000));
       const from = String(args.from ?? def);
       const to = String(args.to ?? defTo);
-      const fromMs = Date.parse(from + "T00:00:00.000Z");
-      const toMs = Date.parse(to + "T23:59:59.999Z");
+      const fromMs = Date.parse(from + "T00:00:00.000");
+      const toMs = Date.parse(to + "T23:59:59.999");
       const merged = new Map<string, any>();
       for (const j of loadJobsInWindow(fromMs, toMs)) merged.set(j.id, j);
       for (const j of listJobs()) {
@@ -1934,7 +2017,7 @@ When you're uncertain about citation_coverage, lean higher when you see [N] or [
       }
       const days = new Map<string, any[]>();
       for (const j of merged.values()) {
-        const k = (j.finishedAt ?? j.startedAt).slice(0, 10);
+        const k = localYmd(new Date(j.finishedAt ?? j.startedAt));
         if (!days.has(k)) days.set(k, []);
         days.get(k)!.push({
           id: j.id, kind: j.kind, template: j.template, title: j.title,
@@ -1954,9 +2037,10 @@ When you're uncertain about citation_coverage, lean higher when you see [N] or [
       { name: "date", type: "string", required: false, description: "Target date YYYY-MM-DD (default: today)" },
     ],
     handler: async (args) => {
-      const date = String(args.date ?? new Date().toISOString().slice(0, 10));
-      const fromMs = Date.parse(date + "T00:00:00.000Z");
-      const toMs = Date.parse(date + "T23:59:59.999Z");
+      const localYmd = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+      const date = String(args.date ?? localYmd(new Date()));
+      const fromMs = Date.parse(date + "T00:00:00.000");
+      const toMs = Date.parse(date + "T23:59:59.999");
       const { loadJobsInWindow } = await import("./job-store.js");
       const { listJobs } = await import("./jobs.js");
       const merged = new Map<string, any>();
@@ -2308,6 +2392,220 @@ When you're uncertain about citation_coverage, lean higher when you see [N] or [
       if (!text) return { error: "text is required" };
       const r = await fetch(conn.secrets.webhookUrl, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ content: text.slice(0, 2000) }) });
       return (r.ok || r.status === 204) ? { ok: true, posted: true } : { error: `discord ${r.status}: ${(await r.text()).slice(0, 200)}` };
+    },
+  },
+  {
+    name: "msteams.post",
+    description: "Post a message to the user's connected Microsoft Teams channel (via the saved Incoming Webhook). Use to notify a team of a result/alert. Requires a Microsoft Teams connection on the Integrations page.",
+    readonly: false,
+    args: [{ name: "text", type: "string", required: true, description: "Message text (Markdown supported in Teams)" }],
+    handler: async (args) => {
+      const { getConnectionByProvider } = await import("./integrations.js");
+      const conn = getConnectionByProvider("msteams");
+      if (!conn?.secrets?.webhookUrl) return { error: "no Microsoft Teams connection — add one on the Integrations page" };
+      const text = String(args.text ?? "").trim();
+      if (!text) return { error: "text is required" };
+      const r = await fetch(conn.secrets.webhookUrl, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text }) });
+      return r.ok ? { ok: true, posted: true } : { error: `msteams ${r.status}: ${(await r.text()).slice(0, 200)}` };
+    },
+  },
+  {
+    name: "googlechat.post",
+    description: "Post a message to the user's connected Google Chat space (via the saved webhook). Requires a Google Chat connection on the Integrations page.",
+    readonly: false,
+    args: [{ name: "text", type: "string", required: true, description: "Message text" }],
+    handler: async (args) => {
+      const { getConnectionByProvider } = await import("./integrations.js");
+      const conn = getConnectionByProvider("googlechat");
+      if (!conn?.secrets?.webhookUrl) return { error: "no Google Chat connection — add one on the Integrations page" };
+      const text = String(args.text ?? "").trim();
+      if (!text) return { error: "text is required" };
+      const r = await fetch(conn.secrets.webhookUrl, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text }) });
+      return r.ok ? { ok: true, posted: true } : { error: `googlechat ${r.status}: ${(await r.text()).slice(0, 200)}` };
+    },
+  },
+  {
+    name: "webhook.post",
+    description: "POST a JSON payload ({ text, source }) to the user's connected custom Webhook endpoint (Zapier/Make/n8n/own service). Use to push a result into an external automation. Requires a 'Webhook (custom)' connection on the Integrations page.",
+    readonly: false,
+    args: [{ name: "text", type: "string", required: true, description: "Payload text — sent as { text, source: 'neuroworks' }" }],
+    handler: async (args) => {
+      const { getConnectionByProvider } = await import("./integrations.js");
+      const conn = getConnectionByProvider("webhook");
+      if (!conn?.secrets?.webhookUrl) return { error: "no custom Webhook connection — add one on the Integrations page" };
+      const text = String(args.text ?? "").trim();
+      if (!text) return { error: "text is required" };
+      const r = await fetch(conn.secrets.webhookUrl, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text, source: "neuroworks" }) });
+      return r.status < 500 ? { ok: true, posted: true, status: r.status } : { error: `webhook ${r.status}: ${(await r.text()).slice(0, 200)}` };
+    },
+  },
+  {
+    name: "connector.list",
+    description: "List the company systems (external HTTP APIs) the operator has registered as Connectors. Use to discover which in-house/third-party systems you can read from or act on before reaching for connector.call. Returns id, label, baseUrl, description and a count of documented endpoints — never credentials.",
+    readonly: true,
+    args: [],
+    handler: async () => {
+      const { listConnectors } = await import("./connectors.js");
+      return {
+        connectors: listConnectors().map(c => ({
+          id: c.id, label: c.label, baseUrl: c.baseUrl, description: c.description,
+          writeEnabled: c.writeEnabled, endpoints: c.endpoints?.length ?? 0,
+          auth: c.auth.type, lastTest: c.lastTest,
+        })),
+      };
+    },
+  },
+  {
+    name: "connector.describe",
+    description: "Read the full manifest of one registered company-system Connector so you understand how to call it: its baseUrl, auth scheme, and the named endpoints (method + path + description + documented params). Always describe a connector before calling it. Pass the connector id or label. Never returns secrets.",
+    readonly: true,
+    args: [{ name: "connector", type: "string", required: true, description: "Connector id or label" }],
+    handler: async (args) => {
+      const { getConnectorPublic } = await import("./connectors.js");
+      const c = getConnectorPublic(String(args.connector ?? ""));
+      if (!c) return { error: `connector "${args.connector}" not found — list connectors first` };
+      return {
+        id: c.id, label: c.label, baseUrl: c.baseUrl, description: c.description,
+        auth: c.auth, writeEnabled: c.writeEnabled, headers: c.headers ? Object.keys(c.headers) : [],
+        endpoints: c.endpoints ?? [],
+      };
+    },
+  },
+  {
+    name: "connector.call",
+    description: "Make an authenticated HTTP request to a registered company-system Connector. Credentials are applied automatically from the stored connector — never include keys/tokens yourself. Calls are READ-ONLY (GET/HEAD) unless the operator enabled writes on that connector. Path is relative to the connector's baseUrl (e.g. '/v1/invoices' or '/customers/123'); cross-origin paths are rejected. Returns { ok, status, body } with the response (JSON parsed when possible).",
+    readonly: false,
+    args: [
+      { name: "connector", type: "string", required: true, description: "Connector id or label" },
+      { name: "path", type: "string", required: true, description: "Path relative to the connector baseUrl, e.g. /v1/orders" },
+      { name: "method", type: "string", required: false, description: "HTTP method (default GET). Non-GET requires the connector to have writes enabled." },
+      { name: "query", type: "string", required: false, description: "Query params as a flat JSON object, e.g. {\"status\":\"open\",\"limit\":50}" },
+      { name: "body", type: "string", required: false, description: "Request body as JSON (or a raw string). Only used for non-GET methods." },
+    ],
+    handler: async (args) => {
+      const { callConnector } = await import("./connectors.js");
+      // query/body may arrive as a real object (planner emitted JSON) or a
+      // JSON string (LLM stringified it) — accept both.
+      const coerce = (v: any): any => {
+        if (v === undefined || v === null || v === "") return undefined;
+        if (typeof v === "string") { try { return JSON.parse(v); } catch { return v; } }
+        return v;
+      };
+      const query = coerce(args.query);
+      const result = await callConnector(String(args.connector ?? ""), {
+        method: args.method ? String(args.method) : "GET",
+        path: String(args.path ?? ""),
+        query: (query && typeof query === "object") ? query as Record<string, any> : undefined,
+        body: coerce(args.body),
+      });
+      return result;
+    },
+  },
+  {
+    name: "payment.link",
+    description: "Create a payment link to BILL A CLIENT for a given amount, using the operator's connected Stripe account. Use when asked to 'send a payment link', 'invoice the client', 'collect R/$X', or 'charge the customer'. Returns { url } — a hosted page the client pays on. Amount is in major units (e.g. 4999.00). Requires Stripe configured (Settings → Payments).",
+    readonly: false,
+    args: [
+      { name: "amount", type: "number", required: true, description: "Amount in major units, e.g. 4999.00" },
+      { name: "description", type: "string", required: true, description: "What the payment is for (shown to the payer)" },
+      { name: "currency", type: "string", required: false, description: "ISO currency (default from config, e.g. zar/usd)" },
+    ],
+    handler: async (args) => {
+      const { config } = await import("../config.js");
+      if (!config.paymentsEnabled) return { error: "payments not configured — set STRIPE_SECRET_KEY (Settings → Payments)" };
+      const amount = Number(args.amount);
+      if (!Number.isFinite(amount) || amount <= 0) return { error: "amount must be a positive number" };
+      const description = String(args.description ?? "").trim();
+      if (!description) return { error: "description is required" };
+      try {
+        const { createPaymentLink } = await import("./payments.js");
+        const link = await createPaymentLink({ amount, description, currency: args.currency ? String(args.currency) : undefined });
+        return { ok: true, url: link.url, amount: link.amount, currency: link.currency, description: link.description };
+      } catch (e: any) {
+        return { error: String(e?.message ?? e) };
+      }
+    },
+  },
+  {
+    name: "payment.status",
+    description: "Check whether the payment gateway (Stripe) is configured and reachable, and which currency it settles in. Use before attempting payment.link if unsure. Returns { enabled, provider, currency, account? }.",
+    readonly: true,
+    args: [],
+    handler: async () => {
+      const { gatewayStatus } = await import("./payments.js");
+      const s = await gatewayStatus();
+      return { enabled: s.enabled, provider: s.provider, currency: s.currency, account: s.account, detail: s.detail };
+    },
+  },
+  {
+    name: "payment.list",
+    description: "List recent payments (payment intents) from the operator's Stripe account — id, amount, currency, status. Use for revenue/collections questions like 'what came in this week' or 'has the client paid'. Requires Stripe configured.",
+    readonly: true,
+    args: [{ name: "limit", type: "number", required: false, description: "How many to return (default 20, max 100)" }],
+    handler: async (args) => {
+      const { config } = await import("../config.js");
+      if (!config.paymentsEnabled) return { error: "payments not configured — set STRIPE_SECRET_KEY (Settings → Payments)" };
+      try {
+        const { listPayments } = await import("./payments.js");
+        return { payments: await listPayments(Number(args.limit) || 20) };
+      } catch (e: any) {
+        return { error: String(e?.message ?? e) };
+      }
+    },
+  },
+  {
+    name: "media.tts",
+    description: "Generate spoken-audio narration of text using MiniMax text-to-speech. Use when the user asks to 'read this aloud', 'make a voiceover/narration', 'turn this into audio', or wants an audio version of a briefing/summary. Returns { path, bytes, model } — a local .mp3 the user can play. Requires MINIMAX_API_KEY (Integrations → MiniMax).",
+    readonly: false,
+    args: [
+      { name: "text", type: "string", required: true, description: "The text to speak (markdown is stripped automatically before speaking)" },
+      { name: "voice_id", type: "string", required: false, description: "Optional MiniMax voice id (default 'male-qn-qingse')" },
+      { name: "emotion", type: "string", required: false, description: "Optional emotion: happy, sad, angry, fearful, disgusted, surprised, neutral" },
+    ],
+    handler: async (args) => {
+      const { config } = await import("../config.js");
+      if (!config.minimaxEnabled) return { error: "MiniMax not configured — add MINIMAX_API_KEY to enable text-to-speech." };
+      const { minimaxTts } = await import("./minimax.js");
+      const text = String(args.text ?? "").trim().replace(/[#*`_>]/g, "");
+      if (!text) return { error: "text is required" };
+      return await minimaxTts(text, {
+        voiceId: args.voice_id ? String(args.voice_id) : undefined,
+        emotion: args.emotion ? String(args.emotion) : undefined,
+      });
+    },
+  },
+  {
+    name: "media.video",
+    description: "Generate a short video from a text prompt (optionally an image as the first frame) using MiniMax Hailuo. Use for 'make a video of…', 'generate a clip…', 'animate this scene'. Async — can take a few minutes. Returns { downloadUrl, taskId, model }. Requires MINIMAX_API_KEY.",
+    readonly: false,
+    args: [
+      { name: "prompt", type: "string", required: true, description: "Description of the video to generate" },
+      { name: "first_frame_image", type: "string", required: false, description: "Optional public image URL or data URI to use as the opening frame (image-to-video)" },
+    ],
+    handler: async (args) => {
+      const { config } = await import("../config.js");
+      if (!config.minimaxEnabled) return { error: "MiniMax not configured — add MINIMAX_API_KEY to enable video generation." };
+      const { minimaxVideo } = await import("./minimax.js");
+      const prompt = String(args.prompt ?? "").trim();
+      if (!prompt) return { error: "prompt is required" };
+      return await minimaxVideo(prompt, { firstFrameImage: args.first_frame_image ? String(args.first_frame_image) : undefined });
+    },
+  },
+  {
+    name: "media.music",
+    description: "Generate a music track from a style/mood prompt (and optional lyrics) using MiniMax music. Use for 'compose a jingle/theme/track', 'make background music'. Returns { path, bytes, model } — a local .mp3. Requires MINIMAX_API_KEY.",
+    readonly: false,
+    args: [
+      { name: "prompt", type: "string", required: true, description: "Style / mood / genre description (e.g. 'upbeat corporate intro, 120bpm, piano + strings')" },
+      { name: "lyrics", type: "string", required: false, description: "Optional lyrics to sing" },
+    ],
+    handler: async (args) => {
+      const { config } = await import("../config.js");
+      if (!config.minimaxEnabled) return { error: "MiniMax not configured — add MINIMAX_API_KEY to enable music generation." };
+      const { minimaxMusic } = await import("./minimax.js");
+      const prompt = String(args.prompt ?? "").trim();
+      if (!prompt) return { error: "prompt is required" };
+      return await minimaxMusic(prompt, { lyrics: args.lyrics ? String(args.lyrics) : undefined });
     },
   },
 ];

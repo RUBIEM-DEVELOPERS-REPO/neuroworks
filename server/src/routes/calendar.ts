@@ -24,7 +24,21 @@ type DayJob = {
   scoreOrNull?: number | null;
 };
 
-function dayKey(iso: string): string { return iso.slice(0, 10); }
+// Bucket by LOCAL calendar day. The server runs on the operator's machine, so
+// its local timezone matches theirs — using the raw UTC slice (iso.slice(0,10))
+// would put late-evening / early-morning jobs on the wrong day for any non-UTC
+// timezone. localYmd matches the LOCAL date the Calendar UI renders.
+function localYmd(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+function dayKey(iso: string): string { return localYmd(new Date(iso)); }
+// Local-day bounds in ms. A date-time string without a timezone suffix is
+// parsed as LOCAL by V8, so "<date>T00:00:00" is local midnight.
+const localDayStart = (date: string) => Date.parse(date + "T00:00:00.000");
+const localDayEnd = (date: string) => Date.parse(date + "T23:59:59.999");
 
 function jobsInRange(fromMs: number, toMs: number): DayJob[] {
   // Merge persisted (older) + in-memory (recent) so the calendar covers a
@@ -66,20 +80,21 @@ function jobsInRange(fromMs: number, toMs: number): DayJob[] {
 calendarRouter.get("/activity", (req, res) => {
   try {
     const today = new Date();
-    const defTo = today.toISOString().slice(0, 10);
-    const def = new Date(today.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    const defTo = localYmd(today);
+    const def = localYmd(new Date(today.getTime() - 30 * 24 * 60 * 60 * 1000));
     const from = String(req.query.from ?? def);
     const to = String(req.query.to ?? defTo);
     if (!/^\d{4}-\d{2}-\d{2}$/.test(from) || !/^\d{4}-\d{2}-\d{2}$/.test(to)) {
       return res.status(400).json({ error: "from/to must be YYYY-MM-DD" });
     }
-    const fromMs = Date.parse(from + "T00:00:00.000Z");
-    const toMs = Date.parse(to + "T23:59:59.999Z");
+    const fromMs = localDayStart(from);
+    const toMs = localDayEnd(to);
     const jobs = jobsInRange(fromMs, toMs);
     const days = new Map<string, { date: string; jobs: DayJob[] }>();
-    // Pre-seed every day in the window so empty days render in the UI.
-    for (let d = new Date(from); d.toISOString().slice(0, 10) <= to; d.setUTCDate(d.getUTCDate() + 1)) {
-      const k = d.toISOString().slice(0, 10);
+    // Pre-seed every day in the window so empty days render in the UI. Iterate
+    // from local noon to dodge DST edges when stepping by calendar date.
+    for (let d = new Date(from + "T12:00:00"); localYmd(d) <= to; d.setDate(d.getDate() + 1)) {
+      const k = localYmd(d);
       days.set(k, { date: k, jobs: [] });
     }
     for (const j of jobs) {
@@ -99,10 +114,10 @@ calendarRouter.get("/activity", (req, res) => {
 // meetings (from iCal if configured), and any scheduled tasks due today.
 calendarRouter.get("/agenda", async (req, res) => {
   try {
-    const date = String(req.query.date ?? new Date().toISOString().slice(0, 10));
+    const date = String(req.query.date ?? localYmd(new Date()));
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: "date must be YYYY-MM-DD" });
-    const fromMs = Date.parse(date + "T00:00:00.000Z");
-    const toMs = Date.parse(date + "T23:59:59.999Z");
+    const fromMs = localDayStart(date);
+    const toMs = localDayEnd(date);
     const jobs = jobsInRange(fromMs, toMs);
 
     let meetings: any[] = [];
@@ -112,7 +127,7 @@ calendarRouter.get("/agenda", async (req, res) => {
       try {
         const { readICalSource } = await import("../lib/calendar-ical.js");
         const all = await readICalSource(icalSource);
-        meetings = all.filter(e => e.start.slice(0, 10) === date).sort((a, b) => a.start.localeCompare(b.start));
+        meetings = all.filter(e => localYmd(new Date(e.start)) === date).sort((a, b) => a.start.localeCompare(b.start));
       } catch (e: any) { meetingsError = String(e?.message ?? e).slice(0, 200); }
     }
 

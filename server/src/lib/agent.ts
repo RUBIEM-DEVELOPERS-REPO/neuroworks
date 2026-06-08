@@ -287,7 +287,9 @@ export async function plan(task: string, _personaSystemSuffix?: string, push?: (
   const activityIntentRe = /\b(tasks?|did|done|complete[d]?|finish(ed)?|accomplish(ed)?|work(ed)?|shipp(ed)?|activit|progress|report)\b/i;
   if (timeWindowRe.test(task) && activityIntentRe.test(task)) {
     const now = new Date();
-    const iso = (d: Date) => d.toISOString().slice(0, 10);
+    // LOCAL calendar dates (server tz == operator's) so "today"/"yesterday"
+    // match the wall clock, not UTC — same off-by-one the Calendar had.
+    const iso = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
     const today = iso(now);
     const yesterday = iso(new Date(now.getTime() - 864e5));
     const weekAgo = iso(new Date(now.getTime() - 7 * 864e5));

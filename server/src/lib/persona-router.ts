@@ -126,6 +126,15 @@ const PERSONA_PATTERNS: PersonaPattern[] = [
     { re: /\b(?:draft|create|review|critique) (?:a |the )?wireframe\b/i, weight: 2 },
     /\bwireframe\b/i,
   ] },
+  // AIIA — live financials from the company's AIIA system (read via connector).
+  // Sits above financial-analyst: AIIA = reading real books, Fiona = modelling.
+  { personaId: "aiia-finance", patterns: [
+    { re: /\bAIIA\b/i, weight: 2 },
+    { re: /\bfinancial dashboard\b/i, weight: 2 },
+    { re: /\b(?:finance|financial|revenue|expense)\s+(?:dashboard|overview|figures?|numbers?|position)\b/i, weight: 2 },
+    { re: /\b(?:pull|fetch|read|show me|get)\s+(?:the\s+|our\s+|my\s+)?(?:live\s+)?(?:financials?|finance|dashboard)\b/i, weight: 2 },
+    { re: /\bdashboard\s+for\s+(?:year\s+)?\d{4}\b/i, weight: 2 },
+  ] },
   // Finance / Operations / Recruiting / Legal / Analyst / TechWriter / EA
   { personaId: "financial-analyst", patterns: [
     /\bcashflow\b/i,
@@ -196,6 +205,43 @@ const PERSONA_PATTERNS: PersonaPattern[] = [
     { re: /\bmeeting (?:agenda|prep)\b/i, weight: 2 },
     { re: /\btravel (?:plan|booking)\b/i, weight: 2 },
     { re: /\b(?:inbox|email) triage\b/i, weight: 2 },
+  ] },
+  // Media production — voice / video / music / multimedia. Shape matches on the
+  // produce-an-asset verb + medium; bare-medium keywords stay weight-1 so a
+  // passing mention ("the video call") can't hijack routing on its own.
+  { personaId: "voice-producer", patterns: [
+    { re: /\b(?:voice[\s-]?over|voiceover)\b/i, weight: 2 },
+    { re: /\b(?:narrat(?:e|ion)|read (?:this |it )?aloud)\b/i, weight: 2 },
+    { re: /\btext[\s-]?to[\s-]?speech\b/i, weight: 2 },
+    { re: /\b(?:audio|spoken) (?:version|briefing|summary)\b/i, weight: 2 },
+    { re: /\bIVR\b|\bphone (?:prompt|menu|greeting)\b/i, weight: 2 },
+    /\bTTS\b/, /\bpodcast intro\b/i,
+  ] },
+  { personaId: "video-producer", patterns: [
+    // Allow adjectives/quantifiers between the verb and the medium noun
+    // ("make a 9:16 social teaser", "generate a short product clip").
+    { re: /\b(?:make|create|generate|produce|render|shoot)\s+(?:[\w:.\-]+\s+){0,4}?(?:video|clip|reel|teaser|short)\b/i, weight: 2 },
+    { re: /\b(?:video|reel|tiktok|shorts) (?:clip|ad|teaser|prompt|generation)\b/i, weight: 2 },
+    { re: /\bimage[\s-]?to[\s-]?video\b/i, weight: 2 },
+    { re: /\bstoryboard\b/i, weight: 2 },
+    { re: /\bproduct teaser\b/i, weight: 2 },
+    /\bb[\s-]?roll\b/i,
+  ] },
+  { personaId: "music-producer", patterns: [
+    // Adjectives commonly sit between the verb and the noun ("compose a
+    // 10-second upbeat jingle") — allow up to 4 words in between.
+    { re: /\b(?:compose|generate|produce|write|make)\s+(?:[\w-]+\s+){0,4}?(?:jingle|music|track|theme|song|soundtrack|beat|tune)\b/i, weight: 2 },
+    { re: /\b(?:background|hold|theme|backing)\s+(?:music|song|track|tune)\b/i, weight: 2 },
+    { re: /\bjingle\b/i, weight: 2 },
+    /\bsoundtrack\b/i, /\bmusic track\b/i,
+  ] },
+  { personaId: "multimedia-producer", patterns: [
+    { re: /\b(?:content|media|video|ad) package\b/i, weight: 2 },
+    { re: /\b(?:script|storyboard) (?:\+|and) (?:voice(?:over)?|video|music|audio)\b/i, weight: 2 },
+    { re: /\bexplainer (?:video|with (?:voice|narration|music))\b/i, weight: 2 },
+    { re: /\b(?:social|video|content) ad\b.{0,30}\b(?:voice(?:over)?|narration|music|audio)\b/i, weight: 2 },
+    { re: /\b(?:voice(?:over)?|narration) (?:\+|and) (?:video|music)\b/i, weight: 2 },
+    { re: /\b(?:video|music) (?:\+|and) (?:voice(?:over)?|narration|music)\b/i, weight: 2 },
   ] },
   // Researcher — investigative shape (NOT the same as research.deep
   // primitive; this is when a HUMAN asks for multi-perspective work)

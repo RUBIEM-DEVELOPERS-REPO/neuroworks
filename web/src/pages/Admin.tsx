@@ -52,7 +52,7 @@ export function Admin() {
             <Card title="LLM backends">
               <LLMBackendBlock llm={llm} fallbackOllama={status.ollama} />
             </Card>
-            <Card title="Cloud worker (clawbot)" className="col-span-2">
+            <Card title="Cloud worker (Neuro)" className="col-span-2">
               {status.lastWorkflow?.error && <div className="text-xs text-coral-400">{status.lastWorkflow.error}</div>}
               {status.lastWorkflow && !status.lastWorkflow.error && (
                 <div className="text-sm space-y-1">
@@ -98,7 +98,7 @@ export function Admin() {
             <div className="text-[11px] text-cream-300/50 mt-4 leading-relaxed">
               <div className="text-cream-200 font-medium not-italic mb-1">How the workforce splits</div>
               <p className="italic">
-                The <span className="font-mono not-italic">persona-shifter</span> peer is the worker — by default <span className="text-cream-100 not-italic">every</span> ad-hoc chat task is delegated to it (planning, research, synthesis). The primary clawbot then acts as the editor: it scores the peer's output for quality, scans for secrets, and only captures answers that are rooted in real context (vault notes, URLs, GitHub refs) to your second brain at <span className="font-mono not-italic">0-Inbox/</span>. Set <span className="font-mono not-italic">CLAWBOT_DELEGATE_ALL=0</span> in <span className="font-mono not-italic">clawbot/.env</span> to revert to the older "delegate only on overload" routing.
+                The <span className="font-mono not-italic">persona-shifter</span> peer is the worker — by default <span className="text-cream-100 not-italic">every</span> ad-hoc chat task is delegated to it (planning, research, synthesis). The primary Neuro then acts as the editor: it scores the peer's output for quality, scans for secrets, and only captures answers that are rooted in real context (vault notes, URLs, GitHub refs) to your second brain at <span className="font-mono not-italic">0-Inbox/</span>. Set <span className="font-mono not-italic">CLAWBOT_DELEGATE_ALL=0</span> in <span className="font-mono not-italic">clawbot/.env</span> to revert to the older "delegate only on overload" routing.
               </p>
             </div>
           </Card>
@@ -331,7 +331,7 @@ function WorkerControls({ hasActive, registry, onChanged }: { hasActive: boolean
         >
           {scan.state === "running" ? "Scanning…" : "Find workers"}
         </button>
-        <span className="text-[11px] text-cream-300/50">Scans 127.0.0.1:7471–7475 for clawbot peers</span>
+        <span className="text-[11px] text-cream-300/50">Scans 127.0.0.1:7471–7475 for Neuro peers</span>
         {scan.state === "done" && scan.found! > 0 && (
           <span className="text-[11px] text-leaf-400">✓ found {scan.found} of {scan.tried}</span>
         )}
@@ -390,7 +390,7 @@ function ClawbotRow({ bot, isSelf = false }: { bot: any; isSelf?: boolean }) {
       <div className="w-10 h-10 rounded-lg bg-flame-500/15 grid place-items-center text-flame-400 text-xl flex-shrink-0">⌬</div>
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2 flex-wrap">
-          <span className="text-sm font-medium text-cream-50">{bot.name ?? "clawbot"}</span>
+          <span className="text-sm font-medium text-cream-50">{bot.name ?? "Neuro"}</span>
           <span className={`text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded border ${roleColor}`}>{role}</span>
           {isSelf && <span className="text-[10px] uppercase tracking-wider text-cream-300/40">this server</span>}
         </div>

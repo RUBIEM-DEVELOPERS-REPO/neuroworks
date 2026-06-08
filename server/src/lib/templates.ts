@@ -108,6 +108,19 @@ export const templates: Template[] = [
     estimateSeconds: 30,
   },
   {
+    id: "daily-briefing",
+    role: "Operations",
+    title: "Daily briefing",
+    description: "A short morning briefing — pulls recent vault activity, open follow-ups, and anything flagged, then writes a prioritised 'what to focus on today' digest. Pair with a Schedule (and optional email delivery) to get it every morning.",
+    icon: "broadcast",
+    agent: "clawbot",
+    inputs: [
+      { name: "focus", label: "Focus area (optional)", type: "text", placeholder: "leave blank for a general briefing" },
+    ],
+    requiresApproval: false,
+    estimateSeconds: 60,
+  },
+  {
     id: "sync-downloads",
     role: "Knowledge",
     title: "Sync downloads to vault",

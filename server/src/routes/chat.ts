@@ -7,9 +7,60 @@ import { searchVault } from "../lib/vault.js";
 import { getActivePersona, personaSystemSuffix } from "../lib/personas.js";
 import { autoRoutePersona } from "../lib/persona-router.js";
 import { checkLaneFit, buildOutOfLaneRefusal } from "../lib/lane.js";
-import { localInflightCount, pickLightestIdlePeer, pickPeerByRole, pickExecutor, delegateToPeer, type PeerInfo, type RoutingDecision } from "../lib/peers.js";
+import { localInflightCount, pickLightestIdlePeer, pickPeerByRole, pickExecutor, delegateToPeer, pollPeers, type PeerInfo, type RoutingDecision } from "../lib/peers.js";
 import { curatePeerOutput } from "../lib/curation.js";
 import { ensureWorker, ensureExtraWorker } from "../lib/worker-manager.js";
+import { isHermesPrimary, getHermesModelOverride } from "../lib/executor-mode.js";
+
+// Below this answer length (chars), a Hermes result is treated as "couldn't do
+// it" and offloaded to clawbot. Catches empty / no-final-response / stub replies.
+const HERMES_MIN_ANSWER = Number(process.env.CLAWBOT_HERMES_MIN_ANSWER ?? "40");
+// Master switch for the Hermes→clawbot offload (default on).
+const HERMES_FALLBACK = process.env.CLAWBOT_HERMES_FALLBACK !== "0";
+// Quality gate — also offload a present-but-WEAK Hermes answer (one that runs
+// clawbot's quality.check and doesn't pass), not just hard failures. Default on;
+// time-bounded + fail-safe (a scorer error/timeout keeps the Hermes answer).
+const HERMES_QUALITY_GATE = process.env.CLAWBOT_HERMES_QUALITY_GATE !== "0";
+const HERMES_QUALITY_TIMEOUT_MS = Number(process.env.CLAWBOT_HERMES_QUALITY_TIMEOUT_MS ?? "45000");
+
+// Run clawbot's quality.check on a Hermes answer. Returns { pass, score } or
+// null when the gate can't run (no primitive / scorer error / timeout) — in
+// which case the caller KEEPS the Hermes answer rather than offloading blind.
+async function scoreHermesAnswer(task: string, answer: string, personaContext?: string): Promise<{ pass: boolean; score: number } | null> {
+  try {
+    const { findPrimitive } = await import("../lib/primitives.js");
+    const prim = findPrimitive("quality.check");
+    if (!prim) return null;
+    const res: any = await Promise.race([
+      prim.handler({ task, answer, ...(personaContext ? { context: personaContext } : {}) }),
+      new Promise((_, rej) => setTimeout(() => rej(new Error("quality-gate timeout")), HERMES_QUALITY_TIMEOUT_MS)),
+    ]);
+    if (!res || typeof res !== "object") return null;
+    return { pass: res.pass !== false, score: typeof res.score === "number" ? res.score : NaN };
+  } catch {
+    return null; // scorer failed/timed out — don't penalize Hermes on our own gate's failure
+  }
+}
+
+// In-flight delegations not yet reflected in the peers' polled inflight counts.
+// A burst of concurrent chat requests all read the SAME cached poll (every
+// worker at 0), so without this they'd all pick the first worker and pile up —
+// the load test showed 4 concurrent tasks all landing on one agent. Counting
+// our own pending delegations per worker URL spreads the burst across the pool.
+const pendingByPeer = new Map<string, number>();
+function bumpPending(url: string, d: number) {
+  pendingByPeer.set(url, Math.max(0, (pendingByPeer.get(url) ?? 0) + d));
+}
+// Lightest persona-shifter worker by EFFECTIVE load (polled inflight + our
+// not-yet-visible pending delegations). Returns null when no worker is reachable.
+async function pickLeastLoadedWorker(): Promise<PeerInfo | null> {
+  const all = await pollPeers();
+  const workers = all.filter(p => p.ok && p.ready && (p.role ?? "").toLowerCase() === "persona-shifter");
+  if (workers.length === 0) return null;
+  const load = (p: PeerInfo) => (p.inflightJobs ?? 0) + (pendingByPeer.get(p.url) ?? 0);
+  workers.sort((a, b) => load(a) - load(b));
+  return workers[0];
+}
 
 // Local clawbot is "overloaded" when at least this many general-task jobs are
 // already running. Configurable via env so single-clawbot users can crank it up
@@ -228,11 +279,25 @@ async function handleChat(req: any, res: any) {
     !intentDetection.intent ||
     (intentDetection as any).followUpKind === "slot"
   );
+  // Self-contained message guard. A request that PASTES its own content
+  // (a ``` code fence, a quoted block, a colon-introduced block) or is long
+  // and detailed already carries everything we'd ask for — bouncing it to a
+  // "what should I work on?" clarification is the wrong move and infuriating.
+  // The slot extractors can still miss (e.g. a recipient mid-sentence, or a
+  // target that follows a newline), so this is the safety net that keeps a
+  // fully-specified ask from ever hitting a gate. Genuinely sketchy short
+  // inputs ("draft an email", "review this") stay gated — they're < 200 chars
+  // with no pasted block.
+  const hasCodeFence = /```|~~~/.test(text);
+  const hasPastedBlock = /:\s*\n[\s\S]{30,}/.test(text) || /["'""][\s\S]{60,}["""']/.test(text);
+  const isLongDetailed = text.length >= 200;
+  const isSelfContained = hasCodeFence || hasPastedBlock || isLongDetailed;
   // Skip the clarification gates entirely when the user is responding to
   // a prior "needs context" prompt — they have, by definition, already
   // satisfied a slot we asked about, so re-asking would loop. Also skip
-  // them when an attachment fills the missing slot (see above).
-  if (!useThreadContext && !isContinuation && !skipTargetGate && intentDetection.followUp) {
+  // them when an attachment fills the missing slot, or when the message is
+  // self-contained (see above).
+  if (!useThreadContext && !isContinuation && !skipTargetGate && !isSelfContained && intentDetection.followUp) {
     return res.json({
       kind: "message",
       text: intentDetection.followUp,
@@ -245,7 +310,7 @@ async function handleChat(req: any, res: any) {
       },
     });
   }
-  if (!useThreadContext && !isContinuation && !hasAttachments) {
+  if (!useThreadContext && !isContinuation && !hasAttachments && !isSelfContained) {
     const clarification = detectAmbiguity(text);
     if (clarification.ambiguous) {
       return res.json({
@@ -500,14 +565,23 @@ async function handleChat(req: any, res: any) {
   // inflight=2 — peer wins" instead of guessing why a task went where.
   let routingDecision: RoutingDecision | null = null;
 
-  if (DELEGATE_ALL) {
+  if (isHermesPrimary()) {
+    // Hermes is the primary executor — it does the work itself (locally,
+    // through the Hermes adapter below). Never delegate to a clawbot
+    // persona-shifter worker; the persona framing is injected into Hermes.
+    routingDecision = {
+      decision: "local",
+      localInflight: localInflightCount(),
+      candidates: [], reason: "primary executor = hermes — running through the Hermes agent",
+    };
+  } else if (DELEGATE_ALL) {
     try {
       // First pass: see if a persona-shifter is reachable. If yes, use the
       // load-aware picker so a busy persona-shifter doesn't suck up work
       // while local sits idle. If NO persona-shifter at all, fall through
       // to auto-spawn the worker so the route is at least set up.
-      let preliminaryPeer = await pickPeerByRole("persona-shifter");
-      if (!preliminaryPeer && process.env.CLAWBOT_AUTO_SPAWN_WORKER !== "0") {
+      let workerPeer = await pickLeastLoadedWorker();
+      if (!workerPeer && process.env.CLAWBOT_AUTO_SPAWN_WORKER !== "0") {
         try {
           const handle = await Promise.race([
             ensureWorker({ waitForReady: true }),
@@ -515,35 +589,41 @@ async function handleChat(req: any, res: any) {
               setTimeout(() => reject(new Error("spawn wait timeout")), 8_000),
             ),
           ]);
-          if (handle?.url) preliminaryPeer = await pickPeerByRole("persona-shifter");
+          if (handle?.url) workerPeer = await pickLeastLoadedWorker();
         } catch (e: any) {
           console.warn("[chat] worker spawn timed out:", e?.message ?? e);
         }
       }
-      // Now route by real load. preferRole biases toward persona-shifters,
-      // but falls back to ANY idle peer if the role pool is saturated.
-      routingDecision = await pickExecutor({ preferRole: "persona-shifter" });
-      if (routingDecision.decision === "peer" && routingDecision.peer) {
-        delegatedPeer = routingDecision.peer;
+      // DELEGATE_ALL contract: the primary is the EDITOR/curator — every ad-hoc
+      // task runs on a persona-shifter WORKER whenever one is reachable, so work
+      // actually lands on the pool and concurrent tasks fan out across it. The
+      // old code routed through pickExecutor, whose tie-break prefers LOCAL
+      // unless a worker is strictly lighter — so an idle primary kept everything
+      // and the workers sat at 0 inflight ("only one agent working", confirmed
+      // by the load test: 4 concurrent tasks → primary=4, workers=0). Delegate
+      // to the lightest worker directly; only run locally if none is reachable.
+      if (workerPeer) {
+        delegatedPeer = workerPeer;
         delegationReason = persona && persona.id !== "clawbot" ? "persona-shifter" : "worker";
-        // PARALLEL-SCALE: if the chosen worker is already running at least
-        // one job, fire-and-forget a spawn for an EXTRA worker. The current
-        // task still goes to the chosen peer (no point waiting on a 5-15s
-        // boot), but the next concurrent task hits the new worker instead
-        // of queuing. The pool cap (CLAWBOT_MAX_WORKERS, default 3) and
-        // the in-flight-spawn coalescer in worker-manager.ts decide whether
-        // an actual spawn happens — calling ensureExtraWorker at-cap is a
-        // cheap no-op, so we don't gate on the local count here.
-        const chosenInflight = delegatedPeer.inflightJobs ?? 0;
+        bumpPending(workerPeer.url, +1); // reserve a slot so a concurrent request picks a different worker
+        const eff = (workerPeer.inflightJobs ?? 0) + (pendingByPeer.get(workerPeer.url) ?? 0);
+        routingDecision = {
+          decision: "peer", peer: workerPeer,
+          localInflight: localInflightCount(), peerInflight: workerPeer.inflightJobs ?? 0,
+          candidates: [], reason: `DELEGATE_ALL → lightest worker ${workerPeer.name ?? workerPeer.url} (effective load ${eff})`,
+        };
+        // PARALLEL-SCALE: if the chosen worker already has work, spawn an extra
+        // (up to the pool cap) so the next concurrent task hits a fresh worker.
+        const chosenInflight = workerPeer.inflightJobs ?? 0;
         if (chosenInflight >= 1) {
           void ensureExtraWorker({
-            reason: `chosen worker ${delegatedPeer.name ?? delegatedPeer.url} has ${chosenInflight} inflight, scaling pool to handle the next concurrent task`,
+            reason: `chosen worker ${workerPeer.name ?? workerPeer.url} has ${chosenInflight} inflight, scaling pool`,
             waitForReady: false,
-          }).catch(() => { /* tolerate spawn failures — task still runs on the chosen peer */ });
+          }).catch(() => { /* tolerate — task still runs on the chosen peer */ });
         }
       }
     } catch (e: any) {
-      console.warn("[chat] pickExecutor failed:", e?.message ?? e);
+      console.warn("[chat] delegation pick failed:", e?.message ?? e);
     }
   } else {
     if (persona && persona.id !== "clawbot") {
@@ -695,6 +775,7 @@ async function handleChat(req: any, res: any) {
     const pinnedPeer = delegatedPeer;
     const pinnedDecision = routingDecision;
     void runJob(job, async (push, progress) => {
+     try {
       push(pinnedDecision?.reason ?? `Delegating this to ${pinnedPeer.name ?? pinnedPeer.url}.`);
       push(`Why I delegated: ${delegationReason}.`);
       // Use delegateToPeer (specific) instead of delegateToBestPeer (re-picks)
@@ -788,6 +869,11 @@ async function handleChat(req: any, res: any) {
         }
       }
       return { ...r, delegated: true, delegationReason, curation };
+     } finally {
+       // Release the reserved slot so the worker's effective load drops back
+       // and the next request can pick it again.
+       bumpPending(pinnedPeer.url, -1);
+     }
     });
   } else {
     // Local execution path — primary handles the work itself. This happens
@@ -798,7 +884,58 @@ async function handleChat(req: any, res: any) {
     const pinnedDecision = routingDecision;
     void runJob(job, async (push, progress) => {
       push(pinnedDecision?.reason ?? "Handling this myself — no peer workers are reachable.");
+
+      // HERMES PRIMARY (with OFFLOAD) — run the task through Hermes first,
+      // injecting the persona-shifter's PROMPT features (lane/voice +
+      // governance). Hermes also has clawbot's grounding tools via the MCP
+      // bridge. If Hermes CAN'T do it — errors, "no final response", or a
+      // too-thin answer — we OFFLOAD to clawbot's full pipeline below. Each
+      // agent does what it's best at; clawbot catches the rest.
+      let offloadedFromHermes = false;
+      if (isHermesPrimary()) {
+        const { runHermesAgent } = await import("../lib/hermes.js");
+        let governance = "";
+        try { const { loadGovernancePrefix } = await import("../lib/governance.js"); governance = loadGovernancePrefix(); } catch { /* optional */ }
+        const hr = await runHermesAgent(enrichedTask, {
+          personaSuffix: personaSystemSuffix(persona),
+          governance,
+          personaId: persona?.id ?? null,
+          model: getHermesModelOverride(),
+          push,
+        });
+        const answerLen = (hr.answer ?? "").trim().length;
+        const hardFail = !hr.ok || answerLen < HERMES_MIN_ANSWER;
+
+        // QUALITY GATE — for a present answer, run clawbot's quality.check; a
+        // non-passing verdict offloads to clawbot too (catches weak-but-not-
+        // empty answers, e.g. ignored-the-format). Skipped on hard fails (no
+        // point scoring an error string) and when the gate is off.
+        let qualityFail = false;
+        if (!hardFail && HERMES_FALLBACK && HERMES_QUALITY_GATE) {
+          const ctx = persona ? `${persona.name}, ${persona.role}` : undefined;
+          const q = await scoreHermesAnswer(text, hr.answer, ctx);
+          if (q && q.pass === false) {
+            qualityFail = true;
+            push(`Quality gate: Hermes answer didn't pass clawbot's quality.check${Number.isFinite(q.score) ? ` (score ${q.score.toFixed(2)})` : ""} — offloading to clawbot.`);
+          } else if (q) {
+            push(`Quality gate: Hermes answer passed${Number.isFinite(q.score) ? ` (score ${q.score.toFixed(2)})` : ""}.`);
+          }
+        }
+
+        const canDo = hr.ok && answerLen >= HERMES_MIN_ANSWER && !qualityFail;
+        if (canDo || !HERMES_FALLBACK) {
+          // Hermes handled it (or fallback disabled) — direct answer, skip
+          // curation (no sourced plan), same as a chat reply.
+          progress({ phase: "done", partialAnswer: hr.answer });
+          return hr;
+        }
+        offloadedFromHermes = true;
+        if (hardFail) push(`Hermes couldn't complete this (${hr.error ?? `answer too thin — ${answerLen}c`}) — offloading to clawbot for maximum coverage.`);
+      }
+
       const result = await runFromChat("general-task", { task: enrichedTask, save_as_template: true }, push, progress);
+      // Tag offloaded results so the UI / tests can see the Hermes→clawbot handoff.
+      if (offloadedFromHermes && result && typeof result === "object") (result as any).offloadedFromHermes = true;
       const answer = (result as any)?.answer;
       const planSteps = (result as any)?.plan?.steps;
       const allRuns = (result as any)?.runs;
@@ -940,9 +1077,16 @@ function extractIntent(text: string, hasThread: boolean): IntentDetection {
       bodyForRecip = body.slice(0, topicMatch.index).trim();
     }
 
-    // Recipient: "to X" / "for X" — runs against the topic-free remainder so
-    // the match terminates cleanly at the artifact noun (email/memo/etc.).
-    const recipMatch = bodyForRecip.match(/\b(?:to|for)\s+([A-Za-z][\w\s.'-]{1,40}?)\s*$/);
+    // Recipient: "to X" / "for X". The addressee can sit mid-sentence
+    // ("email to a customer, Dr. Patel, apologizing…") or at the end
+    // ("email to Sarah"). Try, in order: a titled/proper name (optionally
+    // after an "a customer," lead-in), then a role ("the team", "customers"),
+    // then the old end-anchored remainder. End-anchoring alone missed every
+    // detailed request whose body continued past the name.
+    const recipMatch =
+      bodyForRecip.match(/\b(?:to|for)\s+(?:an?\s+[a-z]+,\s*)?((?:Dr|Mr|Mrs|Ms|Prof|Sir|Dame)\.?\s+[A-Z][\w'-]+|[A-Z][\w'-]+(?:\s+[A-Z][\w'-]+){0,2})/)
+      ?? bodyForRecip.match(/\b(?:to|for)\s+((?:the|our|my)\s+[a-z]+(?:\s+[a-z]+)?|customers?|clients?|users?|investors?|stakeholders?|the\s+(?:team|board|leads?))\b/i)
+      ?? bodyForRecip.match(/\b(?:to|for)\s+([A-Za-z][\w\s.'-]{1,40}?)\s*$/);
     if (recipMatch) recipient = recipMatch[1].trim().replace(/[.,;]+$/, "");
 
     // Fallback target: if no "about" clause, use the artifact phrase itself
@@ -961,7 +1105,7 @@ function extractIntent(text: string, hasThread: boolean): IntentDetection {
   // 2. SUMMARIZE — "summarize X" / "recap X" / "tl;dr X".
   else if (/^\s*(?:summari[sz]e|recap|tldr|tl;dr|brief\s+me\s+on)\b/i.test(t)) {
     intent = "summarize";
-    const m = t.match(/^\s*(?:summari[sz]e|recap|tldr|tl;dr|brief\s+me\s+on)\s+(?:the\s+|a\s+|my\s+)?(.+)$/i);
+    const m = t.match(/^\s*(?:summari[sz]e|recap|tldr|tl;dr|brief\s+me\s+on)\s+(?:the\s+|a\s+|my\s+)?([^\n]+)/i);
     if (m) target = m[1].trim().replace(/[.?!]+$/, "");
     if (!target && !hasThread) missingSlots.push("target");
   }
@@ -969,7 +1113,7 @@ function extractIntent(text: string, hasThread: boolean): IntentDetection {
   // 3. REVIEW / CRITIQUE — "review X" / "critique X" / "evaluate X".
   else if (/^\s*(?:review|critique|evaluate|assess|check|audit)\s+/i.test(t)) {
     intent = "review";
-    const m = t.match(/^\s*(?:review|critique|evaluate|assess|check|audit)\s+(?:the\s+|a\s+|my\s+)?(.+)$/i);
+    const m = t.match(/^\s*(?:review|critique|evaluate|assess|check|audit)\s+(?:the\s+|a\s+|my\s+)?([^\n]+)/i);
     if (m) target = m[1].trim().replace(/[.?!]+$/, "");
     if (!target && !hasThread) missingSlots.push("target");
   }
@@ -977,7 +1121,7 @@ function extractIntent(text: string, hasThread: boolean): IntentDetection {
   // 4. EDIT / REWRITE — "edit X" / "polish X" / "rewrite X".
   else if (/^\s*(?:edit|revise|polish|rewrite|improve|tighten|clean\s+up|reformat|format|proofread)\s+/i.test(t)) {
     intent = "edit";
-    const m = t.match(/^\s*(?:edit|revise|polish|rewrite|improve|tighten|clean\s+up|reformat|format|proofread)\s+(?:the\s+|a\s+|my\s+)?(.+)$/i);
+    const m = t.match(/^\s*(?:edit|revise|polish|rewrite|improve|tighten|clean\s+up|reformat|format|proofread)\s+(?:the\s+|a\s+|my\s+)?([^\n]+)/i);
     if (m) target = m[1].trim().replace(/[.?!]+$/, "");
     if (!target && !hasThread) missingSlots.push("target");
   }
@@ -992,7 +1136,7 @@ function extractIntent(text: string, hasThread: boolean): IntentDetection {
   // 6. PLAN / PROPOSE — "plan X" / "outline Y" / "propose Z".
   else if (/^\s*(?:plan|outline|propose|recommend|suggest|design|map\s+out|lay\s+out)\s+/i.test(t)) {
     intent = "plan";
-    const m = t.match(/^\s*(?:plan|outline|propose|recommend|suggest|design|map\s+out|lay\s+out)\s+(?:a\s+|the\s+|an?\s+)?(.+)$/i);
+    const m = t.match(/^\s*(?:plan|outline|propose|recommend|suggest|design|map\s+out|lay\s+out)\s+(?:a\s+|the\s+|an?\s+)?([^\n]+)/i);
     if (m) target = m[1].trim().replace(/[.?!]+$/, "");
     if (!target && !hasThread) missingSlots.push("topic");
   }
@@ -1000,7 +1144,7 @@ function extractIntent(text: string, hasThread: boolean): IntentDetection {
   // 7. RESEARCH / ANALYZE — "research X" / "investigate Y" / "compare A and B".
   else if (/^\s*(?:research|investigate|analy[sz]e|explore|look\s+into|examine|study|compare|contrast)\b/i.test(t)) {
     intent = "research";
-    const m = t.match(/^\s*(?:research|investigate|analy[sz]e|explore|look\s+into|examine|study|compare|contrast)\s+(.+)$/i);
+    const m = t.match(/^\s*(?:research|investigate|analy[sz]e|explore|look\s+into|examine|study|compare|contrast)\s+([^\n]+)/i);
     if (m) target = m[1].trim().replace(/[.?!]+$/, "");
     if (!target && !hasThread) missingSlots.push("topic");
   }
@@ -1015,13 +1159,13 @@ function extractIntent(text: string, hasThread: boolean): IntentDetection {
   // 9. LIST / TABLE — "list X" / "show me a list of Y" / "table of Z".
   else if (/^\s*(?:list|enumerate|show\s+me\s+(?:a\s+)?list\s+of)\b/i.test(t)) {
     intent = "list";
-    const m = t.match(/^\s*(?:list|enumerate|show\s+me\s+(?:a\s+)?list\s+of)\s+(.+)$/i);
+    const m = t.match(/^\s*(?:list|enumerate|show\s+me\s+(?:a\s+)?list\s+of)\s+([^\n]+)/i);
     if (m) target = m[1].trim();
     if (!target && !hasThread) missingSlots.push("topic");
   }
   else if (/^\s*(?:table|tabulate|show\s+me\s+(?:a\s+)?table\s+of)\b/i.test(t)) {
     intent = "table";
-    const m = t.match(/^\s*(?:table|tabulate|show\s+me\s+(?:a\s+)?table\s+of)\s+(.+)$/i);
+    const m = t.match(/^\s*(?:table|tabulate|show\s+me\s+(?:a\s+)?table\s+of)\s+([^\n]+)/i);
     if (m) target = m[1].trim();
     if (!target && !hasThread) missingSlots.push("topic");
   }

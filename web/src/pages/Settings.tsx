@@ -33,7 +33,7 @@ export function Settings() {
         <ul className="text-xs space-y-1.5 font-mono text-cream-200">
           <li><span className="text-cream-300/50">VAULT_PATH</span> — local Obsidian vault location</li>
           <li><span className="text-cream-300/50">VAULT_REPO</span> — GitHub repo for the vault</li>
-          <li><span className="text-cream-300/50">GITHUB_TOKEN</span> — fine-grained PAT for clawbot</li>
+          <li><span className="text-cream-300/50">GITHUB_TOKEN</span> — fine-grained PAT for Neuro</li>
           <li><span className="text-cream-300/50">OLLAMA_MODEL</span> — default model (overridable above at runtime)</li>
           <li><span className="text-cream-300/50">OLLAMA_PLAN_MODEL</span> — pin a model for planning (skips capability scorer)</li>
           <li><span className="text-cream-300/50">OLLAMA_SYNTH_MODEL</span> — pin a model for synthesis</li>

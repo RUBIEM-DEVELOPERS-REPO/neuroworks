@@ -156,7 +156,7 @@ export const api = {
   brainSave: (path: string, content: string) => req<{ ok: true; path: string; bytes: number }>("/api/brain/file", { method: "POST", body: JSON.stringify({ path, content }) }),
   brainEnsureSidecar: (path: string, force = false) => req<{ ok: true; sidecarPath: string; sourcePath: string; regenerated: boolean; reason?: string; bytes?: number }>("/api/brain/ensure-sidecar", { method: "POST", body: JSON.stringify({ path, force }) }),
   listDataSources: () => req<{ sources: DataSource[] }>("/api/data-sources"),
-  addDataSource: (body: { label: string; kind: "postgres" | "mysql" | "sqlite"; connection: string; notes?: string; readonly: boolean }) =>
+  addDataSource: (body: { label: string; kind: DataSourceKind; connection: string; notes?: string; readonly: boolean }) =>
     req<{ source: DataSource }>("/api/data-sources", { method: "POST", body: JSON.stringify(body) }),
   removeDataSource: (id: string) => req<{ ok: true }>(`/api/data-sources/${encodeURIComponent(id)}`, { method: "DELETE" }),
   testDataSource: (id: string) => req<{ ok: boolean; rowCount?: number; error?: string }>(`/api/data-sources/${encodeURIComponent(id)}/test`, { method: "POST" }),
@@ -197,6 +197,8 @@ export const api = {
   getGovernance: (name: string) => req<{ name: string; path: string; body: string }>(`/api/governance/${encodeURIComponent(name)}`),
   deleteGovernance: (name: string) => req<{ ok: true; deleted: string }>(`/api/governance/${encodeURIComponent(name)}`, { method: "DELETE" }),
   invalidateGovernance: () => req<{ ok: true }>("/api/governance/invalidate", { method: "POST" }),
+  // Relative URL — the browser downloads it through the Vite proxy (same-origin).
+  governanceDownloadUrl: (name: string) => `/api/governance/${encodeURIComponent(name)}/download`,
   listSchedules: () => req<{ schedules: Schedule[] }>("/api/schedules"),
   createSchedule: (body: {
     name: string;
@@ -204,15 +206,21 @@ export const api = {
     inputs?: Record<string, unknown>;
     cadence: Cadence;
     enabled?: boolean;
+    deliver?: ScheduleDelivery;
   }) => req<{ schedule: Schedule }>("/api/schedules", { method: "POST", body: JSON.stringify(body) }),
-  updateSchedule: (id: string, patch: Partial<Pick<Schedule, "name" | "templateId" | "inputs" | "cadence" | "enabled">>) =>
+  updateSchedule: (id: string, patch: Partial<Pick<Schedule, "name" | "templateId" | "inputs" | "cadence" | "enabled" | "deliver">>) =>
     req<{ schedule: Schedule }>(`/api/schedules/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(patch) }),
   deleteSchedule: (id: string) => req<{ ok: true }>(`/api/schedules/${encodeURIComponent(id)}`, { method: "DELETE" }),
+
+  listPresets: () => req<{ presets: Preset[] }>("/api/presets"),
+  applyPreset: (id: string, body: { deliverEmail?: string; createSchedules?: boolean }) =>
+    req<PresetApplyResult>(`/api/presets/${encodeURIComponent(id)}/apply`, { method: "POST", body: JSON.stringify(body) }),
   integrationsCatalog: () => req<{ providers: IntegrationProvider[] }>("/api/integrations/catalog"),
   listIntegrations: () => req<{ connections: IntegrationConnection[] }>("/api/integrations"),
   addIntegration: (providerId: string, label: string, values: Record<string, string>) =>
     req<{ connection: IntegrationConnection }>("/api/integrations", { method: "POST", body: JSON.stringify({ providerId, label, values }) }),
   testIntegration: (id: string) => req<{ ok: boolean; detail: string }>(`/api/integrations/${encodeURIComponent(id)}/test`, { method: "POST" }),
+  testAllIntegrations: () => req<{ results: { id: string; ok: boolean; detail: string }[] }>("/api/integrations/test-all", { method: "POST" }),
   removeIntegration: (id: string) => req<{ ok: true }>(`/api/integrations/${encodeURIComponent(id)}`, { method: "DELETE" }),
   // Plan-approval: draft a plan for a task and park it for human sign-off.
   planTask: (task: string) => req<{ jobId: string; status: string }>("/api/tasks/plan", { method: "POST", body: JSON.stringify({ task }) }),
@@ -229,7 +237,67 @@ export const api = {
     cwd: string;
     elapsedMs: number;
   }>("/api/terminal/exec", { method: "POST", body: JSON.stringify({ command, ...(cwd ? { cwd } : {}) }) }),
+
+  // Company-system connectors (outbound authenticated HTTP to existing systems).
+  connectorsCatalog: () => req<{ authTypes: ConnectorAuthCatalog[] }>("/api/connectors/catalog"),
+  listConnectors: () => req<{ connectors: Connector[] }>("/api/connectors"),
+  getConnector: (id: string) => req<{ connector: Connector }>(`/api/connectors/${encodeURIComponent(id)}`),
+  addConnector: (body: ConnectorInput) => req<{ connector: Connector }>("/api/connectors", { method: "POST", body: JSON.stringify(body) }),
+  updateConnector: (id: string, body: Partial<ConnectorInput>) =>
+    req<{ connector: Connector }>(`/api/connectors/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(body) }),
+  removeConnector: (id: string) => req<{ ok: true }>(`/api/connectors/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  testConnector: (id: string) => req<{ ok: boolean; detail: string }>(`/api/connectors/${encodeURIComponent(id)}/test`, { method: "POST" }),
+  callConnector: (id: string, body: { method?: string; path: string; query?: Record<string, any>; body?: any; headers?: Record<string, string> }) =>
+    req<{ result: ConnectorCallResult }>(`/api/connectors/${encodeURIComponent(id)}/call`, { method: "POST", body: JSON.stringify(body) }),
+
+  // Payments (Stripe gateway).
+  paymentStatus: () => req<PaymentGatewayStatus>("/api/payments/status"),
+  createPaymentLink: (body: { amount: number; description: string; currency?: string; productName?: string }) =>
+    req<{ link: PaymentLink }>("/api/payments/links", { method: "POST", body: JSON.stringify(body) }),
+  listPrices: () => req<{ prices: PaymentPrice[] }>("/api/payments/prices"),
+  createCheckout: (body: { priceId: string; mode?: "subscription" | "payment"; customerEmail?: string; quantity?: number }) =>
+    req<{ session: { id: string; url: string } }>("/api/payments/checkout", { method: "POST", body: JSON.stringify(body) }),
+  billingPortal: (body: { customerId: string; returnUrl?: string }) =>
+    req<{ session: { id: string; url: string } }>("/api/payments/portal", { method: "POST", body: JSON.stringify(body) }),
+  listPayments: (limit = 20) => req<{ payments: PaymentRecord[] }>(`/api/payments/payments?limit=${limit}`),
 };
+
+export type ConnectorAuthType = "none" | "apiKey" | "bearer" | "basic" | "header";
+export type ConnectorAuthCatalog = { type: ConnectorAuthType; label: string; fields: { name: string; label: string; secret: boolean }[] };
+export type ConnectorEndpoint = { name: string; method: string; path: string; description?: string; query?: string[]; body?: string };
+export type Connector = {
+  id: string;
+  label: string;
+  baseUrl: string;
+  description?: string;
+  auth: { type: ConnectorAuthType; in?: "header" | "query"; name?: string; username?: string; secretSet: boolean };
+  headers?: Record<string, string>;
+  endpoints?: ConnectorEndpoint[];
+  writeEnabled: boolean;
+  createdAt: string;
+  lastTest?: { ok: boolean; detail: string; at: string };
+};
+export type ConnectorInput = {
+  label: string;
+  baseUrl: string;
+  description?: string;
+  auth?: { type: ConnectorAuthType; in?: "header" | "query"; name?: string; username?: string; value?: string; token?: string; password?: string };
+  headers?: Record<string, string>;
+  endpoints?: ConnectorEndpoint[];
+  writeEnabled?: boolean;
+};
+export type ConnectorCallResult = {
+  ok: boolean; status: number; url: string; method: string;
+  contentType?: string; body: any; truncated?: boolean; error?: string;
+};
+
+export type PaymentGatewayStatus = {
+  enabled: boolean; provider: "stripe"; currency: string;
+  publishableKey?: string; livemode?: boolean; account?: string; detail?: string;
+};
+export type PaymentLink = { id: string; url: string; amount: number; currency: string; description: string };
+export type PaymentPrice = { id: string; nickname?: string; productName?: string; unitAmount: number | null; currency: string; interval?: string };
+export type PaymentRecord = { id: string; amount: number; currency: string; status: string; description?: string; created: number; receiptEmail?: string };
 
 export type IntegrationProvider = {
   id: string;
@@ -242,6 +310,7 @@ export type IntegrationProvider = {
   testable: boolean;
 };
 
+export type ConnectionTest = { ok: boolean; detail: string; at: string };
 export type IntegrationConnection = {
   id: string;
   providerId: string;
@@ -251,12 +320,15 @@ export type IntegrationConnection = {
   config: Record<string, string>;
   secretFields: string[];
   createdAt: string;
+  lastTest?: ConnectionTest;
 };
+
+export type DataSourceKind = "postgres" | "mysql" | "sqlite" | "mssql" | "mongodb";
 
 export type DataSource = {
   id: string;
   label: string;
-  kind: "postgres" | "mysql" | "sqlite";
+  kind: DataSourceKind;
   connection: string;
   notes?: string;
   readonly: boolean;
@@ -268,6 +340,7 @@ export type GovernancePolicy = {
   name: string;
   bytes: number;
   lastModified: string;
+  reference?: boolean;   // manual/reference doc — listed + downloadable, not a prompt guardrail
 };
 
 export type Cadence = {
@@ -276,6 +349,7 @@ export type Cadence = {
   minute: number;
 };
 
+export type ScheduleDelivery = { email?: string };
 export type Schedule = {
   id: string;
   name: string;
@@ -283,10 +357,28 @@ export type Schedule = {
   inputs: Record<string, unknown>;
   cadence: Cadence;
   enabled: boolean;
+  deliver?: ScheduleDelivery;
   createdAt: string;
   lastFiredAt?: string;
   lastJobId?: string;
   lastError?: string;
   fireCount: number;
   nextFireAt?: number | null;
+};
+
+export type Preset = {
+  id: string;
+  name: string;
+  tagline: string;
+  personaId: string;
+  recommendedSkills: string[];
+  recommendedIntegrations: string[];
+  schedules?: { name: string; templateId: string; cadence: Cadence; emailResult?: boolean }[];
+};
+export type PresetApplyResult = {
+  preset: Preset;
+  persona: { id: string; name: string; role: string };
+  templatesEnsured: number;
+  schedulesCreated: { id: string; name: string; emailTo?: string }[];
+  missingIntegrations: string[];
 };

@@ -52,8 +52,8 @@ export async function firecrawlScrape(opts: FirecrawlScrapeOptions): Promise<Fir
   // service so it can't reach our localhost — but it CAN reach the internet
   // and could be tricked into hitting an internal-looking target by URL
   // games. The shared gate keeps the threat model consistent.
-  const { assertSafePublicUrl } = await import("./security-gates.js");
-  assertSafePublicUrl(opts.url);
+  const { assertSafePublicUrlAsync } = await import("./security-gates.js");
+  await assertSafePublicUrlAsync(opts.url);
   const base = config.firecrawlBaseUrl.replace(/\/+$/, "");
   const timeoutMs = Math.min(60_000, Math.max(2_000, opts.timeoutMs ?? 20_000));
   const maxChars = Math.max(1_000, opts.maxChars ?? 80_000);

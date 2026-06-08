@@ -95,7 +95,7 @@ export function Personas() {
     <div className="space-y-6">
       <div>
         <h1 className="font-display text-3xl text-cream-50">Personas</h1>
-        <p className="text-sm text-cream-300/70 mt-1">Upload a job description and clawbot adopts that role — plans, replies, and tool choices all framed by the persona.</p>
+        <p className="text-sm text-cream-300/70 mt-1">Upload a job description and Neuro adopts that role — plans, replies, and tool choices all framed by the persona.</p>
       </div>
 
       {err && <div className="text-coral-400 text-sm">{err}</div>}
@@ -110,7 +110,7 @@ export function Personas() {
             <label className="block text-xs text-cream-300 mb-1.5 uppercase tracking-wider flex items-center justify-between">
               Job description <input type="file" accept=".txt,.md,.json" onChange={uploadFile} className="text-[10px] text-cream-300" />
             </label>
-            <textarea value={jd} onChange={e => setJd(e.target.value)} rows={9} placeholder="Paste a JD or upload a .txt / .md file. Clawbot extracts role, tone, and key responsibilities automatically." className="w-full bg-ink-800 border border-ink-700 rounded-md px-3 py-2 text-sm focus:outline-none focus:border-violet-500" />
+            <textarea value={jd} onChange={e => setJd(e.target.value)} rows={9} placeholder="Paste a JD or upload a .txt / .md file. Neuro extracts role, tone, and key responsibilities automatically." className="w-full bg-ink-800 border border-ink-700 rounded-md px-3 py-2 text-sm focus:outline-none focus:border-violet-500" />
           </div>
           <div>
             <label className="block text-xs text-cream-300 mb-1.5 uppercase tracking-wider">Tone (optional)</label>

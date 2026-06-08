@@ -57,7 +57,7 @@ terminalRouter.post("/exec", async (req, res) => {
   const command = typeof req.body?.command === "string" ? req.body.command : "";
   if (!command.trim()) return res.status(400).json({ error: "command is required" });
   if (command.length > 20_000) return res.status(400).json({ error: "command too long (max 20000 chars)" });
-  const timeoutMs = Math.min(300_000, Math.max(1_000, Number(req.body?.timeoutMs ?? 60_000)));
+  const timeoutMs = Math.min(300_000, Math.max(1_000, Number(req.body?.timeoutMs ?? 120_000)));
   const cwd = safeCwd(typeof req.body?.cwd === "string" ? req.body.cwd : undefined);
 
   // We feed the command to the shell over stdin (rather than as a -c argument)
@@ -67,8 +67,21 @@ terminalRouter.post("/exec", async (req, res) => {
   // so we compute it from $?/$LASTEXITCODE captured right after the command.
   const bin = isWin ? "powershell.exe" : "bash";
   const args = isWin ? ["-NoProfile", "-NonInteractive", "-Command", "-"] : ["-s"];
+  // Windows preamble (runs BEFORE the user's command so $? still reflects the
+  // command when we capture it):
+  //   • $ProgressPreference=SilentlyContinue — stops cmdlets like
+  //     Invoke-WebRequest / Copy-Item from spraying progress-bar control codes
+  //     into the captured stream (a top cause of "garbled / hung" output).
+  //   • UTF-8 output encoding — so native tools that emit UTF-8 (git, node,
+  //     python) don't come back mojibake'd in the OEM codepage. Guarded because
+  //     [Console]::OutputEncoding throws when there's no real console handle.
+  const winPreamble =
+    `$ProgressPreference='SilentlyContinue'\n` +
+    `try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}\n` +
+    `try { $OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}\n`;
   const script = isWin
-    ? `${command}\n` +
+    ? winPreamble +
+      `${command}\n` +
       `$__ok=$?; $__le=$LASTEXITCODE\n` +
       `if ($__ok) { $__ec = 0 } elseif ($__le) { $__ec = $__le } else { $__ec = 1 }\n` +
       `Write-Output ("${CWD_MARK}" + (Get-Location).Path)\n` +

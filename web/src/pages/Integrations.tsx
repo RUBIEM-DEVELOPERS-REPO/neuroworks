@@ -1,7 +1,25 @@
 import { useEffect, useState } from "react";
-import { Plug, Plus, Trash2, CheckCircle2, AlertTriangle, Loader2, ExternalLink, X } from "lucide-react";
+import { Plug, Plus, Trash2, CheckCircle2, AlertTriangle, Loader2, ExternalLink, X, Check } from "lucide-react";
 import { api, type IntegrationProvider, type IntegrationConnection } from "../lib/api";
 import { Card, Button, showToast } from "../components/Card";
+
+// Health dot — the at-a-glance "connected & working" signal. Green = last test
+// passed, red = last test failed, amber pulse = never tested yet.
+function HealthDot({ conn }: { conn: IntegrationConnection }) {
+  const t = conn.lastTest;
+  const cls = !t ? "bg-amber-400/80 animate-pulse" : t.ok ? "bg-leaf-500" : "bg-coral-500";
+  const title = !t ? "Not tested yet" : t.ok ? `Working — ${t.detail}` : `Failing — ${t.detail}`;
+  return <span className={`inline-block w-2 h-2 rounded-full shrink-0 ${cls}`} title={title} />;
+}
+
+function relTime(iso?: string): string {
+  if (!iso) return "";
+  const s = Math.max(1, Math.round((Date.now() - new Date(iso).getTime()) / 1000));
+  if (s < 60) return `${s}s ago`;
+  const m = Math.round(s / 60); if (m < 60) return `${m}m ago`;
+  const h = Math.round(m / 60); if (h < 24) return `${h}h ago`;
+  return `${Math.round(h / 24)}d ago`;
+}
 
 // Integrations — the user connects external services (messaging, social,
 // productivity, dev tools) so agents can act on them. Secrets are encrypted
@@ -21,6 +39,7 @@ export function Integrations() {
   const [connections, setConnections] = useState<IntegrationConnection[]>([]);
   const [connecting, setConnecting] = useState<IntegrationProvider | null>(null);
   const [testing, setTesting] = useState<string | null>(null);
+  const [testingAll, setTestingAll] = useState(false);
 
   async function refresh() {
     try { const c = await api.integrationsCatalog(); setProviders(c.providers); } catch {}
@@ -33,9 +52,23 @@ export function Integrations() {
     try {
       const r = await api.testIntegration(id);
       showToast(r.ok ? `✓ ${r.detail}` : `Test failed: ${r.detail}`, r.ok ? "success" : "error");
+      await refresh(); // pull the persisted health signal back
     } catch (e: any) {
       showToast(`Test error: ${e?.message ?? e}`, "error");
     } finally { setTesting(null); }
+  }
+
+  async function testAll() {
+    setTestingAll(true);
+    try {
+      const { results } = await api.testAllIntegrations();
+      const ok = results.filter(r => r.ok).length;
+      const bad = results.length - ok;
+      showToast(bad === 0 ? `All ${ok} integration${ok === 1 ? "" : "s"} working ✓` : `${ok} working, ${bad} failing`, bad === 0 ? "success" : "error");
+      await refresh();
+    } catch (e: any) {
+      showToast(`Test error: ${e?.message ?? e}`, "error");
+    } finally { setTestingAll(false); }
   }
   async function remove(id: string, label: string) {
     if (!confirm(`Disconnect "${label}"? Agents using it will stop being able to.`)) return;
@@ -59,19 +92,33 @@ export function Integrations() {
       </div>
 
       {connections.length > 0 && (
-        <Card title={`Connected (${connections.length})`}>
+        <Card
+          title={`Connected (${connections.length})`}
+          action={
+            <Button variant="subtle" onClick={testAll} disabled={testingAll}>
+              {testingAll ? <Loader2 size={13} className="animate-spin" /> : <CheckCircle2 size={13} />} Test all
+            </Button>
+          }
+        >
           <div className="space-y-2">
             {connections.map(c => (
               <div key={c.id} className="flex items-center gap-3 py-2 px-3 rounded-lg bg-ink-950/50 border border-ink-800">
-                <div className="w-8 h-8 rounded-md bg-violet-500/15 grid place-items-center text-violet-300 text-xs font-semibold">{c.providerName.slice(0, 2)}</div>
+                <div className="relative">
+                  <div className="w-8 h-8 rounded-md bg-violet-500/15 grid place-items-center text-violet-300 text-xs font-semibold">{c.providerName.slice(0, 2)}</div>
+                  <span className="absolute -bottom-0.5 -right-0.5 ring-2 ring-ink-950 rounded-full"><HealthDot conn={c} /></span>
+                </div>
                 <div className="flex-1 min-w-0">
                   <div className="text-sm text-cream-100 truncate">{c.label} <span className="text-cream-300/40">· {c.providerName}</span></div>
-                  <div className="text-[11px] text-cream-300/50">{CATEGORY_LABELS[c.category] ?? c.category}{c.config && Object.keys(c.config).length > 0 ? ` · ${Object.entries(c.config).map(([k, v]) => `${k}=${v}`).join(", ")}` : ""}</div>
+                  <div className="text-[11px] text-cream-300/50">
+                    {c.lastTest
+                      ? <span className={c.lastTest.ok ? "text-leaf-400/90" : "text-coral-400/90"}>{c.lastTest.ok ? "Working" : "Failing"} · {c.lastTest.detail} · {relTime(c.lastTest.at)}</span>
+                      : <span className="text-amber-300/80">Not tested yet</span>}
+                  </div>
                 </div>
                 <Button variant="subtle" onClick={() => test(c.id)} disabled={testing === c.id}>
                   {testing === c.id ? <Loader2 size={13} className="animate-spin" /> : <CheckCircle2 size={13} />} Test
                 </Button>
-                <button onClick={() => remove(c.id, c.label)} className="text-cream-300/50 hover:text-coral-400 p-1.5" title="Disconnect"><Trash2 size={15} /></button>
+                <button type="button" onClick={() => remove(c.id, c.label)} className="text-cream-300/50 hover:text-coral-400 p-1.5" title="Disconnect"><Trash2 size={15} /></button>
               </div>
             ))}
           </div>
@@ -84,18 +131,34 @@ export function Integrations() {
           <div className="grid grid-cols-2 gap-3">
             {items.map(p => {
               const conns = connByProvider(p.id);
+              const isConnected = conns.length > 0;
+              // Provider health = worst of its connections (red if any failing,
+              // amber if any untested, green only when all tested-and-working).
+              const anyFail = conns.some(c => c.lastTest && !c.lastTest.ok);
+              const anyUntested = conns.some(c => !c.lastTest);
               return (
-                <div key={p.id} className="flex items-center gap-3 p-3 rounded-xl border border-ink-800 bg-ink-900/40">
+                <div key={p.id} className={`flex items-center gap-3 p-3 rounded-xl border bg-ink-900/40 ${isConnected ? "border-leaf-500/30" : "border-ink-800"}`}>
                   <div className="w-9 h-9 rounded-lg bg-ink-800 grid place-items-center text-cream-200 text-xs font-semibold shrink-0">{p.name.slice(0, 2)}</div>
                   <div className="flex-1 min-w-0">
                     <div className="text-sm text-cream-100 flex items-center gap-1.5">
                       {p.name}
-                      {conns.length > 0 && <span className="text-[10px] text-leaf-400 bg-leaf-500/10 px-1.5 py-0.5 rounded-full">{conns.length} connected</span>}
+                      {isConnected && (
+                        <span className={`inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-full ${anyFail ? "text-coral-400 bg-coral-500/10" : anyUntested ? "text-amber-300/90 bg-amber-400/10" : "text-leaf-400 bg-leaf-500/10"}`}>
+                          <span className={`w-1.5 h-1.5 rounded-full ${anyFail ? "bg-coral-500" : anyUntested ? "bg-amber-400/80 animate-pulse" : "bg-leaf-500"}`} />
+                          {conns.length > 1 ? `${conns.length} connected` : "connected"}
+                        </span>
+                      )}
                       {p.auth === "oauth" && <span className="text-[10px] text-amber-300/80 bg-amber-400/10 px-1.5 py-0.5 rounded-full">token</span>}
                     </div>
                     {p.note && <div className="text-[10px] text-cream-300/40 truncate">{p.note}</div>}
                   </div>
-                  <Button variant="subtle" onClick={() => setConnecting(p)}><Plus size={13} /> Connect</Button>
+                  {isConnected ? (
+                    <Button variant="subtle" onClick={() => setConnecting(p)} className="!text-leaf-400 !border-leaf-500/30">
+                      <Check size={13} /> Connected
+                    </Button>
+                  ) : (
+                    <Button variant="subtle" onClick={() => setConnecting(p)}><Plus size={13} /> Connect</Button>
+                  )}
                 </div>
               );
             })}
@@ -123,8 +186,16 @@ function ConnectModal({ provider, onClose, onConnected }: { provider: Integratio
   async function submit() {
     setErr(null); setSaving(true);
     try {
-      await api.addIntegration(provider.id, label, values);
-      showToast(`${provider.name} connected`, "success");
+      const { connection } = await api.addIntegration(provider.id, label, values);
+      // Immediately verify the credentials so the card shows a real
+      // "connected & working" signal instead of an unverified "connected".
+      let verdict: { ok: boolean; detail: string } | null = null;
+      try { verdict = await api.testIntegration(connection.id); } catch { /* tested on next manual run */ }
+      if (verdict) {
+        showToast(verdict.ok ? `${provider.name} connected & working ✓` : `${provider.name} connected, but the test failed: ${verdict.detail}`, verdict.ok ? "success" : "error");
+      } else {
+        showToast(`${provider.name} connected`, "success");
+      }
       onConnected();
     } catch (e: any) {
       setErr(e?.message ?? String(e));

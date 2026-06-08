@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { Database, Plus, Trash2, Upload, CheckCircle2, AlertTriangle, FileText, Folder, Play, ChevronDown, ChevronRight } from "lucide-react";
-import { api, type DataSource } from "../lib/api";
+import { api, type DataSource, type DataSourceKind } from "../lib/api";
 import { Card, Button, showToast } from "../components/Card";
 
 // Company-data hub.
@@ -55,7 +55,7 @@ export function DataSources() {
           {adding && <AddSourceForm onAdded={() => { setAdding(false); refresh(); }} onCancel={() => setAdding(false)} />}
           {sources.length === 0 && !adding && (
             <div className="text-sm text-cream-300/60 italic">
-              No databases connected yet. Click <span className="font-mono">+ Add</span> to register a Postgres, MySQL, or SQLite database. Once added, agents can query it through the <span className="font-mono">db.*</span> primitives.
+              No databases connected yet. Click <span className="font-mono">+ Add</span> to register a Postgres, MySQL, SQLite, SQL Server, or MongoDB database. Once added, agents can query it through the <span className="font-mono">db.*</span> primitives.
             </div>
           )}
           <div className="space-y-2">
@@ -197,17 +197,19 @@ function SourceRow({
 
 function AddSourceForm({ onAdded, onCancel }: { onAdded: () => void; onCancel: () => void }) {
   const [label, setLabel] = useState("");
-  const [kind, setKind] = useState<"postgres" | "mysql" | "sqlite">("postgres");
+  const [kind, setKind] = useState<DataSourceKind>("postgres");
   const [connection, setConnection] = useState("");
   const [notes, setNotes] = useState("");
   const [readonly, setReadonly] = useState(true);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
-  const placeholders: Record<string, string> = {
+  const placeholders: Record<DataSourceKind, string> = {
     postgres: "postgres://user:password@host:5432/dbname",
     mysql: "mysql://user:password@host:3306/dbname",
     sqlite: "C:\\path\\to\\database.sqlite",
+    mssql: "Server=host,1433;Database=db;User Id=user;Password=pass;Encrypt=true",
+    mongodb: "mongodb+srv://user:password@cluster.mongodb.net/dbname",
   };
 
   async function submit(e: React.FormEvent) {
@@ -238,8 +240,10 @@ function AddSourceForm({ onAdded, onCancel }: { onAdded: () => void; onCancel: (
           className="bg-ink-900 border border-ink-700 rounded px-3 py-1.5 text-sm text-cream-100 focus:outline-none focus:border-violet-500/40"
         >
           <option value="postgres">Postgres</option>
-          <option value="mysql">MySQL</option>
+          <option value="mysql">MySQL / MariaDB</option>
           <option value="sqlite">SQLite</option>
+          <option value="mssql">SQL Server</option>
+          <option value="mongodb">MongoDB</option>
         </select>
         <input
           value={connection}
@@ -266,8 +270,14 @@ function AddSourceForm({ onAdded, onCancel }: { onAdded: () => void; onCancel: (
         <Button onClick={onCancel} variant="ghost">Cancel</Button>
         {err && <span className="text-[11px] text-coral-400">{err}</span>}
       </div>
+      {kind === "mongodb" && (
+        <div className="text-[10px] text-cream-300/60 bg-ink-900 border border-ink-700/60 rounded px-2 py-1.5">
+          MongoDB is queried with a JSON document, not SQL — agents pass e.g.{" "}
+          <span className="font-mono">{`{"collection":"orders","filter":{"status":"open"},"limit":50}`}</span>. Only reads run.
+        </div>
+      )}
       <div className="text-[10px] text-cream-300/50">
-        Driver packages (<span className="font-mono">pg</span>, <span className="font-mono">mysql2</span>, <span className="font-mono">better-sqlite3</span>) install on first use — the server will tell you which <span className="font-mono">pnpm add</span> to run if one's missing.
+        Driver packages (<span className="font-mono">pg</span>, <span className="font-mono">mysql2</span>, <span className="font-mono">better-sqlite3</span>, <span className="font-mono">mssql</span>, <span className="font-mono">mongodb</span>) install on first use — the server will tell you which <span className="font-mono">pnpm add</span> to run if one's missing.
       </div>
     </form>
   );
