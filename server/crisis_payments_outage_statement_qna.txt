@@ -1,0 +1,28 @@
+Payments Service Outage – Holding Statement and Anticipated Q&A
+
+We experienced an unplanned outage of our Payments Service lasting approximately three (3) hours, from 08:00 UTC to 11:00 UTC on 10 June 2026. Our engineering teams detected the failure, isolated the affected components, and deployed remedial fixes.  The service has been fully restored and is operating normally.
+
+We understand the impact this interruption had on our customers, partners and internal stakeholders. To ensure full transparency we are publishing the key facts and the steps we are taking to prevent recurrence.
+
+Key facts
+- Outage began at 08:00 UTC due to a sudden failure in the transaction‑router micro‑service, caused by an upstream database connectivity issue.
+- After detection, we rolled back the most recent deployment (v2.4.1) within 45 minutes, restoring service.
+- Root‑cause analysis completed; we are implementing a robust health‑check and fail‑over strategy, slated for release by 24 June 2026.
+- A full post‑mortem will be shared on 12 June 2026 via our internal knowledge vault and will be posted publicly to our status page.
+- For further questions, contact the Payments Support Team at payments‑support@neuroworks.com or use the contact link on our status page.
+
+Anticipated Questions & Answers
+1. Q: Why did the outage last three hours?
+   A: The failure was isolated to the transaction‑router component, which required a rolling rollback and configuration changes to restore connectivity. The rollback process itself took about 45 minutes, after which we performed thorough system tests before bringing the service back online.
+2. Q: Will this happen again?
+   A: We have identified the root cause – an unexpected database disconnection – and are adding automated health‑checks, circuit breakers, and fail‑over procedures. A new version implementing these safeguards will be released by 24 June 2026.
+3. Q: How many customers were affected?
+   A: All customers experiencing payment transactions between 08:00 UTC and 11:00 UTC on 10 June 2026 were impacted. We are currently reviewing logs to quantify the exact number and will share detailed metrics in the post‑mortem.
+4. Q: Who can I contact for more information?
+   A: Please reach out to the Payments Support Team at payments‑support@neuroworks.com. For escalations, contact your Account Executive, Maya.
+5. Q: What is the impact on business metrics or revenue?
+   A: We are still assessing the financial impact. The post‑mortem will include any revenue impact analysis.
+
+We apologize for any inconvenience and appreciate your understanding.
+
+‑ Neuro

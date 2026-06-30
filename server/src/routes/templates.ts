@@ -70,8 +70,14 @@ templatesRouter.get("/jobs", (_req, res) => {
   // succeeded for one id); keep the last (latest status) per id.
   const byId = new Map<string, ReturnType<typeof asJob>>();
   for (const j of persisted) byId.set(j.id, j);
-  const jobs = [...mem, ...byId.values()].sort((a, b) => b.startedAt.localeCompare(a.startedAt));
-  res.json({ jobs });
+  const all = [...mem, ...byId.values()].sort((a, b) => b.startedAt.localeCompare(a.startedAt));
+  // Serve only the 150 MOST RECENT to the Tasks/Reports feed — keeps the page
+  // fast and focused. Everything older still lives on disk (the job journal) and
+  // is surfaced through the vault + Knowledge (reflections + journaled notes),
+  // so nothing is lost — it's just not loaded into the live list.
+  const MAX_FEED = Number(process.env.CLAWBOT_TASKS_FEED_LIMIT ?? "150");
+  const jobs = all.slice(0, MAX_FEED);
+  res.json({ jobs, total: all.length, limit: MAX_FEED, truncated: all.length > MAX_FEED });
 });
 
 templatesRouter.get("/jobs/:id", (req, res) => {
@@ -165,6 +171,10 @@ templatesRouter.post("/run/:id", async (req, res) => {
   job.title = tpl.title;
   job.inputs = inputs;
   job.requiresApproval = tpl.requiresApproval;
+  // Schedule-fired runs carry a marker header; the tag routes their results
+  // into the vault journal (scheduled progress reports belong in the brain).
+  const scheduledBy = req.get("x-clawbot-scheduled");
+  if (scheduledBy) job.scheduledBy = scheduledBy;
 
   if (tpl.requiresApproval) {
     job.status = "awaiting-approval";

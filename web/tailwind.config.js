@@ -22,15 +22,36 @@ export default {
           200: "var(--c-cream-200)",
           300: "var(--c-cream-300)",
         },
-        flame: { 400: "#f6a623", 500: "#e9911a", 600: "#c97712" },
+        // Midnight-blueprint accents (AuthKit reference). Electric Iris is the
+        // ONLY first-class action colour; Ember is the warm alternative accent;
+        // Cipher Mint covers success. Saturated fills stay on actions only —
+        // everything else is ghost/hairline/neutral.
+        flame: { 400: "#e46d4c", 500: "#d05a3a", 600: "#b04727" },   // Ember
         coral: { 400: "#ff7657", 500: "#ee5a3c", 600: "#c94327" },
-        violet: { 400: "#9d6bff", 500: "#7e4eef", 600: "#6438c9" },
-        leaf: { 400: "#8be0a8", 500: "#5fc783" },
+        violet: { 400: "#7d57f6", 500: "#663af3", 600: "#5128d6" },  // Electric Iris
+        leaf: { 400: "#3fb3a0", 500: "#269684" },                    // Cipher Mint
       },
       fontFamily: {
-        display: ["'Crimson Text'", "Georgia", "serif"],
+        display: ["'Space Grotesk'", "system-ui", "sans-serif"],
         sans: ["Inter", "system-ui", "sans-serif"],
-        mono: ["JetBrains Mono", "ui-monospace", "monospace"],
+        mono: ["'JetBrains Mono'", "ui-monospace", "monospace"],
+      },
+      // Heavy, real-world-mass easing for the Editorial Evolution motion language.
+      transitionTimingFunction: {
+        settle: "cubic-bezier(0.32, 0.72, 0, 1)",
+      },
+      keyframes: {
+        "fade-up": {
+          "0%": { opacity: "0", transform: "translateY(14px)", filter: "blur(6px)" },
+          "100%": { opacity: "1", transform: "translateY(0)", filter: "blur(0)" },
+        },
+        "mesh-drift": {
+          "0%, 100%": { transform: "translate3d(0,0,0) scale(1)" },
+          "50%": { transform: "translate3d(2%, -1.5%, 0) scale(1.08)" },
+        },
+      },
+      animation: {
+        "fade-up": "fade-up 0.7s cubic-bezier(0.32,0.72,0,1) both",
       },
     },
   },

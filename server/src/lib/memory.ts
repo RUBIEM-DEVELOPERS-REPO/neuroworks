@@ -21,8 +21,14 @@ export type MemoryFact = {
   subject: string;
   fact: string;
   source?: string;
+  // Optional calendar anchor (YYYY-MM-DD) for time-bound facts — a meeting,
+  // deadline, renewal. When set, the fact surfaces on that day's plan via
+  // `datedFactsInWindow`, which is how memory links to the calendar.
+  date?: string;
   ts: string;
 };
+
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 function root(): string { return join(config.vaultPath, MEMORY_DIR_REL); }
 
@@ -33,13 +39,15 @@ function slugify(subject: string): string {
     .slice(0, 80) || "general";
 }
 
-export function noteFact(args: { subject: string; fact: string; source?: string }): MemoryFact {
+export function noteFact(args: { subject: string; fact: string; source?: string; date?: string }): MemoryFact {
   const dir = root();
   try { mkdirSync(dir, { recursive: true }); } catch { /* tolerate */ }
+  const date = args.date?.trim();
   const rec: MemoryFact = {
     subject: args.subject.trim(),
     fact: args.fact.trim().slice(0, 2000),
     source: args.source ? args.source.slice(0, 200) : undefined,
+    date: date && DATE_RE.test(date) ? date : undefined,
     ts: new Date().toISOString(),
   };
   const file = join(dir, slugify(args.subject) + ".jsonl");
@@ -84,6 +92,32 @@ export function searchMemory(query: string, limit = 20): MemoryFact[] {
     } catch { /* tolerate */ }
   }
   return hits;
+}
+
+// Calendar link: return every dated fact whose `date` falls in [fromYmd, toYmd]
+// (inclusive). This is what folds long-term memory into the daily plan — a
+// "remember the Q3 board meeting is on 2026-07-15" fact shows up as a calendar
+// commitment on that day, not buried in a JSONL file no one reads. Scans all
+// memory files (cheap — they're tiny); skips undated facts.
+export function datedFactsInWindow(fromYmd: string, toYmd: string, limit = 50): MemoryFact[] {
+  const dir = root();
+  if (!existsSync(dir)) return [];
+  if (!DATE_RE.test(fromYmd) || !DATE_RE.test(toYmd)) return [];
+  const out: MemoryFact[] = [];
+  let files: string[] = [];
+  try { files = readdirSync(dir).filter(f => f.endsWith(".jsonl")); } catch { return []; }
+  for (const f of files) {
+    try {
+      const lines = readFileSync(join(dir, f), "utf8").split(/\r?\n/).filter(Boolean);
+      for (const line of lines) {
+        try {
+          const rec = JSON.parse(line) as MemoryFact;
+          if (rec.date && DATE_RE.test(rec.date) && rec.date >= fromYmd && rec.date <= toYmd) out.push(rec);
+        } catch { /* tolerate */ }
+      }
+    } catch { /* tolerate */ }
+  }
+  return out.sort((a, b) => (a.date ?? "").localeCompare(b.date ?? "")).slice(0, limit);
 }
 
 export function listSubjects(): { subject: string; count: number; lastTs?: string }[] {

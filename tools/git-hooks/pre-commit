@@ -1,0 +1,33 @@
+#!/bin/sh
+# NeuroWorks pre-commit secret guard.
+# Blocks commits that add a .env / key file or stage anything that looks like a
+# live secret. Install:  cp tools/git-hooks/pre-commit .git/hooks/ && chmod +x .git/hooks/pre-commit
+# Bypass a false positive with:  git commit --no-verify
+fail=0
+
+# 1) Never commit real env / private-key files (allow .env.example/.sample/.template).
+envfiles=$(git diff --cached --name-only \
+  | grep -iE '(^|/)\.env(\.[a-z]+)?$|\.pem$|\.p12$|(^|/)id_rsa($|\.)' \
+  | grep -viE '\.(example|sample|template|dist)$')
+if [ -n "$envfiles" ]; then
+  echo "X pre-commit: refusing to commit a .env / private-key file:"
+  echo "$envfiles" | sed 's/^/    /'
+  fail=1
+fi
+
+# 2) Scan ADDED lines for live secret patterns (ignore obvious placeholders).
+secrets=$(git diff --cached -U0 -- . ':(exclude).env.example' \
+  | grep -E '^\+' \
+  | grep -inE 'sk-[a-zA-Z0-9_-]{20}|sk_[a-zA-Z0-9]{20}|ghp_[a-zA-Z0-9]{20}|github_pat_[a-zA-Z0-9_]{30,}|AKIA[0-9A-Z]{16}|xoxb-[a-zA-Z0-9-]+|-----BEGIN [A-Z ]*PRIVATE KEY' \
+  | grep -ivE 'placeholder|example|REDACTED|paste_here|change-me|your_|<[a-z]')
+if [ -n "$secrets" ]; then
+  echo "X pre-commit: possible secret in staged changes:"
+  echo "$secrets" | head -10 | sed 's/^/    /'
+  fail=1
+fi
+
+if [ "$fail" = 1 ]; then
+  echo "Commit blocked. Remove the secret (or 'git commit --no-verify' if it's a false positive)."
+  exit 1
+fi
+exit 0

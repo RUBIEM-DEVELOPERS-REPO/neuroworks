@@ -1,19 +1,19 @@
-import { NavLink, Link, useLocation } from "react-router-dom";
+import { NavLink, Link, useLocation, useNavigate } from "react-router-dom";
 import { ReactNode, useEffect, useState } from "react";
 import { ToastRack } from "./Card";
 import {
   LayoutDashboard, MessageSquare, Users, ListChecks, FileText, BookOpen,
   CheckCircle2, Activity as ActivityIcon, Library, Settings as SettingsIcon,
   ShieldCheck, Plus, Sun, Moon, Search as SearchIcon, ChevronRight,
-  Calendar, Shield, CalendarDays, FileEdit, Database,
+  Calendar, Shield,   CalendarDays, FileEdit, Database,
   Terminal as TerminalIcon, FolderKanban, Wrench, Plug, Eye, Sparkles,
-  Boxes, CreditCard,
+  Boxes, CreditCard, LogOut, LogIn, Contact, Zap, ThumbsUp, BarChart, DollarSign, ScrollText, Hammer, GitBranch,
   type LucideIcon,
 } from "lucide-react";
 import { BrandMark } from "./BrandMark";
 import { CommandPalette } from "./CommandPalette";
 import { Kbd, MetaKey } from "./Kbd";
-import { api } from "../lib/api";
+import { api, setToken, type User } from "../lib/api";
 
 type NavItem = {
   to: string;
@@ -48,10 +48,22 @@ const libraryNav: NavItem[] = [
   { to: "/templates", label: "Templates", icon: Library },
   { to: "/skills", label: "Skills", icon: Library },
   { to: "/personas", label: "Personas", icon: Users },
+  { to: "/workforce", label: "Workforce", icon: Contact },
+  { to: "/departments", label: "Departments", icon: Zap },
+  { to: "/knowledge-packs", label: "Knowledge Packs", icon: BookOpen },
+];
+
+const monitoringNav: NavItem[] = [
+  { to: "/quality", label: "Quality", icon: ThumbsUp },
+  { to: "/cost", label: "Cost", icon: DollarSign },
+  { to: "/audit", label: "Audit Log", icon: ScrollText },
+  { to: "/skill-forge", label: "SkillForge", icon: Hammer },
+  { to: "/orchestrate", label: "Orchestrate", icon: GitBranch },
 ];
 
 const systemNav: NavItem[] = [
   { to: "/knowledge", label: "Knowledge", icon: BookOpen },
+  { to: "/users", label: "Users", icon: Users },
   { to: "/data-sources", label: "Company data", icon: Database },
   { to: "/connectors", label: "Connectors", icon: Boxes },
   { to: "/integrations", label: "Integrations", icon: Plug },
@@ -64,7 +76,9 @@ const systemNav: NavItem[] = [
 
 export function Layout({ children }: { children: ReactNode }) {
   const location = useLocation();
+  const navigate = useNavigate();
   const [health, setHealth] = useState<{ ready: boolean; missing?: string[] } | null>(null);
+  const [user, setUser] = useState<User | null>(null);
   const [counts, setCounts] = useState<{ approvals: number; activity: number }>({ approvals: 0, activity: 0 });
   const [persona, setPersona] = useState<{ id: string; name: string; role: string } | null>(null);
   // Per-group open state. Undefined = "not toggled yet"; a group with an active
@@ -91,7 +105,16 @@ export function Layout({ children }: { children: ReactNode }) {
       setCounts({ approvals: pendingApproval, activity: running });
       const p = await api.listPersonas().catch(() => ({ active: null } as any));
       setPersona(p.active);
+      const s = await api.session().catch(() => ({ user: null }));
+      setUser(s.user);
     } catch {}
+  }
+
+  async function signOut() {
+    try { await api.logout(); } catch { /* ignore */ }
+    setToken(null);
+    setUser(null);
+    navigate("/login");
   }
   useEffect(() => { tick(); const i = setInterval(tick, 5000); return () => clearInterval(i); }, []);
 
@@ -150,8 +173,8 @@ export function Layout({ children }: { children: ReactNode }) {
           <Link to="/dashboard" className="flex items-center gap-2.5">
             <BrandMark size={26} />
             <div>
-              <div className="font-semibold text-cream-50 text-lg leading-none tracking-tight">NeuroWorks</div>
-              <div className="text-[10px] text-cream-300/70 mt-1 tracking-wider uppercase">The AI Workforce</div>
+              <div className="font-display font-semibold text-cream-50 text-xl leading-none tracking-tight">NeuroWorks</div>
+              <div className="text-[10px] text-cream-300/70 mt-1 tracking-[0.18em] uppercase">The AI Workforce</div>
             </div>
           </Link>
         </div>
@@ -167,6 +190,7 @@ export function Layout({ children }: { children: ReactNode }) {
           {renderGroup("workspace", "Workspace", FolderKanban, workspaceNav)}
           {renderGroup("watch", "Watch", Eye, watchNav, counts.approvals + counts.activity)}
           {renderGroup("library", "Library", Library, libraryNav)}
+          {renderGroup("monitoring", "Monitor", BarChart, monitoringNav)}
           {renderGroup("system", "System", Wrench, systemNav)}
         </nav>
 
@@ -177,9 +201,21 @@ export function Layout({ children }: { children: ReactNode }) {
 
       <main className="flex-1 flex flex-col overflow-hidden">
         <header className="flex items-center justify-between px-8 py-3 border-b border-ink-800">
-          <div className="flex items-center gap-3">
-            <div className="w-7 h-7 rounded-full bg-gradient-to-br from-violet-500 to-coral-500 grid place-items-center text-[11px] font-semibold text-white">A</div>
-            <div className="text-sm text-cream-200">Arthur Magaya <span className="text-cream-300/50">· admin@rubiem.com</span></div>
+          <div className="flex items-center gap-2.5">
+            {user ? (
+              <>
+                <div className="w-7 h-7 rounded-full bg-gradient-to-br from-violet-500 to-coral-500 grid place-items-center text-[11px] font-semibold text-white">
+                  {user.name.split(" ").map(p => p[0]).slice(0, 2).join("").toUpperCase()}
+                </div>
+                <div className="text-sm text-cream-200">{user.name} <span className="text-cream-300/50">· {user.email}</span></div>
+                <span className="text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-ink-800 text-cream-300/70">{user.role}</span>
+                <button type="button" onClick={signOut} title="Sign out" className="ml-1 text-cream-300/50 hover:text-coral-400 p-1"><LogOut size={14} /></button>
+              </>
+            ) : (
+              <Link to="/login" className="flex items-center gap-1.5 text-sm text-cream-300 hover:text-cream-100">
+                <LogIn size={14} /> Sign in
+              </Link>
+            )}
           </div>
           <div className="flex items-center gap-2">
             {persona && (

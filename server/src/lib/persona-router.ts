@@ -135,6 +135,78 @@ const PERSONA_PATTERNS: PersonaPattern[] = [
     { re: /\b(?:pull|fetch|read|show me|get)\s+(?:the\s+|our\s+|my\s+)?(?:live\s+)?(?:financials?|finance|dashboard)\b/i, weight: 2 },
     { re: /\bdashboard\s+for\s+(?:year\s+)?\d{4}\b/i, weight: 2 },
   ] },
+  // ── Department roster (2026-06-09) — common org departments ──
+  { personaId: "hr-manager", patterns: [
+    { re: /\b(?:onboard(?:ing)?|offboard(?:ing)?)\s+(?:plan|checklist|process)?\b/i, weight: 2 },
+    { re: /\b(?:HR|employee)\s+(?:policy|handbook|relations|onboarding)\b/i, weight: 2 },
+    { re: /\bperformance\s+review\b/i, weight: 2 },
+    { re: /\b(?:leave|benefits)\s+policy\b/i, weight: 2 },
+    /\b30-?60-?90\b/i,
+  ] },
+  { personaId: "accountant", patterns: [
+    { re: /\b(?:reconcile|reconciliation)\b/i, weight: 2 },
+    { re: /\b(?:accounts?\s+(?:payable|receivable)|AP\/AR)\b/i, weight: 2 },
+    { re: /\b(?:draft|create|prepare)\s+(?:an?\s+)?invoice\b/i, weight: 2 },
+    { re: /\b(?:month-?end|bookkeep|ledger|payroll\s+run|balance\s+sheet)\b/i, weight: 2 },
+  ] },
+  { personaId: "it-support", patterns: [
+    { re: /\b(?:password|MFA)\s+reset\b/i, weight: 2 },
+    { re: /\b(?:troubleshoot|fix-?it|help-?desk|IT support)\b/i, weight: 2 },
+    { re: /\b(?:provision|deprovision|grant)\s+access\b/i, weight: 2 },
+    { re: /\b(?:can'?t|cannot)\s+(?:log\s?in|sign\s?in|connect)\b/i, weight: 2 },
+  ] },
+  { personaId: "procurement", patterns: [
+    { re: /\b(?:RFQ|RFP)\b/, weight: 2 },
+    { re: /\bpurchase\s+order\b/i, weight: 2 },
+    { re: /\b(?:vendor|supplier)\s+(?:quote|comparison|sourcing|selection)\b/i, weight: 2 },
+    { re: /\bprocure(?:ment)?\b/i, weight: 2 },
+  ] },
+  { personaId: "sdr", patterns: [
+    { re: /\bcold\s+(?:email|outreach)\b/i, weight: 2 },
+    { re: /\boutreach\s+(?:sequence|cadence)\b/i, weight: 2 },
+    { re: /\b(?:prospect(?:ing)?|book\s+(?:a\s+)?meeting)\b/i, weight: 2 },
+    /\b(?:SDR|BDR)\b/,
+  ] },
+  { personaId: "compliance", patterns: [
+    { re: /\bcompliance\s+(?:check|review|gap|assessment)\b/i, weight: 2 },
+    { re: /\brisk\s+register\b/i, weight: 2 },
+    { re: /\baudit\s+(?:prep|checklist|readiness)\b/i, weight: 2 },
+    { re: /\b(?:POPIA|GDPR|regulatory)\b/, weight: 2 },
+  ] },
+  { personaId: "communications", patterns: [
+    { re: /\bpress\s+release\b/i, weight: 2 },
+    { re: /\b(?:media|holding)\s+statement\b/i, weight: 2 },
+    { re: /\bcrisis\s+comm/i, weight: 2 },
+    { re: /\btalking\s+points\b/i, weight: 2 },
+    { re: /\binternal\s+announcement\b/i, weight: 2 },
+  ] },
+  { personaId: "office-manager", patterns: [
+    { re: /\b(?:office\s+(?:supplies|process)|facilities)\b/i, weight: 2 },
+    { re: /\bevent\s+(?:logistics|run-?sheet|planning)\b/i, weight: 2 },
+    { re: /\btravel\s+itinerary\b/i, weight: 2 },
+  ] },
+  { personaId: "business-analyst", patterns: [
+    { re: /\b(?:business\s+requirements?|BRD)\b/i, weight: 2 },
+    { re: /\brequirements?\s+(?:gathering|doc|document)\b/i, weight: 2 },
+    { re: /\b(?:process\s+map|as-?is|to-?be|gap\s+analysis)\b/i, weight: 2 },
+    { re: /\buser\s+stor(?:y|ies)\b/i, weight: 2 },
+  ] },
+  { personaId: "learning-development", patterns: [
+    { re: /\btraining\s+(?:program|curriculum|material|module|plan)\b/i, weight: 2 },
+    { re: /\bcurriculum\b/i, weight: 2 },
+    { re: /\b(?:quiz|assessment|facilitator\s+guide|workshop)\b/i, weight: 2 },
+  ] },
+  { personaId: "project-manager", patterns: [
+    { re: /\bproject\s+(?:plan|timeline|status)\b/i, weight: 2 },
+    { re: /\bstatus\s+report\b/i, weight: 2 },
+    { re: /\bRAID\s+log\b/i, weight: 2 },
+    { re: /\b(?:milestone|gantt)\b/i, weight: 2 },
+  ] },
+  { personaId: "logistics", patterns: [
+    { re: /\b(?:shipment|fulfil?lment|delivery\s+schedule)\b/i, weight: 2 },
+    { re: /\b(?:inventory|stock\s+level|reorder)\b/i, weight: 2 },
+    { re: /\b(?:supply\s+chain|logistics)\b/i, weight: 2 },
+  ] },
   // Finance / Operations / Recruiting / Legal / Analyst / TechWriter / EA
   { personaId: "financial-analyst", patterns: [
     /\bcashflow\b/i,

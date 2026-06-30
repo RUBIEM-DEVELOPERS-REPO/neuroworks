@@ -702,17 +702,122 @@ export function stopEmailBridge(): void {
   started = false;
 }
 
+/** Return a reason string if `addr` looks like a placeholder / example address
+ *  the agent should never actually send to, or null if it's a plausible real
+ *  address. Covers the RFC-reserved example/test domains, bracketed fill-ins
+ *  ("[project lead email]"), and the common fake-recipient tokens models emit
+ *  when they couldn't resolve a real contact. */
+export function placeholderAddressReason(addr: string): string | null {
+  const a = String(addr ?? "").trim();
+  if (!a) return "empty";
+  if (/[[\]<>]|\s/.test(a)) return "contains brackets/spaces — not a real address";
+  const at = a.lastIndexOf("@");
+  if (at < 1 || at === a.length - 1) return "not a valid address";
+  const local = a.slice(0, at).toLowerCase();
+  const domain = a.slice(at + 1).toLowerCase();
+  // RFC 2606 / 6761 reserved domains that can never receive real mail.
+  if (/(^|\.)(example|test|invalid|localhost)$/.test(domain)) return `${domain} is a reserved/example domain`;
+  if (/(^|\.)(example)\.(com|org|net)$/.test(domain)) return `${domain} is an example domain`;
+  if (domain === "email.com" && /^(email|your|name|user|recipient)$/.test(local)) return "looks like a fill-in stub";
+  // Obvious fill-in local parts paired with a vague domain.
+  if (/^(your[._-]?email|recipient|name|firstname|lastname|someone|user|client|customer|placeholder|tbd|xxx+)$/.test(local) && /^(email|company|domain|example|yourcompany|acme)\./.test(domain + ".")) {
+    return "looks like a fill-in stub";
+  }
+  return null;
+}
+
+/** Strip NeuroWorks vault-note plumbing from an outbound email body.
+ *
+ *  When a user asks Neuro to "send me that report/document", the agent reads the
+ *  vault note and emails it verbatim — but our notes carry metadata the recipient
+ *  shouldn't see. Two note shapes leak:
+ *
+ *  • JOB-JOURNAL notes — YAML frontmatter (jobId/status/template/persona/…) + a
+ *    Status/Template/Started/Finished/Title preamble + an Inputs JSON dump + a
+ *    collapsible run Log. The deliverable is the `## Answer` section.
+ *  • IMPORT-SIDECAR notes (fs.import_to_vault / bulk-import) — frontmatter
+ *    (imported_from/imported_at/kind/size_kb/tags:[imported,…]) + a provenance
+ *    preamble ("Imported from … on …", "The full file is filed in your vault at
+ *    [[…]] — open it in Obsidian", "## Source provenance"). The deliverable is
+ *    the `## Excerpt` section (the extracted document text).
+ *
+ *  Steps: (1) always drop a leading `--- … ---` frontmatter fence (never email
+ *  raw YAML); (2) if it's an import sidecar, return the document excerpt minus
+ *  the provenance boilerplate; (3) if it's a job journal, return the Answer (or
+ *  strip the preamble/Inputs/Log); (4) otherwise return the (frontmatter-free)
+ *  body. Telltale-gated so ordinary emails pass through untouched.
+ */
+export function stripVaultReportMetadata(input: string): string {
+  const original = String(input ?? "");
+  if (!original.trim()) return original;
+
+  // 1) Capture + remove a leading YAML frontmatter fence. Keep the captured
+  //    frontmatter text so we can read its keys for telltale detection.
+  const fence = original.match(/^﻿?\s*---[ \t]*\n([\s\S]*?)\n---[ \t]*\n?/);
+  const frontmatter = fence ? fence[1] : "";
+  let s = fence ? original.slice(fence[0].length) : original;
+
+  // ── IMPORT-SIDECAR note ──
+  const importTelltale =
+    /(^|\n)\s*imported_(from|at)\s*:/i.test(frontmatter) ||
+    /(^|\n)\s*tags\s*:\s*\[[^\]]*\bimported\b/i.test(frontmatter) ||
+    /filed in your vault at \[\[/i.test(s) ||
+    /(^|\n)#{1,6}[ \t]*Source provenance\b/i.test(s) ||
+    /(^|\n)Imported from [`"]?.+ on \d{4}-\d{2}-\d{2}/i.test(s);
+  if (importTelltale) {
+    // Prefer the extracted document — the "## Excerpt …" section.
+    const excerpt = s.match(/(?:^|\n)#{1,6}[ \t]*Excerpt[^\n]*\n([\s\S]*?)(?=\n#{1,6}[ \t]*Source provenance\b|\n#{1,6}[ \t]|$)/i);
+    if (excerpt && excerpt[1].trim().length > 40) {
+      return excerpt[1].replace(/_\(text truncated[^)]*\)_/gi, "").trim();
+    }
+    // No excerpt section — strip the provenance scaffolding and keep the rest.
+    let body = s
+      .replace(/^#{1,6}[ \t]*.+\n+/, "")                                              // leading "# title"
+      .replace(/(?:^|\n)Imported from [`"]?.+? on \d{4}-\d{2}-\d{2}[^\n]*\n?/i, "\n") // "Imported from … on …"
+      .replace(/(?:^|\n)The full file is filed in your vault at \[\[[^\n]*\n?/i, "\n")// "filed in your vault …"
+      .replace(/(?:^|\n)#{1,6}[ \t]*Source provenance\b[\s\S]*$/i, "")               // provenance block → end
+      .replace(/_\(text truncated[^)]*\)_/gi, "");
+    return body.trim() || s.trim();
+  }
+
+  // ── JOB-JOURNAL note ──
+  const hasJournalKey = /(^|\n)(?:[-*]\s*)?\*{0,2}(?:jobId|slug|startedAt|finishedAt|personaName)\*{0,2}\s*[:=]/i.test(original);
+  const hasInputsAndAnswer = /(^|\n)#{1,6}\s*Inputs\b/i.test(s) && /(^|\n)#{1,6}\s*Answer\b/i.test(s);
+  if (hasJournalKey || hasInputsAndAnswer) {
+    const answer = s.match(/(?:^|\n)#{1,6}[ \t]*Answer[ \t]*\n([\s\S]*?)(?=\n#{1,6}[ \t]|\n<details>|$)/i);
+    if (answer && answer[1].trim().length > 40) return answer[1].trim();
+    const META = /^(?:[-*]\s*)?\*{0,2}(?:type|title|slug|created|jobId|job id|status|template|persona|personaName|persona name|startedAt|started|finishedAt|finished)\*{0,2}\s*[:=]\s/i;
+    const lines = s.split("\n");
+    let i = 0;
+    while (i < lines.length && (lines[i].trim() === "" || META.test(lines[i].trim()))) i++;
+    s = lines.slice(i).join("\n");
+    s = s.replace(/(?:^|\n)#{1,6}[ \t]*Inputs[ \t]*\n+```[a-z]*\n[\s\S]*?\n```/i, "");
+    s = s.replace(/\n*<details>\s*<summary>\s*Log\s*<\/summary>[\s\S]*?<\/details>\s*$/i, "");
+    return s.trim() || original.trim();
+  }
+
+  // ── Ordinary content ──
+  // If we stripped a frontmatter fence, return the frontmatter-free body (never
+  // email raw YAML). Otherwise leave the body exactly as-is.
+  return fence ? s.trim() : original;
+}
+
 /** Coerce whatever a caller hands us as an email body into markdown text.
  *  The planner sometimes wires a PRIOR STEP'S RESULT OBJECT into email.send's
  *  `body` (e.g. a synth step's `{ answer, sources, … }`) instead of its
  *  `.answer` string — naive `String(obj)` then renders as "[object Object]".
  *  We dig out the human-readable field; only fall back to JSON for genuinely
- *  structureless objects. Exported so the email.send primitive uses the same
- *  logic before it ever stringifies. */
+ *  structureless objects. Then strip any job-journal metadata so "send me that
+ *  report" emails carry the deliverable, not the internal plumbing. Exported so
+ *  the email.send primitive uses the same logic before it ever stringifies. */
 export function coerceEmailBody(v: unknown): string {
+  return stripVaultReportMetadata(coerceToBodyString(v));
+}
+
+function coerceToBodyString(v: unknown): string {
   if (v == null) return "";
   if (typeof v === "string") return v;
-  if (Array.isArray(v)) return v.map(coerceEmailBody).filter(Boolean).join("\n\n");
+  if (Array.isArray(v)) return v.map(coerceToBodyString).filter(Boolean).join("\n\n");
   if (typeof v === "object") {
     const o = v as Record<string, unknown>;
     for (const key of ["answer", "text", "body", "markdown", "content", "message"]) {
@@ -740,6 +845,13 @@ export async function sendEmail(opts: {
   const env = readEnv();
   if (!emailConfigured()) throw new Error("email not configured — set CLAWBOT_MAILJET_API_KEY + _SECRET, or CLAWBOT_EMAIL_USER + _APP_PASSWORD");
   if (!opts.to || !opts.to.includes("@")) throw new Error(`email.send: invalid 'to' address "${opts.to}"`);
+  // Reject obvious placeholder / example addresses. A planner that couldn't
+  // resolve a real recipient sometimes emits a fake one (name@example.com,
+  // "[project lead email]"); sending there is worse than failing. Fail LOUD
+  // with a corrective hint so the agent resolves the real address from the
+  // org directory (users.lookup) and retries.
+  const badTo = placeholderAddressReason(opts.to);
+  if (badTo) throw new Error(`email.send: "${opts.to.trim()}" looks like a placeholder (${badTo}). Resolve the recipient's real address from the org directory with users.lookup / users.list before sending — don't use example/placeholder addresses.`);
   if (!opts.subject?.trim()) throw new Error("email.send: subject required");
   // Safety net for EVERY caller (schedules, replies, the email.send primitive):
   // never let a non-string body render as "[object Object]".

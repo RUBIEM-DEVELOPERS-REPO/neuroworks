@@ -896,9 +896,20 @@ async function handleChat(req: any, res: any) {
         const { runHermesAgent } = await import("../lib/hermes.js");
         let governance = "";
         try { const { loadGovernancePrefix } = await import("../lib/governance.js"); governance = loadGovernancePrefix(); } catch { /* optional */ }
+        // Inject the matched SKILL playbook so Hermes (the primary executor) gets
+        // the same task-shaping guidance clawbot's synth does. Without this the
+        // skill library was dead weight under Hermes — a reconciliation came back
+        // with the adjustment directions wrong because the playbook never loaded.
+        let skillText = "";
+        try {
+          const { suggestSkillsForTask } = await import("../lib/skills.js");
+          const sk = suggestSkillsForTask(text, undefined, 1);
+          if (sk.length > 0) { skillText = sk[0].body; push(`Loaded the **${sk[0].name}** skill playbook for this task.`); }
+        } catch { /* skills are optional guidance */ }
         const hr = await runHermesAgent(enrichedTask, {
           personaSuffix: personaSystemSuffix(persona),
           governance,
+          skillText,
           personaId: persona?.id ?? null,
           model: getHermesModelOverride(),
           push,

@@ -170,7 +170,10 @@ async function fireSchedule(s: Schedule): Promise<void> {
   try {
     const r = await fetch(url, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      // Scheduled marker → run route tags the job (scheduledBy) → jobs.ts
+      // journals SCHEDULED reports to the vault while the ad-hoc clutter
+      // gate stays closed.
+      headers: { "Content-Type": "application/json", "x-clawbot-scheduled": s.id },
       body: JSON.stringify(s.inputs ?? {}),
     });
     const body: any = await r.json().catch(() => ({}));

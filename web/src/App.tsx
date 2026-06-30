@@ -23,8 +23,19 @@ import { Integrations } from "./pages/Integrations";
 import { Connectors } from "./pages/Connectors";
 import { Payments } from "./pages/Payments";
 import { Presets } from "./pages/Presets";
+import { Users } from "./pages/Users";
+import { Workforce } from "./pages/Workforce";
+import { Departments } from "./pages/Departments";
+import { KnowledgePacks } from "./pages/KnowledgePacks";
+import { Quality } from "./pages/Quality";
+import { Cost } from "./pages/Cost";
+import { AuditLog } from "./pages/AuditLog";
+import { SkillForge } from "./pages/SkillForge";
+import { Orchestrate } from "./pages/Orchestrate";
+import { Login } from "./pages/Login";
+import { Onboarding } from "./pages/Onboarding";
 
-export default function App() {
+function AppShell() {
   return (
     <Layout>
       <Routes>
@@ -51,11 +62,31 @@ export default function App() {
         <Route path="/integrations" element={<Integrations />} />
         <Route path="/connectors" element={<Connectors />} />
         <Route path="/payments" element={<Payments />} />
+        <Route path="/users" element={<Users />} />
+        <Route path="/workforce" element={<Workforce />} />
+        <Route path="/departments" element={<Departments />} />
+        <Route path="/knowledge-packs" element={<KnowledgePacks />} />
+        <Route path="/quality" element={<Quality />} />
+        <Route path="/cost" element={<Cost />} />
+        <Route path="/audit" element={<AuditLog />} />
+        <Route path="/skill-forge" element={<SkillForge />} />
+        <Route path="/orchestrate" element={<Orchestrate />} />
         <Route path="/admin" element={<Admin />} />
         <Route path="/personas" element={<Personas />} />
         <Route path="/settings" element={<Settings />} />
         <Route path="*" element={<Navigate to="/dashboard" />} />
       </Routes>
     </Layout>
+  );
+}
+
+export default function App() {
+  // /login and /onboarding render bare (no sidebar/header); everything else inside the app shell.
+  return (
+    <Routes>
+      <Route path="/login" element={<Login />} />
+      <Route path="/onboarding" element={<Onboarding />} />
+      <Route path="*" element={<AppShell />} />
+    </Routes>
   );
 }

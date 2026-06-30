@@ -10,9 +10,14 @@
 // admin upload via the /governance page is reflected within seconds, not
 // minutes.
 
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readdirSync, readFileSync, statSync, writeFileSync, mkdirSync } from "node:fs";
+import { join, dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { config } from "../config.js";
+import { llmGenerate } from "./llm.js";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const CONSTRAINT_DIR = resolve(__dirname, "../../../.neuroworks/constraints");
 
 const POLICY_DIR_REL = "_governance";
 
@@ -127,4 +132,144 @@ export function loadGovernancePrefix(): string {
   prefixCache = { value, builtAt: Date.now() };
   if (included > 0) console.log(`[governance] loaded ${included} policy file${included === 1 ? "" : "s"} into system prefix (${(value.length / 1024).toFixed(1)}KB)`);
   return value;
+}
+
+// ─── Constraint extraction ───
+// Extracted from policy docs by the LLM. Each constraint is a structured rule
+// the agent must follow. Hard constraints are enforced (the agent must obey)
+// while soft constraints are preferences (the agent should prefer).
+
+export type ConstraintSeverity = "hard" | "soft";
+
+export type ExtractedConstraint = {
+  id: string;
+  policyName: string;       // source policy doc
+  rule: string;             // one-sentence rule
+  severity: ConstraintSeverity;
+  category: string;         // e.g. "data-privacy", "brand-voice", "security"
+  details?: string;         // longer explanation or exception conditions
+  reviewed: boolean;        // operator has reviewed this constraint
+  accepted: boolean;        // operator accepted or rejected
+  createdAt: string;
+};
+
+// Store constraints per-policy as JSON files in .neuroworks/constraints/
+function constraintPath(policyName: string): string {
+  return join(CONSTRAINT_DIR, `${policyName}.json`);
+}
+
+function loadConstraintsForPolicy(policyName: string): ExtractedConstraint[] {
+  const path = constraintPath(policyName);
+  try {
+    if (!existsSync(path)) return [];
+    return JSON.parse(readFileSync(path, "utf8")) as ExtractedConstraint[];
+  } catch { return []; }
+}
+
+function saveConstraintsForPolicy(policyName: string, constraints: ExtractedConstraint[]): void {
+  if (!existsSync(CONSTRAINT_DIR)) mkdirSync(CONSTRAINT_DIR, { recursive: true });
+  writeFileSync(constraintPath(policyName), JSON.stringify(constraints, null, 2), { encoding: "utf8", mode: 0o600 });
+}
+
+export function getConstraints(policyName?: string): { constraints: ExtractedConstraint[]; byPolicy: Record<string, ExtractedConstraint[]> } {
+  const all = listGovernance();
+  const byPolicy: Record<string, ExtractedConstraint[]> = {};
+  for (const p of all) {
+    if (p.reference) continue;
+    const cs = loadConstraintsForPolicy(p.name);
+    if (cs.length > 0) byPolicy[p.name] = cs;
+  }
+  const constraints = policyName ? loadConstraintsForPolicy(policyName) : Object.values(byPolicy).flat();
+  return { constraints, byPolicy };
+}
+
+export function updateConstraint(policyName: string, constraintId: string, patch: Partial<ExtractedConstraint>): ExtractedConstraint | null {
+  const cs = loadConstraintsForPolicy(policyName);
+  const idx = cs.findIndex(c => c.id === constraintId);
+  if (idx === -1) return null;
+  cs[idx] = { ...cs[idx], ...patch };
+  saveConstraintsForPolicy(policyName, cs);
+  return cs[idx];
+}
+
+// LLM extraction: given a policy doc body, ask the LLM to extract constraints.
+const EXTRACT_SYSTEM = `You are a policy analyst. Extract every explicit rule, restriction, requirement, or preference from the given policy document.
+
+For each rule, output a JSON object with these fields:
+- rule: a one-sentence description of what the agent must or should do
+- severity: "hard" if the rule uses MUST, MUST NOT, REQUIRED, PROHIBITED, FORBIDDEN, SHALL, SHALL NOT, NEVER, ALWAYS, BANNED, or similar absolute language. "soft" if it uses SHOULD, RECOMMENDED, MAY, OPTIONAL, PREFER, AVOID, or similar advisory language.
+- category: one of: data-privacy, security, brand-voice, compliance, ethical, operational, access-control, communication, quality, other
+- details: (optional) any exceptions, conditions, or additional context
+
+Output a JSON array. Do NOT add commentary outside the JSON.`;
+
+export async function extractConstraints(policyName: string): Promise<ExtractedConstraint[]> {
+  const path = join(config.vaultPath, "_governance", `${policyName}.md`);
+  if (!existsSync(path)) throw new Error(`Policy "${policyName}" not found`);
+
+  // Check if already extracted.
+  const existing = loadConstraintsForPolicy(policyName);
+  if (existing.length > 0) return existing;
+
+  const body = readFileSync(path, "utf8");
+  // Remove frontmatter for cleaner LLM input.
+  const clean = body.replace(/^---[\s\S]*?---\r?\n/, "").trim();
+
+  const result = await llmGenerate(
+    `Extract rules from this policy document:\n\n${clean.slice(0, 8000)}`,
+    EXTRACT_SYSTEM,
+    { profile: "extraction", temperature: 0.1, maxTokens: 2048 },
+  );
+
+  let constraints: { rule: string; severity: string; category: string; details?: string }[];
+  try {
+    const parsed = JSON.parse(result);
+    constraints = Array.isArray(parsed) ? parsed : (parsed.constraints ?? parsed.rules ?? []);
+  } catch {
+    // Try to extract JSON array from the raw string.
+    const m = result.match(/\[\s*\{.*\}\s*\]/s);
+    if (m) {
+      try { constraints = JSON.parse(m[0]); }
+      catch { constraints = []; }
+    } else {
+      constraints = [];
+    }
+  }
+
+  const now = new Date().toISOString();
+  const extracted: ExtractedConstraint[] = constraints
+    .filter(c => c.rule && typeof c.rule === "string")
+    .map((c, i) => ({
+      id: `${policyName}-${i}`,
+      policyName,
+      rule: String(c.rule).trim(),
+      severity: (c.severity === "hard" || c.severity === "soft") ? c.severity : "soft",
+      category: String(c.category ?? "other"),
+      details: c.details ? String(c.details).trim() : undefined,
+      reviewed: false,
+      accepted: false,
+      createdAt: now,
+    }));
+
+  saveConstraintsForPolicy(policyName, extracted);
+  return extracted;
+}
+
+// Check a proposed action string against all active constraints.
+// Returns any constraints the action would violate.
+export function checkActionAgainstConstraints(action: string, constraints: ExtractedConstraint[]): { violated: ExtractedConstraint[]; reason: string }[] {
+  const results: { violated: ExtractedConstraint[]; reason: string }[] = [];
+  const lowerAction = action.toLowerCase();
+  for (const c of constraints) {
+    if (!c.accepted) continue;
+    const lower = c.rule.toLowerCase();
+    // Simple keyword overlap check — looks for action keywords matching constraint topics.
+    const actionWords = new Set(lowerAction.split(/\s+/).filter(w => w.length > 3));
+    const constraintWords = lower.split(/\s+/).filter(w => w.length > 3);
+    const overlap = constraintWords.filter(w => actionWords.has(w));
+    if (overlap.length >= 2) {
+      results.push({ violated: [c], reason: `"${c.rule}" (${c.severity} constraint, category: ${c.category})` });
+    }
+  }
+  return results;
 }

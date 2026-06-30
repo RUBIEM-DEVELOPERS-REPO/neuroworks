@@ -17,6 +17,9 @@ export type Job = {
   template?: string;
   title?: string;
   inputs?: Record<string, unknown>;
+  // Set when a schedule fired this job (schedule id). Scheduled reports are
+  // the one job class still mirrored into the vault by default.
+  scheduledBy?: string;
   requiresApproval?: boolean;
   approvedAt?: string;
   rejectedAt?: string;
@@ -131,7 +134,52 @@ export function abortInflightJobs(reason: string): { aborted: number } {
 
 export type ProgressUpdater = (patch: Record<string, unknown>) => void;
 
+// ── Bounded job queue (backpressure) ──────────────────────────────────────
+// Without this, every job ran its work immediately (fire-and-forget), so N
+// tasks submitted together all hit the LLM at once — on free-tier OpenRouter
+// that's a thundering herd where all N stall on rate limits. With a cap, only
+// CLAWBOT_MAX_CONCURRENT_JOBS run at a time; the rest wait in FIFO order while
+// staying `pending` (still pollable). 0 = unbounded (legacy behaviour, default
+// so nothing changes unless the operator opts in).
+const MAX_CONCURRENT_JOBS = Math.max(0, Number(process.env.CLAWBOT_MAX_CONCURRENT_JOBS ?? "0"));
+// Mirror every job into the Obsidian vault as a markdown note? Default OFF — it
+// littered the user's real vault (D:\Main brain\_neuroworks\jobs\) with a new
+// file per task (incl. delegated sub-tasks + test runs). The durable record the
+// app actually reads (Reports, calendar, reflection) is the slim JSONL journal
+// via persistJobRecord, NOT these notes — so turning the mirror off loses no
+// function. Set CLAWBOT_JOURNAL_TO_VAULT=1 to restore the second-brain mirror.
+const JOURNAL_TO_VAULT = process.env.CLAWBOT_JOURNAL_TO_VAULT === "1";
+let activeJobs = 0;
+const slotWaiters: Array<() => void> = [];
+
+function acquireSlot(): Promise<void> {
+  if (MAX_CONCURRENT_JOBS <= 0) return Promise.resolve();
+  if (activeJobs < MAX_CONCURRENT_JOBS) { activeJobs += 1; return Promise.resolve(); }
+  // At capacity — queue. The waiter inherits the releaser's slot (activeJobs
+  // stays at the cap), so there's no double-count.
+  return new Promise<void>((resolve) => slotWaiters.push(resolve));
+}
+function releaseSlot(): void {
+  if (MAX_CONCURRENT_JOBS <= 0) return;
+  const next = slotWaiters.shift();
+  if (next) next();                       // hand the slot straight to the next in line
+  else activeJobs = Math.max(0, activeJobs - 1);
+}
+
+export function jobQueueStatus(): { cap: number; active: number; queued: number } {
+  return { cap: MAX_CONCURRENT_JOBS, active: activeJobs, queued: slotWaiters.length };
+}
+
 export async function runJob<T>(j: Job, fn: (push: (msg: string) => void, progress: ProgressUpdater) => Promise<T>): Promise<void> {
+  // Backpressure gate. Stays `pending` (pollable) while queued. If the job was
+  // aborted (e.g. graceful shutdown) while waiting, bail without running.
+  if (MAX_CONCURRENT_JOBS > 0 && activeJobs >= MAX_CONCURRENT_JOBS) {
+    const ahead = slotWaiters.length;
+    try { ensureEmitter(j.id); } catch { /* tolerate */ }
+    j.log.push(`[${new Date().toISOString()}] Queued — ${ahead} task${ahead === 1 ? "" : "s"} ahead (cap ${MAX_CONCURRENT_JOBS} running at once).`);
+  }
+  await acquireSlot();
+  if (j.status === "failed" || j.status === "rejected") { releaseSlot(); return; }
   j.status = "running";
   const ee = ensureEmitter(j.id);
   const push = (m: string) => {
@@ -159,11 +207,14 @@ export async function runJob<T>(j: Job, fn: (push: (msg: string) => void, progre
     push(`error: ${j.error}`);
   } finally {
     j.finishedAt = new Date().toISOString();
-    // Mirror the job into the vault so every task NeuroWorks runs is in the
-    // second brain. Don't await — never block the response on vault I/O.
-    void journalJob(j);
+    // Mirror the job into the vault as a note — OFF by default for ad-hoc tasks
+    // (a file per task cluttered the real vault). SCHEDULED runs are the
+    // exception: those are the progress reports the operator wants in the
+    // second brain (daily briefing, recurring digests). Opt everything in with
+    // CLAWBOT_JOURNAL_TO_VAULT=1.
+    if (JOURNAL_TO_VAULT || j.scheduledBy) void journalJob(j);
     // Append a slim JSONL record to .neuroworks/jobs/ so the nightly
-    // reflection still sees this job after the in-memory RECENT=50 cap
+    // reflection still sees this job after the in-memory RECENT=200 cap
     // evicts it or the server restarts. Synchronous + best-effort —
     // appendFileSync is fast, and persistJobRecord swallows errors so a
     // disk hiccup can't fail the response.
@@ -172,6 +223,9 @@ export async function runJob<T>(j: Job, fn: (push: (msg: string) => void, progre
     // streams cleanly, then drop the emitter after a short grace.
     try { ee.emit("done", { status: j.status, error: j.error }); } catch { /* tolerate */ }
     dropEmitter(j.id);
+    // Release the concurrency slot LAST so the next queued job starts only
+    // after this one is fully wound down.
+    releaseSlot();
   }
 }
 

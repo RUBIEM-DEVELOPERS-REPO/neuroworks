@@ -17,8 +17,9 @@
 // extractor crash on one note shouldn't take search down for the rest).
 
 import MiniSearch from "minisearch";
-import { readFileSync, readdirSync, statSync, existsSync } from "node:fs";
-import { join, relative, sep, extname } from "node:path";
+import { readFileSync, readdirSync, statSync, existsSync, writeFileSync, mkdirSync } from "node:fs";
+import { join, relative, sep, extname, dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 type IndexedDoc = {
   id: string;          // vault-relative path with forward slashes
@@ -62,20 +63,61 @@ export function isBuildInProgress(): boolean {
   return Date.now() - buildEndedAt < BUILD_POST_GRACE_MS;
 }
 
+// Shared config — newIndex() AND MiniSearch.loadJSON() must use the SAME
+// options or load throws ("incompatible"). Factor it out so they can't drift.
+const INDEX_OPTIONS = {
+  fields: ["title", "body"],
+  storeFields: ["path", "title"],
+  searchOptions: {
+    // Prefix matching catches "neur" → "neuroworks"; fuzzy 0.2 tolerates
+    // one-character typos on words of length ≥5 without exploding the
+    // false-positive rate.
+    prefix: true,
+    fuzzy: 0.2,
+    boost: { title: 3 },
+    combineWith: "AND" as const,
+  },
+};
+
 function newIndex(): MiniSearch<IndexedDoc> {
-  return new MiniSearch<IndexedDoc>({
-    fields: ["title", "body"],
-    storeFields: ["path", "title"],
-    searchOptions: {
-      // Prefix matching catches "neur" → "neuroworks"; fuzzy 0.2 tolerates
-      // one-character typos on words of length ≥5 without exploding the
-      // false-positive rate.
-      prefix: true,
-      fuzzy: 0.2,
-      boost: { title: 3 },
-      combineWith: "AND",
-    },
-  });
+  return new MiniSearch<IndexedDoc>(INDEX_OPTIONS);
+}
+
+// Persisted snapshot lives in the state dir (next to executor.json), NOT the
+// vault — it's derived data, and on Docker the state dir is its own volume.
+// __dirname = server/src/lib → ../../../.neuroworks at the repo/app root.
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const PERSIST_PATH = resolve(__dirname, "../../../.neuroworks", "vault-index.json");
+const PERSIST_VERSION = 1;
+
+// Serialize the live index so a cold boot is instant instead of a 1-2s rebuild.
+// Best-effort: a write failure (read-only FS, disk full) must never fail a build.
+function persistIndex(idx: MiniSearch<IndexedDoc>, docs: number): void {
+  try {
+    mkdirSync(dirname(PERSIST_PATH), { recursive: true });
+    const payload = JSON.stringify({ v: PERSIST_VERSION, builtAt: Date.now(), docs, index: idx.toJSON() });
+    writeFileSync(PERSIST_PATH, payload, "utf8");
+  } catch (e: any) {
+    console.warn(`[vault-index] persist skipped: ${e?.message ?? e}`);
+  }
+}
+
+// Load a persisted snapshot into memory for instant cold-start readiness.
+// Returns true on success. The caller still kicks a background rebuild to catch
+// any edits made while the server was down.
+export function loadPersistedIndex(): boolean {
+  try {
+    if (!existsSync(PERSIST_PATH)) return false;
+    const parsed = JSON.parse(readFileSync(PERSIST_PATH, "utf8"));
+    if (parsed?.v !== PERSIST_VERSION || !parsed.index) return false;
+    index = MiniSearch.loadJS(parsed.index, INDEX_OPTIONS) as MiniSearch<IndexedDoc>;
+    lastBuiltAt = Number(parsed.builtAt) || Date.now();
+    console.log(`[vault-index] loaded persisted snapshot — ${index.documentCount} docs (will refresh in background)`);
+    return true;
+  } catch (e: any) {
+    console.warn(`[vault-index] persisted snapshot ignored: ${e?.message ?? e}`);
+    return false;
+  }
 }
 
 function* walk(root: string): Generator<string> {
@@ -139,6 +181,9 @@ export function buildIndex(vaultRoot: string): Promise<void> {
       lastBuiltAt = Date.now();
       const elapsed = Date.now() - t0;
       console.log(`[vault-index] built — ${count} docs in ${elapsed}ms`);
+      // Snapshot to disk so the next cold boot is instant (load + background
+      // refresh) instead of a full walk. Synchronous + best-effort.
+      persistIndex(next, count);
     } catch (e: any) {
       console.warn(`[vault-index] build failed: ${e?.message ?? e}`);
     } finally {

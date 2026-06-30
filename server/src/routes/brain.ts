@@ -47,6 +47,23 @@ brainRouter.get("/file", (req, res) => {
   catch (e: any) { res.status(400).json({ error: e.message }); }
 });
 
+// Download any vault file as an attachment (text OR binary — PDF/DOCX/etc.).
+// res.download streams the file + sets Content-Disposition. Path is resolved
+// inside the vault root with the usual escape guard.
+brainRouter.get("/download", (req, res) => {
+  if (!requireVault(res)) return;
+  const rel = String(req.query.path ?? "").trim().replace(/^[/\\]+/, "");
+  if (!rel) return res.status(400).json({ error: "path required" });
+  if (rel.split(/[/\\]/).some(seg => seg === "" || seg === "." || seg === "..")) {
+    return res.status(400).json({ error: "invalid path" });
+  }
+  const full = resolve(config.vaultPath, rel);
+  const vaultRoot = resolve(config.vaultPath);
+  if (!full.startsWith(vaultRoot + sep)) return res.status(400).json({ error: "path escapes vault" });
+  if (!existsSync(full) || !statSync(full).isFile()) return res.status(404).json({ error: "not found" });
+  res.download(full, basename(full));
+});
+
 // Save a markdown / text file edit from the Doc Editor page. Goes through
 // the same writeVaultFile + commit-queue as agent-side writes so the
 // operator's edits get the same audit trail (committed, eventually pushed

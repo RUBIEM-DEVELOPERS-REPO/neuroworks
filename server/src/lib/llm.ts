@@ -30,7 +30,7 @@ export type LLMCallOptions = {
   onRoutingDecision?: (info: { backend: Backend; model: string; reason?: string; tokenEstimate: number }) => void;
 };
 
-export type Backend = "ollama" | "openrouter" | "minimax";
+export type Backend = "ollama" | "openrouter" | "minimax" | "little-coder";
 
 // MiniMax chat model names start with "MiniMax-" (e.g. MiniMax-M3,
 // MiniMax-M2.7-highspeed). A caller can pin one explicitly (opts.model) and we
@@ -321,6 +321,25 @@ export async function llmGenerateWithMeta(prompt: string, system?: string, opts:
       throw e;
     }
   }
+  // Little-coder harness for small local models. When CLAWBOT_USE_LITTLE_CODER=1
+  // and the model is a small local model and little-coder is installed, route
+  // through the optimised small-model execution path. OpenRouter/cloud models are
+  // unaffected — they keep the existing dispatch path above.
+  const { shouldUseHarness, executeViaLittleCoder } = await import("./small-model-harness.js");
+  if (shouldUseHarness(model)) {
+    if (opts.onRoutingDecision) {
+      try { opts.onRoutingDecision({ backend: "little-coder", model, reason: `routed through little-coder harness for small-model optimisations`, tokenEstimate }); } catch { /* consumer error */ }
+    }
+    try {
+      // little-coder doesn't support streaming; buffer then emit as one chunk.
+      const result = await executeViaLittleCoder(prompt, system, { model, maxTokens: opts.maxTokens, temperature: opts.temperature });
+      if (opts.onToken) { try { opts.onToken(result.text, result.text); } catch { /* consumer error */ } }
+      return result;
+    } catch (e: any) {
+      console.warn(`[llm] little-coder harness failed — falling back to Ollama: ${String(e?.message ?? e).slice(0, 140)}`);
+      // fall through to the normal Ollama dispatch
+    }
+  }
   return callOllamaStream(prompt, system, model, opts.onToken, opts.maxTokens, opts.temperature);
 }
 
@@ -340,9 +359,10 @@ export async function llmHealth(): Promise<{
   ollama: { ok: boolean; model: string; error?: string };
   openrouter: { enabled: boolean; ok: boolean; model: string; error?: string };
   minimax: { enabled: boolean; ok: boolean; model: string; error?: string };
+  littleCoder: { enabled: boolean; available: boolean; error?: string };
   primary: Backend;
 }> {
-  const [ollama, or, mm] = await Promise.all([
+  const [ollama, or, mm, lc] = await Promise.all([
     (async () => {
       try {
         const res = await fetch(`${config.ollamaHost}/api/tags`);
@@ -358,6 +378,16 @@ export async function llmHealth(): Promise<{
     config.minimaxEnabled
       ? import("./minimax.js").then(m => m.minimaxHealth())
       : Promise.resolve({ ok: false, model: config.minimaxModel, error: "disabled (no MINIMAX_API_KEY)" }),
+    (async () => {
+      try {
+        const { isLittleCoderAvailable, isHarnessEnabled } = await import("./small-model-harness.js");
+        const available = isLittleCoderAvailable();
+        const enabled = isHarnessEnabled();
+        return { enabled, available, error: !available ? "little-coder not installed (npm install -g little-coder)" : undefined };
+      } catch {
+        return { enabled: false, available: false, error: "harness module unavailable" };
+      }
+    })(),
   ]);
   // "Primary" reflects which backend handles a generic /balanced call. If OR is
   // enabled AND set as the balanced profile, it's primary. Otherwise Ollama.
@@ -366,6 +396,7 @@ export async function llmHealth(): Promise<{
     ollama,
     openrouter: { enabled: config.openrouterEnabled, ...or },
     minimax: { enabled: config.minimaxEnabled, ...mm },
+    littleCoder: lc,
     primary,
   };
 }

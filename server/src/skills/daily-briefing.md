@@ -27,6 +27,9 @@ a situational brief.
 - <Concrete open item, with where it sits and who's waiting>
 - <...>
 
+## Commitments on the calendar today
+- <Dated facts recalled from memory for this date — e.g. "Q3 board meeting (noted 3 weeks ago)". Drop the section if there are none.>
+
 ## Inbox — needs you
 - **<sender / subject>** — <one-line summary of what they're asking and the deadline>
 - <...>

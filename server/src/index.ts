@@ -13,7 +13,7 @@ import { modelsRouter } from "./routes/models.js";
 import { ollamaGenerate } from "./lib/ollama.js";
 import { shutdownCommitQueue } from "./lib/commit-queue.js";
 import { startVaultWatcher, stopVaultWatcher, startVaultPullScheduler, stopVaultPullScheduler, getVaultHealth } from "./lib/vault.js";
-import { buildIndex } from "./lib/vault-index.js";
+import { buildIndex, loadPersistedIndex } from "./lib/vault-index.js";
 import { autodiscoverLocalPeers } from "./lib/peer-registry.js";
 import { ensurePool, shutdownManagedWorker } from "./lib/worker-manager.js";
 import { loadPersonas } from "./lib/personas.js";
@@ -25,6 +25,8 @@ import { skillsRouter } from "./routes/skills.js";
 import { uploadsRouter } from "./routes/uploads.js";
 import { teamRouter } from "./routes/team.js";
 import { teamsRouter } from "./routes/teams.js";
+import { handoffRouter } from "./routes/handoff.js";
+import { workforceRouter } from "./routes/workforce.js";
 import { schedulesRouter } from "./routes/schedules.js";
 import { startScheduleScheduler, stopScheduleScheduler } from "./lib/schedules.js";
 import { governanceRouter } from "./routes/governance.js";
@@ -39,9 +41,20 @@ import { sttRouter } from "./routes/stt.js";
 import { integrationsRouter } from "./routes/integrations.js";
 import { presetsRouter } from "./routes/presets.js";
 import { connectorsRouter } from "./routes/connectors.js";
+import { seedAiiAWebsiteConnector } from "./lib/connectors.js";
 import { paymentsRouter } from "./routes/payments.js";
 import { executorRouter } from "./routes/executor.js";
 import { primitivesRouter } from "./routes/primitives.js";
+import { usersRouter } from "./routes/users.js";
+import { authRouter } from "./routes/auth.js";
+import { onboardingRouter } from "./routes/onboarding.js";
+import { departmentsRouter } from "./routes/departments.js";
+import { knowledgePacksRouter } from "./routes/knowledge-packs.js";
+import { qualityRouter } from "./routes/quality.js";
+import { costRouter } from "./routes/cost.js";
+import { auditRouter } from "./routes/audit.js";
+import { skillForgeRouter } from "./routes/skill-forge.js";
+import { orchestratorRouter } from "./routes/orchestrator.js";
 import { startEmailBridge, stopEmailBridge } from "./lib/email.js";
 import { originGuard } from "./lib/origin-guard.js";
 
@@ -103,6 +116,8 @@ app.use("/api/skills", skillsRouter);
 app.use("/api/uploads", uploadsRouter);
 app.use("/api/team", teamRouter);
 app.use("/api/teams", teamsRouter);
+app.use("/api/handoff", handoffRouter);
+app.use("/api/workforce", workforceRouter);
 app.use("/api/schedules", schedulesRouter);
 app.use("/api/governance", governanceRouter);
 app.use("/api/email", emailRouter);
@@ -119,6 +134,16 @@ app.use("/api/connectors", connectorsRouter);
 app.use("/api/payments", paymentsRouter);
 app.use("/api/executor", executorRouter);
 app.use("/api/primitives", primitivesRouter);
+app.use("/api/users", usersRouter);
+app.use("/api/auth", authRouter);
+app.use("/api/onboarding", onboardingRouter);
+app.use("/api/departments", departmentsRouter);
+app.use("/api/knowledge-packs", knowledgePacksRouter);
+app.use("/api/quality", qualityRouter);
+app.use("/api/cost", costRouter);
+app.use("/api/audit", auditRouter);
+app.use("/api/skill-forge", skillForgeRouter);
+app.use("/api/orchestrate", orchestratorRouter);
 
 // Global error handler — every route mounts before this so any throw bubbles
 // up here. We log the request method+url for debugability and return a
@@ -151,7 +176,12 @@ app.listen(config.port, "127.0.0.1", () => {
   console.log(`\n  ▶ neuroworks server: http://127.0.0.1:${config.port}`);
   console.log(`    web ui will open at: http://127.0.0.1:7470`);
   console.log(`    vault:  ${config.vaultPath}`);
-  console.log(`    ollama: ${config.ollamaHost} (${config.ollamaModel})\n`);
+    console.log(`    ollama: ${config.ollamaHost} (${config.ollamaModel})\n`);
+
+  // Seed built-in connectors so they appear in the UI + agent tool catalog
+  // without manual setup. Idempotent — skips if already seeded.
+  try { const s = seedAiiAWebsiteConnector(); if (s) console.log(`  ✓ seeded connector "${s.label}" (${s.endpoints?.length ?? 0} endpoints)`); }
+  catch (e: any) { console.warn(`  ⚠ connector seeding failed: ${e?.message ?? e}`); }
 
   // Pre-warm the default model so the first user task doesn't pay model-load
   // tax (5-8s on cold cache). Fire-and-forget — server is already accepting
@@ -242,10 +272,14 @@ app.listen(config.port, "127.0.0.1", () => {
   // and the search code falls back to grep if the index isn't ready yet.
   // Primary-only because workers proxy vault search through the primary.
   if (config.role === "primary") {
+    // Instant readiness: load the persisted snapshot first (serves queries
+    // immediately), then kick a background rebuild to fold in any edits made
+    // while the server was down. Cold (no snapshot) falls straight to build.
+    const warm = loadPersistedIndex();
     void buildIndex(config.vaultPath).catch(e =>
       console.warn(`  ⚠ vault index warm-up failed (non-fatal): ${e?.message ?? e}`)
     );
-    console.log(`  ⓘ vault index warming...`);
+    console.log(warm ? `  ⓘ vault index ready from snapshot — refreshing in background...` : `  ⓘ vault index warming...`);
   }
 
   // Periodic git pull from origin so Obsidian edits made on another machine

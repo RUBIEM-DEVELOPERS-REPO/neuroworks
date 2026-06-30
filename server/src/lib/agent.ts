@@ -5,6 +5,7 @@ import { searchVault, searchVaultFilenames } from "./vault.js";
 import { suggestSkillsForIntent, suggestSkillsForTask, topSkillScoreForTask } from "./skills.js";
 import { config } from "../config.js";
 import { PLAN_SYSTEM, POLISHED_DIRECT, POLISHED_SYNTH, TRIVIAL_DIRECT } from "./agent-prompts.js";
+import { injectLanguagePrompt } from "./language-prompts.js";
 import { classifyDeliverable, taskWantsResearch } from "./deliverable.js";
 
 // Parse the "Interpretation: intent=foo, target=..." line that chat.ts
@@ -295,8 +296,25 @@ export async function plan(task: string, _personaSystemSuffix?: string, push?: (
     const weekAgo = iso(new Date(now.getTime() - 7 * 864e5));
     activityContext = `\n\nActivity-report context: the task asks about the agent's OWN completed work/tasks over a time window. The FIRST step MUST be calendar.activity (NOT vault.search / research.deep — completed-task records live in the job history, not vault notes; searching the vault returns "no records" and produces a false empty report). Scope it with from/to. Reference dates from the server clock: today=${today}, yesterday=${yesterday}, this-week-start=${weekAgo}. Use from=${yesterday} to=${yesterday} for "yesterday", from=${today} to=${today} for "today", from=${weekAgo} to=${today} for "this week". Then synthesise the report from the returned jobs (each has title, template, kind, status, score). If the task also asks to email/send it, chain email.send AFTER the synth with the report as the body.\n`;
   }
+  // Memory hint — when the task asks the agent to RECALL something it was told
+  // earlier ("what do you remember about X", "what do we know about the Acme
+  // deal", "what's on file about …") or to PERSIST a durable fact ("remember
+  // that …", "note that …", "keep in mind …"), route to the memory.* tools.
+  // Without this the planner sends recall queries to research.deep / vault.search
+  // (which do NOT read _neuroworks/memory) and drops "remember that …" on the
+  // floor — exactly the orphaned-memory failure the angle probe surfaced (the
+  // laptop-budget fact on disk was never recalled on either executor).
+  let memoryContext = "";
+  const rememberRe = /\b(remember\s+(that|this|to|the|my|our)?|note\s+(that|down)|make\s+a\s+note|keep\s+in\s+mind|don'?t\s+forget|store\s+(that|this)|for\s+future\s+reference|take\s+note)\b/i;
+  const recallRe = /\b(what\s+do\s+(you|we)\s+(remember|know)|do\s+you\s+remember|recall(?:\s+(what|anything|the))?|on\s+file\s+about|what\s+(have|did)\s+(you|we)\s+(note|record|store|save)|from\s+(your\s+)?memory|what\s+do\s+you\s+have\s+on)\b/i;
+  if (rememberRe.test(task)) {
+    memoryContext = `\n\nMemory-write context: the task asks you to durably REMEMBER a fact. The plan MUST include a memory.note step with {subject, fact} — subject is the entity the fact is ABOUT (a person, project, or topic, e.g. "Q3 board meeting", "Priya", "acme-deal"), fact is the detail to remember verbatim (dates, amounts, names). Add an optional {date: "YYYY-MM-DD"} when the fact is time-bound (a meeting, deadline, renewal) so it surfaces on the calendar. This persists to long-term memory for future sessions — do NOT use vault.create_zettel; memory.note is the dedicated store memory.recall reads back. If the task also asks to confirm/read it back, chain memory.recall after.\n`;
+  } else if (recallRe.test(task)) {
+    memoryContext = `\n\nMemory-recall context: the task asks what the agent REMEMBERS / has on file about something. The FIRST step MUST be memory.search with {query: "<the key terms — the entity/topic the user named>"} (NOT research.deep / vault.search — durable facts live in _neuroworks/memory, which those tools do not read). If the user named an exact subject stored before, memory.recall {subject} is more precise. Synthesise the answer from the returned facts; if none are found, say so plainly rather than inventing.\n`;
+  }
   // Compact catalog: ~40% smaller prompt → faster planning on small models.
-  const sys = PLAN_SYSTEM + primitivesPromptCatalog({ compact: true }) + vaultContext + researchContext + companyDataContext + localFsContext + emailContext + activityContext + explicitToolContext;
+  const sys = injectLanguagePrompt(PLAN_SYSTEM, "plan") + primitivesPromptCatalog({ compact: true }) + vaultContext + researchContext + companyDataContext + localFsContext + emailContext + activityContext + memoryContext + explicitToolContext;
+
 
   // Race the planner LLM call against PLAN_TIMEOUT_MS. If the LLM stalls,
   // we fall back to an empty plan; the caller then uses defaultVaultPlan
@@ -740,6 +758,24 @@ export async function planAndExecute(
   const bareTask = parseUserRequestFromTask(task);
   const fromTemplate = taskWasTemplated(task);
 
+  // Memory intent — "remember that …" / "what do you remember about …" must go
+  // through the PLANNER (which has the memory.* routing hint), NOT the triage→
+  // direct-answer shortcut or the creative/procedural forceDirect path. Both of
+  // those skip tools entirely, so a short recall like "what do you remember
+  // about the Q3 board meeting?" was answered from thin air in ~9s instead of
+  // calling memory.search. Detect it here and force the tool-using plan path.
+  // Require an object keyword after "remember" so the WRITE pattern doesn't also
+  // match the recall question "what do you remember ABOUT x" (no that/this/the…).
+  const MEM_REMEMBER_RE = /\b(remember\s+(that|this|to|the|my|our)|note\s+(that|down)|make\s+a\s+note|keep\s+in\s+mind|don'?t\s+forget|store\s+(that|this)|for\s+future\s+reference|take\s+note)\b/i;
+  const MEM_RECALL_RE = /\b(what\s+do\s+(you|we)\s+(remember|know)|do\s+you\s+remember|recall(?:\s+(what|anything|the))?|on\s+file\s+about|what\s+(have|did)\s+(you|we)\s+(note|record|store|save)|from\s+(your\s+)?memory|what\s+do\s+you\s+have\s+on)\b/i;
+  const memoryIntent = !fromTemplate && (MEM_REMEMBER_RE.test(bareTask) || MEM_RECALL_RE.test(bareTask));
+  // Daily-briefing intent — must use calendar.plan_day (meetings + scheduled
+  // tasks + DATED MEMORY COMMITMENTS + carryover), not calendar.activity (which
+  // only has past jobs and no commitments). The free-tier planner picks between
+  // them nondeterministically, so pin it.
+  const BRIEFING_RE = /\b(daily|morning)\s+brief(ing)?\b|\bbrief\s+me\s+on\s+(my\s+)?(day|today)\b|\b(plan|plan\s+out)\s+my\s+day\b|\bwhat'?s\s+on\s+(for\s+)?(my\s+)?(today|day)\b/i;
+  const briefingIntent = !fromTemplate && BRIEFING_RE.test(bareTask);
+
   // Governance prefix — admin-curated policies under _governance/ in the
   // vault get prepended to the persona suffix so every downstream LLM call
   // (planner, synth, direct-answer, rescue retries) sees them as system
@@ -785,6 +821,8 @@ export async function planAndExecute(
   // wants grounding — and never override a template-driven run.
   const deliverableClass = classifyDeliverable(bareTask);
   const forceDirect = !fromTemplate
+    && !memoryIntent
+    && !briefingIntent
     && (deliverableClass === "creative" || deliverableClass === "procedural")
     && !taskWantsResearch(bareTask);
   if (forceDirect) {
@@ -820,7 +858,7 @@ export async function planAndExecute(
   // look-up wants the web, Multi-perspective wants the fan-out. We must NOT
   // shortcut to a direct LLM answer in that case even when the topic itself
   // looks like a definition question.
-  if (!fromTemplate && TRIAGE_ENABLED && bareTask.length > 0 && bareTask.length <= TRIAGE_MAX_CHARS) {
+  if (!fromTemplate && !memoryIntent && !briefingIntent && TRIAGE_ENABLED && bareTask.length > 0 && bareTask.length <= TRIAGE_MAX_CHARS) {
     const heuristicDirect = looksLikeDirectAnswer(bareTask);
     const topic = extractTopic(bareTask);
     // Vault pre-check uses the filename-only scan: we only need a yes/no
@@ -920,9 +958,36 @@ export async function planAndExecute(
       // direct answers (explainers, definitions with no vault hit) keep
       // the POLISHED_DIRECT framing and the larger 384-token budget.
       const isTrivial = isTriviallyDirectAnswer(bareTask, taskHasPriorTurnContext(task));
+      // Skill injection for the direct-answer path. A deliverable-shaped task
+      // (reconciliation, financial summary, a BRD with the data inline) can route
+      // here when it's self-contained and needs no research — but it STILL
+      // deserves its playbook. Without this, the matched skill only reached
+      // synthesize()'s path and these tasks got no guidance (and a reconciliation
+      // came out with the adjustment directions wrong). Trivial inputs
+      // (greetings/arithmetic) skip it — no skill, tight budget.
+      let directSkillBlock = "";
+      let directSkillName: string | undefined;
+      if (!isTrivial) {
+        try {
+          const sIntent = parseIntentFromTask(task);
+          const sBare = parseUserRequestFromTask(task);
+          const sTop = topSkillScoreForTask(sBare, sIntent);
+          if (sTop && sTop.score >= 15) {
+            const sk = suggestSkillsForTask(sBare, sIntent, 1);
+            if (sk.length > 0) {
+              directSkillName = sk[0].name;
+              directSkillBlock = `\n\n--- Skill playbook: ${sk[0].name} ---\n${sk[0].body.slice(0, 3000)}\n--- end playbook ---`;
+            }
+          }
+        } catch { /* skill lookup must never block the answer */ }
+      }
+      const hasDirectSkill = !!directSkillBlock;
+      if (hasDirectSkill) push(`Applying the ${directSkillName} playbook to this deliverable.`);
       const directPrompt = isTrivial ? TRIVIAL_DIRECT : POLISHED_DIRECT;
-      const directMaxTokens = isTrivial ? 96 : 384;
-      const sys = (opts.personaSystemSuffix ? opts.personaSystemSuffix + "\n\n" : "") + directPrompt;
+      // A skill-guided deliverable needs room (a reconciliation bridge, a BRD)
+      // — the 384-token default truncates it. Give it a generous budget.
+      const directMaxTokens = isTrivial ? 96 : (hasDirectSkill ? 1400 : 384);
+      const sys = (opts.personaSystemSuffix ? opts.personaSystemSuffix + "\n\n" : "") + injectLanguagePrompt(directPrompt, "direct") + directSkillBlock;
       try {
         // SPEED: direct-answer prose is short. We route through the
         // TRIAGE profile by default, which picks the user's
@@ -933,7 +998,11 @@ export async function planAndExecute(
         // larger model's prose quality. Token budgets:
         //   trivial → 96 (one sentence is plenty)
         //   non-trivial → 384 (40-180 words of professional prose)
-        const useFastDirect = process.env.CLAWBOT_FAST_DIRECT_ANSWER !== "0";
+        // A skill-guided deliverable goes to the synthesis-tier model — the
+        // tiny triage model can't reliably apply a multi-step playbook (it got
+        // a reconciliation's adjustment directions wrong). Plain direct answers
+        // keep the fast path.
+        const useFastDirect = process.env.CLAWBOT_FAST_DIRECT_ANSWER !== "0" && !hasDirectSkill;
         // Inner helper so we can re-issue with a different backend when the
         // first attempt hits OR 429 / transport hiccup. Keeps the late-vault
         // race + return shape identical between primary and retry paths.
@@ -988,7 +1057,42 @@ export async function planAndExecute(
   // bareTask (computed at top) strips persona framing so URL / path / verb
   // anchors match from line-start.
   onProgress?.({ phase: "planning" });
-  let p = heuristicPlan(bareTask, { hasAttachments: /\nAttached documents \(user uploaded as context/.test(task) }) ?? { steps: [], summary: undefined, waves: [] };
+  // Memory intents get a DETERMINISTIC plan. The free-tier planner is too
+  // unreliable to emit the right memory.* step even with the routing hint, and
+  // heuristicPlan would otherwise grab "remember/recall … about X" as a research
+  // shape (research.deep), which is exactly the orphaned-memory miss the probe
+  // showed. Build the memory.note / memory.search step here from the text.
+  const buildMemoryPlan = (): Plan | null => {
+    if (!memoryIntent) return null;
+    // Recall wins UNLESS the task leads with an imperative "remember/note …"
+    // (the roundtrip "Remember that X. Then tell me what you have on file" — the
+    // write is the part we can't afford to drop). Otherwise "what do you
+    // remember about X" is a read, not a write.
+    const startsImperativeRemember = /^\s*(please\s+)?(remember|note|store|make\s+a\s+note|keep\s+in\s+mind|take\s+note|jot\s+down)\b/i.test(bareTask);
+    const isRecall = !startsImperativeRemember && MEM_RECALL_RE.test(bareTask);
+    if (!isRecall && MEM_REMEMBER_RE.test(bareTask)) {
+      const fact = bareTask
+        .replace(/^.*?\b(remember|note|keep\s+in\s+mind|don'?t\s+forget|store|take\s+note|make\s+a\s+note)\b[\s:,-]*(that|this|to|the)?\s*/i, "")
+        .trim() || bareTask;
+      const isoDate = (bareTask.match(/\b(\d{4}-\d{2}-\d{2})\b/) || [])[1];
+      const subject = (extractTopic(fact) || fact.split(/\s+/).slice(0, 5).join(" ")).slice(0, 80);
+      const args: Record<string, unknown> = { subject, fact };
+      if (isoDate) args.date = isoDate;
+      push(`Filing this to long-term memory under "${subject}"${isoDate ? ` (calendar-anchored to ${isoDate})` : ""}.`);
+      return { steps: [{ tool: "memory.note", args, label: humanStepLabel("memory.note", args) }], summary: "Persisting a fact to long-term memory", waves: [] };
+    }
+    const query = (extractTopic(bareTask) || bareTask).slice(0, 120);
+    push(`Searching long-term memory for "${query}".`);
+    return { steps: [{ tool: "memory.search", args: { query }, label: humanStepLabel("memory.search", { query }) }], summary: "Recalling from long-term memory", waves: [] };
+  };
+  const buildBriefingPlan = (): Plan | null => {
+    if (!briefingIntent) return null;
+    const iso = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    const date = (bareTask.match(/\b(\d{4}-\d{2}-\d{2})\b/) || [])[1] ?? iso(new Date());
+    push(`Building the day plan for ${date} — meetings, scheduled tasks, dated memory commitments, and carryover.`);
+    return { steps: [{ tool: "calendar.plan_day", args: { date }, label: humanStepLabel("calendar.plan_day", { date }) }], summary: "Daily briefing from the day plan", waves: [] };
+  };
+  let p = buildMemoryPlan() ?? buildBriefingPlan() ?? heuristicPlan(bareTask, { hasAttachments: /\nAttached documents \(user uploaded as context/.test(task) }) ?? { steps: [], summary: undefined, waves: [] };
   if (p.steps.length > 0) {
     // Customer-facing context-tier badge based on what the plan touches.
     // Helps the customer see "this answer drew on your vault" vs "this
@@ -2204,8 +2308,8 @@ async function synthesize(
       try {
         const { POLISHED_DIRECT } = await import("./agent-prompts.js");
         const system = personaSystemSuffix
-          ? `${POLISHED_DIRECT}\n\n${personaSystemSuffix}`
-          : POLISHED_DIRECT;
+          ? `${injectLanguagePrompt(POLISHED_DIRECT, "direct")}\n\n${personaSystemSuffix}`
+          : injectLanguagePrompt(POLISHED_DIRECT, "direct");
         const answer = await ollamaGenerate(task, system, { profile: "synthesis", complexity: "high", maxTokens: 1024 } as any);
         onPartial?.(answer.trim());
         return { answer: answer.trim() };
@@ -2229,8 +2333,8 @@ async function synthesize(
       opts.push?.(`Drafting the ${dClass} deliverable from professional knowledge.`);
       try {
         const system = personaSystemSuffix
-          ? `${POLISHED_SYNTH}\n\n${personaSystemSuffix}`
-          : POLISHED_SYNTH;
+          ? `${injectLanguagePrompt(POLISHED_SYNTH, "synth")}\n\n${personaSystemSuffix}`
+          : injectLanguagePrompt(POLISHED_SYNTH, "synth");
         const answer = await ollamaGenerate(task, system, { profile: "synthesis", complexity: "high", maxTokens: 1024 } as any);
         if (answer.trim().length > 0) {
           onPartial?.(answer.trim());

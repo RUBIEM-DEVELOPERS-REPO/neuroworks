@@ -494,16 +494,27 @@ export function startReflectionScheduler(): void {
   const REFLECTION_HOUR = Number(process.env.CLAWBOT_REFLECTION_HOUR ?? "2");
   const tick = async () => {
     const now = new Date();
-    const today = now.toISOString().slice(0, 10);
-    if (now.getHours() === REFLECTION_HOUR && lastRunDate !== today) {
-      lastRunDate = today;
-      console.log(`[reflection] firing daily reflection (hour=${REFLECTION_HOUR})`);
-      try { await runReflection(); }
-      catch (e: any) { console.warn(`[reflection] scheduler run failed: ${e?.message ?? e}`); }
-    }
+    // LOCAL date — toISOString() is UTC and put late-evening runs on the wrong
+    // day for any non-UTC timezone (same off-by-one the Calendar had).
+    const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+    if (now.getHours() < REFLECTION_HOUR || lastRunDate === today) return;
+    // CATCH-UP, not exact-hour: the old `getHours() === REFLECTION_HOUR` guard
+    // silently skipped any night the server was down at 2 AM — which is exactly
+    // when a locally-run server is most likely to be off (2026-06-10/11 were
+    // lost this way). Now any tick after the reflection hour runs it, once per
+    // day, with the on-disk note as the restart-proof guard.
+    try {
+      const { existsSync } = await import("node:fs");
+      const { join } = await import("node:path");
+      const { config } = await import("../config.js");
+      if (existsSync(join(config.vaultPath, REFLECTION_DIR, `${today}.md`))) { lastRunDate = today; return; }
+    } catch { /* vault unreachable — fall through; runReflection will surface it */ }
+    lastRunDate = today;
+    console.log(`[reflection] firing daily reflection (hour>=${REFLECTION_HOUR}, catch-up)`);
+    try { await runReflection(); }
+    catch (e: any) { console.warn(`[reflection] scheduler run failed: ${e?.message ?? e}`); }
   };
-  // Run a check every 10 minutes — gives a 10-min window inside REFLECTION_HOUR
-  // for the run to fire even if the server boots mid-hour. Cheap.
+  // Check every 10 minutes; with catch-up the precise boot time no longer matters.
   scheduler = setInterval(tick, 10 * 60_000);
   void tick(); // also check immediately on boot
 }

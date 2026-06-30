@@ -19,7 +19,7 @@ import { Card, Button, showToast } from "../components/Card";
 export function DocEditor() {
   // useParams with splat — react-router v6 gives the rest in params["*"].
   const params = useParams();
-  const path = (params["*"] ?? "").replace(/^[/\\]+/, "");
+  const path = (params["*"] ?? "").replace(/^[/\\]+/, "").trim();
   const nav = useNavigate();
   const [original, setOriginal] = useState<string | null>(null);
   const [content, setContent] = useState<string>("");
@@ -28,19 +28,34 @@ export function DocEditor() {
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [saveErr, setSaveErr] = useState<string | null>(null);
   const [showPreview, setShowPreview] = useState(true);
-  const reloadCountRef = useRef(0);
+  const [reloadCount, setReloadCount] = useState(0);
+
+  // A real vault document lives under a folder ("0-Inbox/x.md") or carries a
+  // file extension. A bare token with neither — e.g. "edit" from a stray
+  // /edit/edit navigation or a stale link — is almost certainly a routing
+  // artifact, not a file the user meant to open.
+  const looksLikeArtifact = (p: string) => !!p && !p.includes("/") && !/\.[a-z0-9]+$/i.test(p);
 
   useEffect(() => {
-    if (!path) { setOriginal(""); setContent(""); return; }
+    if (!path) { setOriginal(""); setContent(""); setLoadErr(null); return; }
     let alive = true;
     api.brainFile(path).then(r => {
       if (!alive) return;
       setOriginal(r.content);
       setContent(r.content);
       setLoadErr(null);
-    }).catch(e => { if (alive) setLoadErr(e?.message ?? String(e)); });
+    }).catch(e => {
+      if (!alive) return;
+      const msg = e?.message ?? String(e);
+      // A missing bare artifact (e.g. /edit/edit → "edit") isn't a real doc —
+      // bounce back to the clean picker instead of showing a scary ENOENT for
+      // "D:\Main brain\edit". A real-looking path keeps the error + the
+      // Generate-from-source recovery below.
+      if (/ENOENT/i.test(msg) && looksLikeArtifact(path)) { nav("/edit", { replace: true }); return; }
+      setLoadErr(msg);
+    });
     return () => { alive = false; };
-  }, [path, reloadCountRef.current]);
+  }, [path, reloadCount]);
 
   // Recovery for the "sidecar is missing" case — call ensure-sidecar which
   // searches for a sibling .pdf/.docx/.xlsx and writes a markdown sidecar
@@ -56,7 +71,7 @@ export function DocEditor() {
       // canonical sidecar). Force a reload of the same path; if the sidecar
       // landed at a different path, navigate there.
       if (s.sidecarPath !== path) nav(`/edit/${s.sidecarPath}`);
-      else reloadCountRef.current += 1;
+      else setReloadCount(c => c + 1);
     } catch (e: any) {
       setLoadErr(e?.message ?? String(e));
     } finally { setRecovering(false); }
@@ -179,7 +194,7 @@ export function DocEditor() {
         )}
       </div>
 
-      <AgentAssistPanel path={path} onAfterRun={() => { reloadCountRef.current += 1; api.brainFile(path).then(r => { setOriginal(r.content); setContent(r.content); }).catch(() => {}); }} />
+      <AgentAssistPanel path={path} onAfterRun={() => { setReloadCount(c => c + 1); api.brainFile(path).then(r => { setOriginal(r.content); setContent(r.content); }).catch(() => {}); }} />
     </div>
   );
 }

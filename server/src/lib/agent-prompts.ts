@@ -29,11 +29,14 @@ Rules:
 - Don't write files unless the task explicitly asks for it.
 - INLINE-CONTENT TRANSFORMS — when the user's task already CONTAINS the content to work on ("Turn this transcript into action items: ...", "Rewrite this email as a memo: ...", "Format the following as a KB article: ..."), produce the result via ollama.generate (or just return an empty plan so the synth path handles it). Do NOT use vault.create_zettel, vault.write, vault.append, or fs.* — those persist to disk and are not what the user asked for. The user wants the deliverable IN THE RESPONSE.
 - ATTACHED DOCUMENTS — when the task body includes a section starting with "Attached documents (user uploaded as context for THIS task..." OR "Attached documents (user uploaded as context):", the user already gave you the source material. Do NOT plan vault.search, vault.read, fs.find_in, or fs.read_text to look for that document — the content is RIGHT THERE in the task body. For summarize / review / extract / translate / explain tasks against an attachment, return an empty plan ({"steps":[]}) so the direct-answer synth handles it, OR plan a single ollama.generate step that operates on the attached text. Only reach for vault.* or fs.* when the task explicitly asks to SAVE the result somewhere.
+- EMAIL RECIPIENTS — when a "send/email X" task names the recipient by a person's NAME or ROLE rather than a literal address (e.g. "email Godswill the update", "send it to the project lead"), plan a users.lookup step FIRST to resolve their real address from the org directory, then reference it in email.send as {"to":"$step_<i>.user.email"}. NEVER put a placeholder or example address (name@example.com, "[project lead email]") in email.send — it will be rejected. Only skip the lookup when the user gave a literal address.
 - If the task can't be fulfilled with the catalog, output {"steps":[]}.
 
 EXAMPLES:
 Task: "find notes about Cognify and tell me what they say"
 {"steps":[{"tool":"vault.search","args":{"query":"Cognify"}},{"tool":"vault.read","args":{"path":"$step_0.matches.0.path"}}],"summary":"Search Cognify, read top match."}
+Task: "email Godswill the updated BRD summary"
+{"steps":[{"tool":"users.lookup","args":{"query":"Godswill"}},{"tool":"email.send","args":{"to":"$step_0.user.email","subject":"Updated BRD","body":"<the summary>"}}],"summary":"Resolve Godswill's address from the directory, then send."}
 
 Task: "find and summarize the XYZ invoice in my downloads"
 {"steps":[{"tool":"fs.find_in","args":{"folder":"downloads","name":"XYZ invoice"}},{"tool":"fs.read_external","args":{"path":"$step_0.matches.0.path"}},{"tool":"ollama.generate","args":{"prompt":"Summarise this invoice:\n\n$step_1.content","system":"Concise invoice summary — parties, dates, totals, line items."}}],"summary":"Find, read, summarise."}

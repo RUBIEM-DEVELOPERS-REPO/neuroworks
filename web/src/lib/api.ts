@@ -12,8 +12,31 @@ export class ApiError extends Error {
   }
 }
 
+// Session token for the identity layer — stored client-side and sent on every
+// request so the server can attribute activity to the logged-in user.
+const TOKEN_KEY = "neuroworks.token";
+export function getToken(): string | null {
+  try { return localStorage.getItem(TOKEN_KEY); } catch { return null; }
+}
+export function setToken(token: string | null): void {
+  try { if (token) localStorage.setItem(TOKEN_KEY, token); else localStorage.removeItem(TOKEN_KEY); } catch { /* ignore */ }
+}
+
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
-  const r = await fetch(path, { ...init, headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) } });
+  const token = getToken();
+  let r: Response;
+  try {
+    r = await fetch(path, { ...init, headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}), ...(init?.headers ?? {}) } });
+  } catch (e: any) {
+    // fetch() rejects on network errors only (server down, DNS failure, CORS,
+    // aborted). The browser gives us a cryptic TypeError with message like
+    // "Failed to fetch" or "load failed" — unwrap to something actionable.
+    const reason = e?.message ?? String(e);
+    const isNetwork = e instanceof TypeError || /fetch|network|connect|abort|dns|econnrefused|enotfound/i.test(reason);
+    throw new ApiError(0, isNetwork
+      ? `Cannot reach the server at ${path}. Make sure the API server (port 7471) is running.`
+      : reason);
+  }
   if (!r.ok) {
     let msg = `${r.status} ${r.statusText}`;
     let hint: string | undefined;
@@ -41,6 +64,36 @@ export type Template = {
 };
 export type Role = { id: string; label: string; description: string; count: number };
 
+// Knowledge Packs.
+export type KnowledgePack = {
+  sectorId: string;
+  name: string;
+  installed: boolean;
+  files: { path: string; title: string; wordCount: number }[];
+};
+export type QualitySummary = {
+  totalFlags: number;
+  upvotes: number;
+  downvotes: number;
+  rate: number;
+  topCategories: { category: string; count: number }[];
+  recentFlags: {
+    jobId: string;
+    rating: "up" | "down";
+    note?: string;
+    persona?: string;
+    category?: string;
+    ts: string;
+  }[];
+};
+export type QualityFlag = {
+  jobId: string;
+  rating: "up" | "down";
+  note?: string;
+  category?: string;
+  ts: string;
+};
+
 export const api = {
   health: () => req<{ ok: boolean; name: string; version: string; model: string; port: number; ready: boolean; missing: string[]; inflightJobs?: number; peers?: string[] }>("/api/health"),
   status: () => req<any>("/api/status"),
@@ -57,6 +110,8 @@ export const api = {
   brainHealth: () => req<{ ok: boolean; vaultPath: string; exists: boolean; gitRepo: boolean; reason?: string }>("/api/brain/health"),
   brainTree: (path = "") => req<{ path: string; entries: { name: string; path: string; type: "dir" | "file" }[] }>(`/api/brain/tree?path=${encodeURIComponent(path)}`),
   brainFile: (path: string) => req<{ path: string; content: string }>(`/api/brain/file?path=${encodeURIComponent(path)}`),
+  // Relative URL — downloads through the Vite proxy (same-origin). Works for text + binary.
+  brainDownloadUrl: (path: string) => `/api/brain/download?path=${encodeURIComponent(path)}`,
   brainSearch: (q: string) => req<{ q: string; results: { path: string; line: number; preview: string }[] }>(`/api/brain/search?q=${encodeURIComponent(q)}`),
   brainLatestDigest: () => req<{ content: string }>("/api/brain/digest/latest"),
   brainPromote: (path: string, opts?: { title?: string; tags?: string; keepOriginal?: boolean }) => req<{ promoted: true; from: string; to: string; archived: boolean }>("/api/brain/promote", { method: "POST", body: JSON.stringify({ path, ...opts }) }),
@@ -124,6 +179,16 @@ export const api = {
     tasksDispatched: number;
     tasks: { taskIndex: number; persona: { id: string; name: string; role: string } | null; personaAutoRouted: boolean; jobId: string; route: "primary" | "auto" | "explicit" | "active" }[];
   }>("/api/teams/dispatch", { method: "POST", body: JSON.stringify(body) }),
+  // Hand-off relay — sequential team workflow (agents pass work down a chain).
+  startHandoff: (body: { objective: string; teamId?: string; members?: { personaId: string; role?: string }[]; label?: string }) =>
+    req<{ runId: string; jobId: string; roster: { personaId: string; role: string; name: string }[] }>("/api/handoff", { method: "POST", body: JSON.stringify(body) }),
+  listHandoffs: () => req<{ runs: HandoffRun[] }>("/api/handoff"),
+  getHandoff: (id: string) => req<{ run: HandoffRun }>(`/api/handoff/${encodeURIComponent(id)}`),
+  // Workforce contact book — AI agents + human team, grouped by department.
+  getWorkforce: () => req<{ departments: WorkforceDepartment[]; counts: { agents: number; people: number; departments: number } }>("/api/workforce"),
+  // Scan an uploaded doc (any type) for people and populate the contact book.
+  importContacts: (body: { filename: string; contentBase64: string }) =>
+    req<{ scanned: number; added: { name: string; email: string; department?: string }[]; skipped: { name: string; reason: string }[] }>("/api/workforce/import", { method: "POST", body: JSON.stringify(body) }),
   upload: (body: { filename: string; contentBase64: string; target: "context" | "vault"; vaultFolder?: string; mimeType?: string; ttlSeconds?: number }) => req<{
     ok: true;
     target: "context" | "vault";
@@ -155,9 +220,27 @@ export const api = {
   calendarAgenda: (date: string) => req<{ date: string; activity: any[]; meetings: { summary: string; start: string; end?: string; location?: string }[]; meetingsError?: string; schedules: any[] }>(`/api/calendar/agenda?date=${encodeURIComponent(date)}`),
   brainSave: (path: string, content: string) => req<{ ok: true; path: string; bytes: number }>("/api/brain/file", { method: "POST", body: JSON.stringify({ path, content }) }),
   brainEnsureSidecar: (path: string, force = false) => req<{ ok: true; sidecarPath: string; sourcePath: string; regenerated: boolean; reason?: string; bytes?: number }>("/api/brain/ensure-sidecar", { method: "POST", body: JSON.stringify({ path, force }) }),
+  // Onboarding.
+  getOnboarding: () => req<OnboardingData>("/api/onboarding"),
+  setOnboarding: (body: { completed: boolean; sector?: string; language?: string; orgName?: string }) =>
+    req<{ state: OnboardingState }>("/api/onboarding", { method: "PUT", body: JSON.stringify(body) }),
+  getOnboardingContext: (sector?: string) =>
+    req<{ sector: string; context: string }>(`/api/onboarding/context${sector ? `?sector=${encodeURIComponent(sector)}` : ""}`),
+
   listDataSources: () => req<{ sources: DataSource[] }>("/api/data-sources"),
-  addDataSource: (body: { label: string; kind: DataSourceKind; connection: string; notes?: string; readonly: boolean }) =>
+  addDataSource: (body: { label: string; kind: DataSourceKind; connection: string; notes?: string; department?: string; readonly: boolean }) =>
     req<{ source: DataSource }>("/api/data-sources", { method: "POST", body: JSON.stringify(body) }),
+  // Department-specific company data.
+  listDepartmentData: (department?: string) =>
+    req<{ departments: { department: string; count: number }[]; data: DepartmentDatum[] }>(`/api/data-sources/departments${department ? `?department=${encodeURIComponent(department)}` : ""}`),
+  addDepartmentDatum: (body: { department: string; title: string; content: string }) =>
+    req<{ datum: DepartmentDatum }>("/api/data-sources/departments", { method: "POST", body: JSON.stringify(body) }),
+  updateDepartmentDatum: (id: string, patch: { department?: string; title?: string; content?: string }) =>
+    req<{ datum: DepartmentDatum }>(`/api/data-sources/departments/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(patch) }),
+  removeDepartmentDatum: (id: string) => req<{ ok: true }>(`/api/data-sources/departments/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  // Scan an uploaded doc (any type) for department facts and populate the page.
+  importDepartmentData: (body: { filename: string; contentBase64: string; department?: string }) =>
+    req<{ scanned: number; added: DepartmentDatum[] }>("/api/data-sources/departments/import", { method: "POST", body: JSON.stringify(body) }),
   removeDataSource: (id: string) => req<{ ok: true }>(`/api/data-sources/${encodeURIComponent(id)}`, { method: "DELETE" }),
   testDataSource: (id: string) => req<{ ok: boolean; rowCount?: number; error?: string }>(`/api/data-sources/${encodeURIComponent(id)}/test`, { method: "POST" }),
   queryDataSource: (id: string, sql: string, limit?: number) => req<{ rows: any[]; columns: string[]; rowCount: number; truncated: boolean }>(`/api/data-sources/${encodeURIComponent(id)}/query`, { method: "POST", body: JSON.stringify({ sql, ...(limit ? { limit } : {}) }) }),
@@ -199,6 +282,18 @@ export const api = {
   invalidateGovernance: () => req<{ ok: true }>("/api/governance/invalidate", { method: "POST" }),
   // Relative URL — the browser downloads it through the Vite proxy (same-origin).
   governanceDownloadUrl: (name: string) => `/api/governance/${encodeURIComponent(name)}/download`,
+  // Constraint extraction & review.
+  getConstraints: (policy?: string) => req<{ constraints: ExtractedConstraint[]; byPolicy: Record<string, ExtractedConstraint[]> }>(
+    `/api/governance/constraints${policy ? `?policy=${encodeURIComponent(policy)}` : ""}`),
+  extractConstraints: (name: string) => req<{ policyName: string; constraints: ExtractedConstraint[]; count: number }>(
+    `/api/governance/${encodeURIComponent(name)}/extract`, { method: "POST" }),
+  updateConstraint: (name: string, constraintId: string, patch: Partial<ExtractedConstraint>) =>
+    req<{ constraint: ExtractedConstraint }>(`/api/governance/${encodeURIComponent(name)}/constraints/${encodeURIComponent(constraintId)}`, { method: "PUT", body: JSON.stringify(patch) }),
+  checkAction: (action: string, policy?: string) => req<{ action: string; violations: any[]; constrained: boolean; summary: string }>(
+    "/api/governance/check-action", { method: "POST", body: JSON.stringify({ action, policy }) }),
+  // Department Marketplace.
+  listDepartments: () => req<{ departments: any[] }>("/api/departments"),
+  applyDepartment: (id: string) => req<any>(`/api/departments/${encodeURIComponent(id)}/apply`, { method: "POST" }),
   listSchedules: () => req<{ schedules: Schedule[] }>("/api/schedules"),
   createSchedule: (body: {
     name: string;
@@ -260,7 +355,76 @@ export const api = {
   billingPortal: (body: { customerId: string; returnUrl?: string }) =>
     req<{ session: { id: string; url: string } }>("/api/payments/portal", { method: "POST", body: JSON.stringify(body) }),
   listPayments: (limit = 20) => req<{ payments: PaymentRecord[] }>(`/api/payments/payments?limit=${limit}`),
+
+  // Auth (identity layer) + Users directory.
+  login: (email: string, password: string) =>
+    req<{ ok: true; user: User; token: string }>("/api/auth/login", { method: "POST", body: JSON.stringify({ email, password }) }),
+  logout: () => req<{ ok: true }>("/api/auth/logout", { method: "POST" }),
+  session: () => req<{ user: User | null }>("/api/auth/session"),
+  loginEvents: (limit = 50) => req<{ events: LoginEvent[] }>(`/api/auth/login-events?limit=${limit}`),
+  listUsers: () => req<{ users: User[] }>("/api/users"),
+  addUser: (body: { name: string; email: string; role?: UserRole; title?: string; department?: string; password?: string }) =>
+    req<{ user: User }>("/api/users", { method: "POST", body: JSON.stringify(body) }),
+  updateUser: (id: string, patch: Partial<{ name: string; email: string; role: UserRole; title: string; department: string; status: UserStatus }>) =>
+    req<{ user: User }>(`/api/users/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(patch) }),
+  setUserPassword: (id: string, password: string) =>
+    req<{ ok: true }>(`/api/users/${encodeURIComponent(id)}/password`, { method: "POST", body: JSON.stringify({ password }) }),
+  deleteUser: (id: string) => req<{ ok: true }>(`/api/users/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  // Knowledge Packs.
+  listKnowledgePacks: () => req<{ packs: KnowledgePack[] }>("/api/knowledge-packs"),
+  installKnowledgePack: (sectorId: string) =>
+    req<{ ok: boolean; files: string[] }>(`/api/knowledge-packs/${encodeURIComponent(sectorId)}/install`, { method: "POST" }),
+  // Quality dashboard.
+  getQualitySummary: () => req<QualitySummary>("/api/quality/summary"),
+  getQualityFlags: (since?: string) =>
+    req<{ flags: QualityFlag[] }>(`/api/quality/flags${since ? `?since=${encodeURIComponent(since)}` : ""}`),
+  getLowQualityRuns: (threshold?: number, minFlags?: number) =>
+    req<{ runs: { task: string; count: number; rate: number }[] }>(
+      `/api/quality/low-quality?threshold=${threshold ?? 0.5}&minFlags=${minFlags ?? 3}`),
+  // Cost monitoring.
+  getCostSummary: () => req<any>("/api/cost/summary"),
+  getCostRecords: (since?: string) =>
+    req<{ records: any[] }>(`/api/cost/records${since ? `?since=${encodeURIComponent(since)}` : ""}`),
+  // Audit log.
+  queryAudit: (params?: { limit?: number; offset?: number; level?: string; actor?: string; action?: string; since?: string; jobId?: string }) => {
+    const q = new URLSearchParams();
+    if (params?.limit) q.set("limit", String(params.limit));
+    if (params?.offset) q.set("offset", String(params.offset));
+    if (params?.level) q.set("level", params.level);
+    if (params?.actor) q.set("actor", params.actor);
+    if (params?.action) q.set("action", params.action);
+    if (params?.since) q.set("since", params.since);
+    if (params?.jobId) q.set("jobId", params.jobId);
+    return req<{ events: any[]; total: number }>(`/api/audit?${q.toString()}`);
+  },
+  // SkillForge.
+  draftSkill: (intent: string, taskSample: string, failureReason?: string) =>
+    req<{ skill: any; raw: string }>("/api/skill-forge/draft", { method: "POST", body: JSON.stringify({ intent, taskSample, failureReason }) }),
+  saveSkill: (intent: string, raw: string) =>
+    req<{ ok: boolean; path: string; skill?: any }>("/api/skill-forge/save", { method: "POST", body: JSON.stringify({ intent, raw }) }),
+  // Orchestrator.
+  startOrchestration: (objective: string) =>
+    req<{ id: string; label: string; status: string; subTasks: any[] }>("/api/orchestrate/run", { method: "POST", body: JSON.stringify({ objective }) }),
+  listOrchestrations: () => req<{ runs: any[] }>("/api/orchestrate/runs"),
+  getOrchestration: (id: string) => req<{ run: any }>(`/api/orchestrate/runs/${encodeURIComponent(id)}`),
 };
+
+export type UserRole = "admin" | "member" | "viewer";
+export type UserStatus = "active" | "invited" | "disabled";
+export type User = {
+  id: string;
+  name: string;
+  email: string;
+  role: UserRole;
+  title?: string;
+  department?: string;
+  status: UserStatus;
+  hasPassword: boolean;
+  createdAt: string;
+  lastLoginAt?: string;
+  loginCount: number;
+};
+export type LoginEvent = { at: string; userId?: string; email: string; name?: string; ok: boolean; reason?: string; ip?: string; userAgent?: string };
 
 export type ConnectorAuthType = "none" | "apiKey" | "bearer" | "basic" | "header";
 export type ConnectorAuthCatalog = { type: ConnectorAuthType; label: string; fields: { name: string; label: string; secret: boolean }[] };
@@ -331,7 +495,82 @@ export type DataSource = {
   kind: DataSourceKind;
   connection: string;
   notes?: string;
+  department?: string;
   readonly: boolean;
+  createdAt: string;
+};
+
+export type DepartmentDatum = {
+  id: string;
+  department: string;
+  title: string;
+  content: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+// Hand-off relay (sequential team workflow).
+export type HandoffStep = {
+  index: number;
+  personaId: string;
+  personaName: string;
+  role: string;
+  status: "pending" | "running" | "done" | "failed";
+  output: string;
+  status_note: string;
+  handoffTo: string | null;
+  complete: boolean;
+  jobId?: string;
+  startedAt?: string;
+  endedAt?: string;
+  elapsedMs?: number;
+};
+export type HandoffRun = {
+  id: string;
+  objective: string;
+  teamId?: string;
+  label: string;
+  roster: { personaId: string; role: string; name: string }[];
+  steps: HandoffStep[];
+  status: "running" | "completed" | "exhausted" | "failed";
+  finalReport: string;
+  jobId?: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+// Workforce contact book.
+export type WorkforceAgent = {
+  kind: "agent";
+  id: string;
+  name: string;
+  role: string;
+  description: string;
+  responsibilities: string[];
+  department: string;
+  builtin: boolean;
+  contact: { activate: string; chat: string };
+};
+export type WorkforcePerson = {
+  kind: "human";
+  name: string;
+  email: string;
+  role: string;
+  title?: string;
+  department: string;
+  status: string;
+};
+export type WorkforceDepartment = { department: string; agents: WorkforceAgent[]; people: WorkforcePerson[] };
+
+export type ExtractedConstraint = {
+  id: string;
+  policyName: string;
+  rule: string;
+  severity: "hard" | "soft";
+  category: string;
+  details?: string;
+  reviewed: boolean;
+  accepted: boolean;
   createdAt: string;
 };
 
@@ -366,6 +605,27 @@ export type Schedule = {
   nextFireAt?: number | null;
 };
 
+// Onboarding types.
+export type SectorInfo = {
+  id: string;
+  name: string;
+  nameShona?: string;
+  nameNdebele?: string;
+  description: string;
+  icon: string;
+};
+export type OnboardingState = {
+  completed: boolean;
+  sector?: string;
+  language: string;
+  orgName?: string;
+  completedAt?: string;
+};
+export type OnboardingData = {
+  state: OnboardingState;
+  sectors: SectorInfo[];
+};
+
 export type Preset = {
   id: string;
   name: string;
@@ -382,3 +642,7 @@ export type PresetApplyResult = {
   schedulesCreated: { id: string; name: string; emailTo?: string }[];
   missingIntegrations: string[];
 };
+
+
+
+

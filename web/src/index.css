@@ -6,47 +6,88 @@
    vars (see tailwind.config.js), so toggling [data-theme] swaps the entire
    palette without touching component classes. Light mode keeps the same
    semantic role for each token (ink = surface, cream = ink) but inverts. */
+/* Midnight-blueprint surfaces (AuthKit reference): near-black cool canvas,
+   steel hairlines, moonlight→glacier text. Same semantic roles as before —
+   ink = surface ramp, cream = text ramp — so every existing bg-ink-* /
+   text-cream-* class re-skins without component edits. */
 :root, [data-theme="dark"] {
   color-scheme: dark;
-  --c-ink-950: #15140f;
-  --c-ink-900: #1d1c16;
-  --c-ink-850: #23211b;
-  --c-ink-800: #2b2922;
-  --c-ink-700: #3a3830;
-  --c-ink-600: #524f44;
-  --c-cream-50:  #f7f3e8;
-  --c-cream-100: #ece6d4;
-  --c-cream-200: #d8d1bb;
-  --c-cream-300: #b8b09a;
-  --bg-grad-1: rgba(126, 78, 239, 0.04);
-  --bg-grad-2: rgba(246, 166, 35, 0.03);
+  --c-ink-950: #05060f;   /* Midnight Ink — canvas */
+  --c-ink-900: #0c111c;   /* panel (sidebar, rails) */
+  --c-ink-850: #141a28;   /* card */
+  --c-ink-800: #1f2736;   /* elevated / hover surface */
+  --c-ink-700: #3f4959;   /* Steel Border — hairlines, dividers */
+  --c-ink-600: #5c687c;   /* muted structural lines */
+  --c-cream-50:  #d8ecf8; /* Glacier — headings, brightest text */
+  --c-cream-100: #c7d3ea; /* Moonlight — body */
+  --c-cream-200: #9da7ba; /* Pebble — secondary */
+  --c-cream-300: #81899b; /* Fog — de-emphasized */
+  --bg-glow: rgba(152, 192, 239, 0.10);      /* Blueprint Glow wash */
+  --bg-grid: rgba(186, 215, 247, 0.04);      /* 1px architectural grid */
 }
 [data-theme="light"] {
   color-scheme: light;
-  --c-ink-950: #faf8f1;
-  --c-ink-900: #f3eee0;
-  --c-ink-850: #ebe5d3;
-  --c-ink-800: #ddd5bf;
-  --c-ink-700: #c4baa1;
-  --c-ink-600: #8e8770;
-  --c-cream-50:  #1a1812;
-  --c-cream-100: #2b2820;
-  --c-cream-200: #4a4538;
-  --c-cream-300: #6e6754;
-  --bg-grad-1: rgba(126, 78, 239, 0.06);
-  --bg-grad-2: rgba(246, 166, 35, 0.05);
+  --c-ink-950: #f6f8fc;
+  --c-ink-900: #eef2f9;
+  --c-ink-850: #e4eaf4;
+  --c-ink-800: #d5deec;
+  --c-ink-700: #b2bfd4;
+  --c-ink-600: #7e8aa0;
+  --c-cream-50:  #0d1320;
+  --c-cream-100: #232c3d;
+  --c-cream-200: #47536a;
+  --c-cream-300: #67748c;
+  --bg-glow: rgba(2, 125, 234, 0.07);
+  --bg-grid: rgba(63, 73, 89, 0.06);
 }
 
-:root { font-family: Inter, system-ui, sans-serif; }
+:root {
+  font-family: Inter, system-ui, sans-serif;
+  letter-spacing: -0.01em;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+html { background: var(--c-ink-950); }
 html, body, #root { height: 100%; }
+/* Content sits above the blueprint layers below. */
+#root { position: relative; z-index: 1; }
 
-body {
-  background: radial-gradient(ellipse at top, var(--bg-grad-1), transparent 60%),
-              radial-gradient(ellipse at bottom right, var(--bg-grad-2), transparent 50%),
-              var(--c-ink-950);
+/* ── Midnight-blueprint background art ───────────────────────────────────
+   A faint ~40px architectural grid drawn in 1px cool lines + a radial
+   Blueprint Glow falling from the top centre — the page reads as drafted
+   in light on dark paper. Both layers are FIXED + pointer-events-none and
+   static (matte system: no drift, no grain, no gloss), so zero scroll
+   repaints. */
+body::before {                              /* architectural grid */
+  content: ""; position: fixed; inset: 0; z-index: 0; pointer-events: none;
+  background-image:
+    linear-gradient(to right, var(--bg-grid) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--bg-grid) 1px, transparent 1px);
+  background-size: 40px 40px;
+  /* Fade the grid out toward the bottom so content areas stay clean. */
+  -webkit-mask-image: linear-gradient(to bottom, rgba(0,0,0,1) 0%, rgba(0,0,0,0.35) 45%, transparent 80%);
+  mask-image: linear-gradient(to bottom, rgba(0,0,0,1) 0%, rgba(0,0,0,0.35) 45%, transparent 80%);
+}
+body::after {                               /* blueprint glow — light from above */
+  content: ""; position: fixed; inset: 0; z-index: 0; pointer-events: none;
+  background: radial-gradient(60% 42% at 50% -6%, var(--bg-glow), transparent 70%);
 }
 
-.font-display { font-family: 'Crimson Text', Georgia, serif; }
+/* Display face — geometric, wider proportions; reserved for the wordmark,
+   page titles, and section headlines (never body copy). */
+.font-display {
+  font-family: 'Space Grotesk', system-ui, sans-serif;
+  letter-spacing: normal;
+}
+/* Eyebrow labels — quiet structural markers above headings. */
+.nw-eyebrow {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 12px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  font-feature-settings: "tnum";
+  color: var(--c-cream-300);
+}
 
 .prose-vault h1 { @apply text-2xl font-semibold tracking-tight mt-6 mb-3 text-cream-50; }
 .prose-vault h2 { @apply text-xl font-semibold tracking-tight mt-5 mb-2 text-cream-50; }
@@ -82,15 +123,15 @@ body {
 .prose-result hr { @apply my-8; }
 
 .scrollbar-thin::-webkit-scrollbar { width: 8px; height: 8px; }
-.scrollbar-thin::-webkit-scrollbar-thumb { background: #3a3830; border-radius: 4px; }
-.scrollbar-thin::-webkit-scrollbar-thumb:hover { background: #524f44; }
+.scrollbar-thin::-webkit-scrollbar-thumb { background: #3f4959; border-radius: 4px; }
+.scrollbar-thin::-webkit-scrollbar-thumb:hover { background: #5c687c; }
 
 /* Dynamic-layout utilities — consume CSS variables set on the element
    so the markup stays inline-style-free even when values are runtime-computed
    (trace-bar positioning, progress bars, calendar day-cell activity tint). */
 .dyn-width { width: var(--dyn-w, 0%); }
 .dyn-bar { left: var(--dyn-left, 0%); width: var(--dyn-w, 0%); }
-.heat-tint { background-image: linear-gradient(to bottom right, rgba(139, 92, 246, var(--heat, 0)) 0%, transparent 60%); }
+.heat-tint { background-image: linear-gradient(to bottom right, rgba(102, 58, 243, var(--heat, 0)) 0%, transparent 60%); }
 
 /* ──────────────── Animation system ────────────────
    One source of truth for motion: keyframes + opt-in utility classes.
@@ -103,8 +144,8 @@ body {
   100% { background-position: 200% 0; }
 }
 @keyframes nw-fade-up {
-  from { opacity: 0; transform: translateY(6px); }
-  to   { opacity: 1; transform: translateY(0); }
+  from { opacity: 0; transform: translateY(14px); filter: blur(5px); }
+  to   { opacity: 1; transform: translateY(0);    filter: blur(0); }
 }
 @keyframes nw-scale-in {
   from { opacity: 0; transform: scale(0.96); }
@@ -116,15 +157,15 @@ body {
   100% { opacity: 1; transform: scale(1); }
 }
 @keyframes nw-page-fade {
-  from { opacity: 0; transform: translateY(4px); }
-  to   { opacity: 1; transform: translateY(0); }
+  from { opacity: 0; transform: translateY(10px); filter: blur(4px); }
+  to   { opacity: 1; transform: translateY(0);    filter: blur(0); }
 }
 @keyframes nw-toast-slide {
   from { opacity: 0; transform: translateY(12px) scale(0.96); }
   to   { opacity: 1; transform: translateY(0) scale(1); }
 }
 @keyframes nw-copy-flash {
-  0%   { background-color: rgba(126, 78, 239, 0.35); }
+  0%   { background-color: rgba(102, 58, 243, 0.35); }
   100% { background-color: transparent; }
 }
 @keyframes nw-thinking-dot {
@@ -136,8 +177,8 @@ body {
   100% { transform: translateX(200%); }
 }
 @keyframes nw-avatar-breath {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(126, 78, 239, 0.45); }
-  50%      { box-shadow: 0 0 0 6px rgba(126, 78, 239, 0); }
+  0%, 100% { box-shadow: 0 0 0 0 rgba(186, 207, 247, 0.32); }
+  50%      { box-shadow: 0 0 0 6px rgba(186, 207, 247, 0); }
 }
 @keyframes nw-pulse-soft {
   0%, 100% { opacity: 1; }
@@ -159,8 +200,8 @@ body {
 
 /* Stagger-friendly fade-up. Pages set --stagger on the parent and each
    child gets `nw-fade-up`; a few preset delays cover most lists. */
-.nw-fade-up { animation: nw-fade-up 280ms ease-out both; }
-.nw-scale-in { animation: nw-scale-in 220ms ease-out both; }
+.nw-fade-up { animation: nw-fade-up 600ms cubic-bezier(0.32, 0.72, 0, 1) both; }
+.nw-scale-in { animation: nw-scale-in 360ms cubic-bezier(0.32, 0.72, 0, 1) both; }
 .nw-delay-1 { animation-delay: 30ms; }
 .nw-delay-2 { animation-delay: 60ms; }
 .nw-delay-3 { animation-delay: 90ms; }
@@ -170,7 +211,7 @@ body {
 .nw-delay-7 { animation-delay: 210ms; }
 
 /* Page transition — applied to the route container, re-keyed on path. */
-.nw-page-enter { animation: nw-page-fade 220ms ease-out both; }
+.nw-page-enter { animation: nw-page-fade 520ms cubic-bezier(0.32, 0.72, 0, 1) both; }
 
 /* Status-dot transitions. Three states share the dot; the state class
    triggers the right animation. running = soft pulse, succeeded = pop. */
@@ -179,8 +220,15 @@ body {
 .nw-status-dot.is-succeeded { animation: nw-pop-check 360ms cubic-bezier(0.34, 1.56, 0.64, 1) both; }
 
 /* Microinteractions */
-.nw-card-hover { transition: transform 160ms ease, box-shadow 160ms ease, border-color 160ms ease; }
-.nw-card-hover:hover { transform: translateY(-1px); box-shadow: 0 6px 20px -8px rgba(0,0,0,0.4); }
+/* Card lift uses the AuthKit elevation stack: cool inset highlight + near-black
+   drop — elevation built from light-on-dark hairlines, never warm shadows. */
+.nw-card-hover { transition: transform 280ms cubic-bezier(0.32,0.72,0,1), box-shadow 280ms cubic-bezier(0.32,0.72,0,1), border-color 200ms ease; }
+.nw-card-hover:hover {
+  transform: translateY(-3px);
+  box-shadow:
+    inset 0 1px 1px rgba(199, 211, 234, 0.12),
+    0 24px 32px -16px rgba(6, 6, 14, 0.7);
+}
 .nw-press { transition: transform 80ms ease; }
 .nw-press:active:not(:disabled) { transform: scale(0.97); }
 .nw-copy-flash { animation: nw-copy-flash 600ms ease-out; }
@@ -207,7 +255,7 @@ body {
 .nw-thinking-bar::before {
   content: "";
   position: absolute; inset: 0;
-  background: linear-gradient(90deg, transparent 0%, rgba(126, 78, 239, 0.35) 50%, transparent 100%);
+  background: linear-gradient(90deg, transparent 0%, rgba(102, 58, 243, 0.35) 50%, transparent 100%);
   animation: nw-thinking-bar 1.6s linear infinite;
 }
 
@@ -225,5 +273,7 @@ body {
     transition: none !important;
   }
   .skeleton { background: var(--c-ink-850); }
-  .nw-fade-up, .nw-scale-in, .nw-page-enter { opacity: 1 !important; transform: none !important; }
+  .nw-fade-up, .nw-scale-in, .nw-page-enter { opacity: 1 !important; transform: none !important; filter: none !important; }
+  /* Freeze the drifting background mesh for vestibular-sensitive users. */
+  body::before { animation: none !important; }
 }

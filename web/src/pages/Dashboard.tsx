@@ -4,6 +4,8 @@ import { api, Template } from "../lib/api";
 import { Card, RoleIcon } from "../components/Card";
 import { TaskRunner } from "../components/TaskRunner";
 import { AgentVisualizer } from "../components/AgentVisualizer";
+import { t, loadSavedLanguage } from "../lib/i18n";
+import { MapPin, Building2, Globe } from "lucide-react";
 
 export function Dashboard() {
   const [templates, setTemplates] = useState<Template[] | null>(null);
@@ -14,6 +16,8 @@ export function Dashboard() {
   const [intentBusy, setIntentBusy] = useState(false);
   const [err, setErr] = useState("");
   const [persona, setPersona] = useState<any>(null);
+  const [onboarding, setOnboarding] = useState<{ sector?: string; orgName?: string; completed?: boolean }>({});
+  const [sectorContext, setSectorContext] = useState("");
   // Full roster + the live clawbot fleet so the dashboard answers "who can I
   // hire right now, and who's currently working?" The roster comes from
   // /api/personas; the fleet comes from /api/peers (self + reachable peers).
@@ -29,12 +33,13 @@ export function Dashboard() {
 
   async function load() {
     try {
-      const [t, j, p, peers, ext] = await Promise.all([
+      const [t, j, p, peers, ext, ob] = await Promise.all([
         api.listTemplates(),
         api.listJobs().catch(() => ({ jobs: [] as any[] })),
         api.listPersonas().catch(() => ({ active: null, personas: [] } as any)),
         api.peers().catch(() => null),
         api.externalAgents().catch(() => ({ agents: [] as any[] })),
+        api.getOnboarding().catch(() => ({ state: {} } as any)),
       ]);
       setTemplates(t.templates);
       setRecent(j.jobs.slice(0, 4));
@@ -43,6 +48,13 @@ export function Dashboard() {
       setPersonas(Array.isArray(p.personas) ? p.personas : []);
       if (peers) setFleet(peers);
       setExternalAgents(ext.agents ?? []);
+      if (ob.state) {
+        setOnboarding(ob.state);
+        loadSavedLanguage();
+        if (ob.state.sector) {
+          api.getOnboardingContext(ob.state.sector).then(ctx => setSectorContext(ctx.context)).catch(() => {});
+        }
+      }
     } catch (e: any) { setErr(e.message); }
   }
   useEffect(() => { load(); const i = setInterval(load, 6000); return () => clearInterval(i); }, []);
@@ -86,15 +98,37 @@ export function Dashboard() {
   return (
     <div className="space-y-9">
       <section className="text-center pt-10 pb-6">
-        <div className="text-xs uppercase tracking-[0.3em] text-cream-300/50">Welcome to</div>
-        <h1 className="font-display text-6xl text-cream-50 mt-2">NeuroWorks</h1>
-        <p className="text-cream-300/70 mt-2 text-sm">The AI Workforce — describe what you want done, delegate, get results.</p>
+        {onboarding?.orgName ? (
+          <div className="text-xs uppercase tracking-[0.3em] text-cream-300/50">{onboarding.orgName}</div>
+        ) : (
+          <div className="text-xs uppercase tracking-[0.3em] text-cream-300/50">{t("dashboard.welcome")}</div>
+        )}
+        <h1 className="font-display text-6xl text-cream-50 mt-2">{t("app.title")}</h1>
+        <p className="text-cream-300/70 mt-2 text-sm">
+          {onboarding?.sector && <span className="inline-flex items-center gap-1.5 text-violet-400 mr-1.5"><Building2 size={14} />{onboarding.sector}</span>}
+          {t("app.subtitle")}
+        </p>
       </section>
+
+      {sectorContext && (
+        <section className="bg-gradient-to-r from-leaf-500/5 via-leaf-500/10 to-transparent border border-leaf-500/20 rounded-xl p-4">
+          <div className="flex items-start gap-3">
+            <div className="p-2 rounded-lg bg-leaf-500/10 text-leaf-400 shrink-0 mt-0.5"><MapPin size={18} /></div>
+            <div className="min-w-0">
+              <div className="flex items-center gap-2 text-sm font-medium text-cream-100">
+                <Globe size={14} className="text-leaf-400" />
+                {t("dashboard.zimbabweContext")}
+              </div>
+              <p className="text-xs text-cream-300/80 mt-1.5 leading-relaxed">{sectorContext}</p>
+            </div>
+          </div>
+        </section>
+      )}
 
       <section>
         <div className="flex items-baseline justify-between mb-3 px-1">
           <div className="text-xs uppercase tracking-[0.25em] text-cream-300/60">
-            Quick start — {persona ? <>tasks tuned for <span className="text-violet-400">{persona.name}</span></> : "suggested tasks"}
+            {t("dashboard.quickStart")} — {persona ? <>{t("dashboard.quickStart.persona")} <span className="text-violet-400">{persona.name}</span></> : "suggested tasks"}
           </div>
           <Link to="/templates" className="text-xs text-cream-300 hover:text-cream-50">View all templates →</Link>
         </div>

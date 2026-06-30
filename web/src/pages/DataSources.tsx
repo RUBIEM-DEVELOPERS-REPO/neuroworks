@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { Database, Plus, Trash2, Upload, CheckCircle2, AlertTriangle, FileText, Folder, Play, ChevronDown, ChevronRight } from "lucide-react";
-import { api, type DataSource, type DataSourceKind } from "../lib/api";
+import { api, type DataSource, type DataSourceKind, type DepartmentDatum } from "../lib/api";
 import { Card, Button, showToast } from "../components/Card";
 
 // Company-data hub.
@@ -106,7 +106,166 @@ export function DataSources() {
           )}
         </Card>
       </div>
+
+      <DepartmentDataCard />
     </div>
+  );
+}
+
+function DepartmentDataCard() {
+  const [data, setData] = useState<DepartmentDatum[]>([]);
+  const [departments, setDepartments] = useState<{ department: string; count: number }[]>([]);
+  const [adding, setAdding] = useState(false);
+  const [filter, setFilter] = useState<string>("");
+  const [scanning, setScanning] = useState(false);
+  const scanRef = useRef<HTMLInputElement>(null);
+
+  async function refresh() {
+    try { const r = await api.listDepartmentData(); setData(r.data); setDepartments(r.departments); } catch {}
+  }
+  useEffect(() => { void refresh(); }, []);
+
+  async function scanFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    if (file.size > 20 * 1024 * 1024) { showToast("File too large (max 20 MB)", "error"); return; }
+    setScanning(true);
+    showToast(`Scanning ${file.name} for department data…`, "info", 2500);
+    try {
+      const buf = await file.arrayBuffer();
+      const bytes = new Uint8Array(buf);
+      let binary = "";
+      const CHUNK = 0x8000;
+      for (let i = 0; i < bytes.length; i += CHUNK) binary += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + CHUNK)));
+      const r = await api.importDepartmentData({ filename: file.name, contentBase64: btoa(binary), department: filter || undefined });
+      refresh();
+      showToast(`Added ${r.added.length} entr${r.added.length === 1 ? "y" : "ies"} from ${file.name}`, r.added.length ? "success" : "info", 4000);
+    } catch (err: any) {
+      showToast(`Scan failed: ${err?.message ?? String(err)}`, "error", 5000);
+    } finally {
+      setScanning(false);
+    }
+  }
+
+  async function remove(id: string) {
+    if (!confirm("Remove this department data entry? Agents will no longer see it.")) return;
+    try { await api.removeDepartmentDatum(id); refresh(); } catch (e: any) { alert(e?.message ?? String(e)); }
+  }
+
+  const shown = filter ? data.filter(d => d.department === filter) : data;
+
+  return (
+    <Card
+      title={`Department data${data.length ? ` — ${data.length}` : ""}`}
+      action={
+        <div className="flex items-center gap-2">
+          <input ref={scanRef} type="file" className="hidden" onChange={scanFile} aria-label="Upload a document to scan for department data" />
+          <Button onClick={() => scanRef.current?.click()} disabled={scanning} variant="ghost"><Upload size={14} /> {scanning ? "Scanning…" : "Upload & scan"}</Button>
+          <Button onClick={() => setAdding(a => !a)} variant="subtle"><Plus size={14} /> {adding ? "Cancel" : "Add"}</Button>
+        </div>
+      }
+    >
+      <p className="text-xs text-cream-300/70 mb-3">
+        Curate facts, policies, assumptions, or numbers for a specific department — type them in, or
+        <span className="text-cream-100"> Upload & scan</span> any document (PDF, DOCX, XLSX…) and the agent extracts the entries for you.
+        Agents read these via the <span className="font-mono">company.department_data</span> primitive — so a persona working a Finance or HR task has its team's data on hand without you pasting it into every prompt.
+        {filter && <span className="text-cream-300/50"> Scanned entries will be tagged <span className="text-leaf-300">{filter}</span> (the active filter).</span>}
+      </p>
+
+      {adding && <AddDepartmentDatum onAdded={() => { setAdding(false); refresh(); }} onCancel={() => setAdding(false)} suggestions={departments.map(d => d.department)} />}
+
+      {departments.length > 0 && (
+        <div className="flex flex-wrap gap-1.5 mb-3">
+          <button type="button" onClick={() => setFilter("")} className={`text-[11px] px-2 py-0.5 rounded-full border ${filter === "" ? "bg-violet-500/15 text-violet-300 border-violet-500/30" : "border-ink-700 text-cream-300/70 hover:border-violet-500/40"}`}>All</button>
+          {departments.map(d => (
+            <button key={d.department} type="button" onClick={() => setFilter(d.department)} className={`text-[11px] px-2 py-0.5 rounded-full border ${filter === d.department ? "bg-violet-500/15 text-violet-300 border-violet-500/30" : "border-ink-700 text-cream-300/70 hover:border-violet-500/40"}`}>
+              {d.department} <span className="opacity-60">{d.count}</span>
+            </button>
+          ))}
+        </div>
+      )}
+
+      {shown.length === 0 && !adding ? (
+        <div className="text-sm text-cream-300/60 italic">No department data yet. Click <span className="font-mono">+ Add</span> to capture a team's key facts.</div>
+      ) : (
+        <div className="space-y-2">
+          {shown.map(d => (
+            <div key={d.id} className="border border-ink-800 rounded-lg p-3 bg-ink-950">
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <div className="text-sm text-cream-100 font-medium flex items-center gap-2">
+                    <span className="px-1.5 py-0.5 rounded text-[10px] bg-leaf-500/15 text-leaf-300">{d.department}</span>
+                    <span className="truncate">{d.title}</span>
+                  </div>
+                  <div className="text-[12px] text-cream-300/80 mt-1.5 whitespace-pre-wrap">{d.content}</div>
+                </div>
+                <button type="button" onClick={() => remove(d.id)} className="text-cream-300/50 hover:text-coral-400 shrink-0" aria-label="Remove"><Trash2 size={13} /></button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </Card>
+  );
+}
+
+function AddDepartmentDatum({ onAdded, onCancel, suggestions }: { onAdded: () => void; onCancel: () => void; suggestions: string[] }) {
+  const [department, setDepartment] = useState("");
+  const [title, setTitle] = useState("");
+  const [content, setContent] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    setBusy(true); setErr(null);
+    try {
+      await api.addDepartmentDatum({ department: department.trim(), title: title.trim(), content: content.trim() });
+      onAdded();
+    } catch (e: any) { setErr(e?.message ?? String(e)); }
+    finally { setBusy(false); }
+  }
+
+  return (
+    <form onSubmit={submit} className="space-y-2 mb-4 bg-ink-950 border border-ink-800 rounded-lg p-3">
+      <div className="flex gap-2">
+        <input
+          value={department}
+          onChange={e => setDepartment(e.target.value)}
+          required
+          list="dept-suggestions"
+          placeholder="Department (e.g. Finance)"
+          aria-label="Department"
+          className="w-48 bg-ink-900 border border-ink-700 rounded px-3 py-1.5 text-sm text-cream-100 focus:outline-none focus:border-violet-500/40"
+        />
+        <datalist id="dept-suggestions">
+          {suggestions.map(s => <option key={s} value={s} />)}
+        </datalist>
+        <input
+          value={title}
+          onChange={e => setTitle(e.target.value)}
+          required
+          placeholder="Title (e.g. FY26 budget assumptions)"
+          aria-label="Title"
+          className="flex-1 bg-ink-900 border border-ink-700 rounded px-3 py-1.5 text-sm text-cream-100 focus:outline-none focus:border-violet-500/40"
+        />
+      </div>
+      <textarea
+        value={content}
+        onChange={e => setContent(e.target.value)}
+        required
+        rows={4}
+        placeholder="The data itself — facts, figures, policies, territories, assumptions…"
+        aria-label="Content"
+        className="w-full bg-ink-900 border border-ink-700 rounded px-3 py-1.5 text-sm text-cream-100 focus:outline-none focus:border-violet-500/40 resize-y"
+      />
+      <div className="flex items-center gap-2 pt-1">
+        <Button type="submit" disabled={busy}>{busy ? "Saving…" : "Save entry"}</Button>
+        <Button onClick={onCancel} variant="ghost">Cancel</Button>
+        {err && <span className="text-[11px] text-coral-400">{err}</span>}
+      </div>
+    </form>
   );
 }
 
@@ -150,6 +309,7 @@ function SourceRow({
           <div className="text-sm text-cream-100 font-medium flex items-center gap-2 flex-wrap">
             <span className="px-1.5 py-0.5 rounded text-[10px] bg-violet-500/15 text-violet-300 font-mono uppercase">{s.kind}</span>
             <span className="truncate">{s.label}</span>
+            {s.department && <span className="px-1.5 py-0.5 rounded text-[10px] bg-leaf-500/15 text-leaf-300">{s.department}</span>}
             {s.readonly && <span className="text-[10px] text-cream-300/50 italic">read-only</span>}
           </div>
           <div className="text-[11px] text-cream-300/60 font-mono mt-1 break-all">{s.connection}</div>
@@ -200,6 +360,7 @@ function AddSourceForm({ onAdded, onCancel }: { onAdded: () => void; onCancel: (
   const [kind, setKind] = useState<DataSourceKind>("postgres");
   const [connection, setConnection] = useState("");
   const [notes, setNotes] = useState("");
+  const [department, setDepartment] = useState("");
   const [readonly, setReadonly] = useState(true);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -216,7 +377,7 @@ function AddSourceForm({ onAdded, onCancel }: { onAdded: () => void; onCancel: (
     e.preventDefault();
     setBusy(true); setErr(null);
     try {
-      await api.addDataSource({ label: label.trim(), kind, connection: connection.trim(), notes: notes.trim() || undefined, readonly });
+      await api.addDataSource({ label: label.trim(), kind, connection: connection.trim(), notes: notes.trim() || undefined, department: department.trim() || undefined, readonly });
       onAdded();
     } catch (e: any) { setErr(e?.message ?? String(e)); }
     finally { setBusy(false); }
@@ -259,6 +420,13 @@ function AddSourceForm({ onAdded, onCancel }: { onAdded: () => void; onCancel: (
         onChange={e => setNotes(e.target.value)}
         placeholder="Notes for the agent (optional, e.g. 'use schema `crm` for sales data')"
         aria-label="Notes"
+        className="w-full bg-ink-900 border border-ink-700 rounded px-3 py-1.5 text-sm text-cream-100 focus:outline-none focus:border-violet-500/40"
+      />
+      <input
+        value={department}
+        onChange={e => setDepartment(e.target.value)}
+        placeholder="Department (optional, e.g. Finance, Sales, HR) — tags this connection to a team"
+        aria-label="Department"
         className="w-full bg-ink-900 border border-ink-700 rounded px-3 py-1.5 text-sm text-cream-100 focus:outline-none focus:border-violet-500/40"
       />
       <label className="flex items-center gap-2 text-xs text-cream-300">

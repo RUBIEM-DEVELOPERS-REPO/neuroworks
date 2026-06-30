@@ -1,8 +1,8 @@
 // Append-only JSONL persistence for completed jobs.
 //
-// The in-memory job map in jobs.ts caps at RECENT=50 and dies with the
+// The in-memory job map in jobs.ts caps at RECENT=200 and dies with the
 // process. That's fine for the live "Activity" page (recent runs only),
-// but breaks the nightly reflection: anything older than 50 jobs OR
+// but breaks the nightly reflection: anything older than the cap OR
 // older than the last restart vanishes. Reflection then aggregates a
 // random truncated sample and produces a misleading "what went wrong"
 // section.

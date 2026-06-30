@@ -1,14 +1,21 @@
 import { useEffect, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { marked } from "marked";
-import { Folder, FileText, Upload, AlertTriangle, CheckCircle2 } from "lucide-react";
+import { Folder, FileText, Upload, AlertTriangle, CheckCircle2, Download } from "lucide-react";
 import { api } from "../lib/api";
 import { Card } from "../components/Card";
+
+// The vault path lives in the URL (e.g. /knowledge/NeuroWorks%20Data%20Migration.md)
+// so spaces arrive percent-encoded. Decode ONCE here — otherwise api.brainFile()
+// re-encodes it and the server tries to open a literal "%20" path → ENOENT.
+function decodePath(p: string): string {
+  try { return decodeURIComponent(p); } catch { return p; }
+}
 
 export function Knowledge() {
   const nav = useNavigate();
   const loc = useLocation();
-  const subPath = loc.pathname.replace(/^\/knowledge\/?/, "");
+  const subPath = decodePath(loc.pathname.replace(/^\/knowledge\/?/, ""));
   const [tree, setTree] = useState<any[]>([]);
   const [content, setContent] = useState<string | null>(null);
   const [search, setSearch] = useState("");
@@ -133,7 +140,14 @@ export function Knowledge() {
           </ul>
         </Card>
       ) : content !== null ? (
-        <Card>
+        <Card
+          title={subPath.split("/").pop()}
+          action={
+            <a href={api.brainDownloadUrl(subPath)} download className="inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-md bg-violet-500/15 border border-violet-500/40 text-violet-300 hover:bg-violet-500/25">
+              <Download size={12} /> Download
+            </a>
+          }
+        >
           <PromoteBar path={subPath} />
           <ImportsActions path={subPath} onChange={() => { /* navigate up after discard */ const up = subPath.split("/").slice(0, -1).join("/"); nav("/knowledge/" + up); }} />
           <div className="prose-vault" dangerouslySetInnerHTML={{ __html: marked.parse(content) as string }} />
@@ -144,11 +158,16 @@ export function Knowledge() {
             {tree.map(e => {
               const Icon = e.type === "dir" ? Folder : FileText;
               return (
-                <li key={e.path}>
-                  <button type="button" onClick={() => nav("/knowledge/" + e.path)} className="flex items-center gap-2 w-full text-left px-2 py-1.5 rounded hover:bg-ink-800 text-sm font-mono">
+                <li key={e.path} className="flex items-center gap-1 group">
+                  <button type="button" onClick={() => nav("/knowledge/" + e.path)} className="flex-1 flex items-center gap-2 text-left px-2 py-1.5 rounded hover:bg-ink-800 text-sm font-mono">
                     <Icon size={14} className={e.type === "dir" ? "text-violet-400 shrink-0" : "text-cream-300/60 shrink-0"} />
                     <span className={e.type === "dir" ? "text-violet-400" : "text-cream-200"}>{e.name}</span>
                   </button>
+                  {e.type !== "dir" && (
+                    <a href={api.brainDownloadUrl(e.path)} download title={`Download ${e.name}`} onClick={ev => ev.stopPropagation()} className="opacity-0 group-hover:opacity-100 text-cream-300/50 hover:text-violet-300 p-1.5 shrink-0">
+                      <Download size={14} />
+                    </a>
+                  )}
                 </li>
               );
             })}

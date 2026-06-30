@@ -11,6 +11,7 @@ export function Presets() {
   const nav = useNavigate();
   const [presets, setPresets] = useState<Preset[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadErr, setLoadErr] = useState<string | null>(null);
   const [active, setActive] = useState<string | null>(null);   // preset being configured
   const [email, setEmail] = useState("admin@rubiem.com");
   const [withSchedules, setWithSchedules] = useState(true);
@@ -20,7 +21,7 @@ export function Presets() {
   useEffect(() => {
     api.listPresets()
       .then(r => setPresets(r.presets))
-      .catch(e => showToast(`Couldn't load presets: ${e.message}`, "error"))
+      .catch(e => setLoadErr(e?.message ?? String(e)))
       .finally(() => setLoading(false));
   }, []);
 
@@ -58,6 +59,11 @@ export function Presets() {
 
       {loading ? (
         <div className="text-cream-300/60 text-sm flex items-center gap-2"><Loader2 size={16} className="animate-spin" /> Loading presets…</div>
+      ) : loadErr ? (
+        <div className="rounded-xl border border-red-500/30 bg-red-500/5 p-4 text-sm text-cream-200">
+          <p className="font-medium text-red-400 mb-1">Couldn't load presets</p>
+          <p className="text-cream-300/70">{loadErr}</p>
+        </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
           {presets.map(p => {

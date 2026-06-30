@@ -34,7 +34,10 @@ export function hermesAvailable(): boolean {
 
 // Cap the injected preamble so the CLI arg stays well within OS limits and we
 // don't pay for a giant prompt. Persona suffix + skill + a slice of governance.
-const MAX_PREAMBLE_CHARS = 6000;
+// Raised from 6000 so the injected SKILL PLAYBOOK (appended last, ~3000 chars)
+// fits alongside the persona suffix + governance prefix instead of being
+// truncated away. ~10k chars of preamble is still well within the CLI arg limit.
+const MAX_PREAMBLE_CHARS = 10000;
 const DEFAULT_TIMEOUT_MS = 220_000;
 
 export type HermesRunResult = {
@@ -49,8 +52,20 @@ export type HermesRunResult = {
   error?: string;
 };
 
+// Always-on operating rules for Hermes runs — keeps the agent on the platform's
+// sanctioned tool paths instead of shelling out to unconfigured external CLIs.
+const OPERATING_RULES = [
+  "=== OPERATING RULES (NeuroWorks) ===",
+  "- To SEND EMAIL, use the `email.send` tool (the NeuroWorks email bridge — Mailjet/SMTP, already configured). Do NOT use Himalaya, `mail`, `sendmail`, `mutt`, or any external email CLI: they are NOT configured on this machine and will fail.",
+  "- EMAIL RECIPIENTS: when the user names a recipient by NAME or ROLE (not a literal address), resolve their REAL address from the org directory first via `users.lookup` / `users.list`. NEVER invent or use placeholder/example addresses (name@example.com, '[project lead email]') — email.send rejects them. Only use a literal address when the user gave one.",
+  "- To read company data / financials / connected systems, use the provided clawbot tools (connector.*, vault.*, users.*, integration.*) — not ad-hoc shell commands.",
+  "- MEMORY: when the user asks what you REMEMBER / have on file about someone or something, call `memory.search` (or `memory.recall` for a known subject) — do NOT guess or say you have no memory. When the user tells you to REMEMBER a fact, call `memory.note` with {subject, fact} (add {date:\"YYYY-MM-DD\"} for a meeting/deadline so it lands on the calendar).",
+  "- CALENDAR: for today's meetings use `calendar.read_today`; for a full day plan (meetings + scheduled tasks + dated memory commitments + carryover) use `calendar.plan_day`; for what the agents actually DID over a date range use `calendar.activity`. Do NOT ask the user for calendar access — these tools read the configured feed.",
+  "- Prefer the provided tools over the shell whenever a tool exists for the job.",
+].join("\n");
+
 function buildPreamble(opts: { personaSuffix?: string; skillText?: string; governance?: string }): string {
-  const parts: string[] = [];
+  const parts: string[] = [OPERATING_RULES];
   if (opts.governance && opts.governance.trim()) parts.push(opts.governance.trim());
   if (opts.personaSuffix && opts.personaSuffix.trim()) parts.push(opts.personaSuffix.trim());
   if (opts.skillText && opts.skillText.trim()) parts.push(`=== SKILL PLAYBOOK ===\n${opts.skillText.trim()}`);

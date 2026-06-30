@@ -1,0 +1,48 @@
+# NeuroWorks — containerized with explicit storage control.
+#
+# The whole point of this compose file is STORAGE: every byte the platform
+# writes goes to a named volume you can inspect, back up, prune, or relocate
+# independently of the container. Nothing durable lives in the container layer.
+#
+#   neuroworks_state → /app/.neuroworks   (jobs journal, users/sessions, data
+#                       sources, department data, hand-off runs, personas)
+#   neuroworks_vault → /data/vault        (the Obsidian "second brain")
+#
+# Quick start:
+#   docker compose up --build           # build + run, web on http://localhost:7470
+#   docker compose down                 # stop (volumes persist)
+#   docker volume ls | grep neuroworks  # see your storage
+#   docker run --rm -v clawbot_neuroworks_vault:/v alpine du -sh /v   # vault size
+#
+# To put storage on a specific host disk instead of a Docker-managed volume,
+# swap the named volume for a bind mount, e.g.:
+#   volumes:
+#     - "D:/Main brain:/data/vault"
+#     - "./.neuroworks:/app/.neuroworks"
+
+services:
+  neuroworks:
+    build: .
+    image: neuroworks:local
+    container_name: neuroworks
+    restart: unless-stopped
+    ports:
+      - "7470:7470"   # web UI
+      - "7471:7471"   # API (also reachable directly if you want)
+    environment:
+      VAULT_PATH: /data/vault
+      NEUROWORKS_PORT: "7471"
+      WEB_PORT: "7470"
+      # Pass real secrets via an .env file rather than committing them here.
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      - neuroworks_state:/app/.neuroworks
+      - neuroworks_vault:/data/vault
+
+volumes:
+  neuroworks_state:
+    name: clawbot_neuroworks_state
+  neuroworks_vault:
+    name: clawbot_neuroworks_vault

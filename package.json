@@ -12,6 +12,7 @@
     "digest": "tsx src/digest.ts",
     "publish-folder": "tsx src/publish-folder.ts",
     "dev": "concurrently -n server,web -c cyan,magenta \"pnpm -F clawbot-server dev\" \"pnpm -F clawbot-web dev\"",
+    "dev:docker": "concurrently -n server,web -c cyan,magenta \"pnpm -F clawbot-server dev\" \"pnpm -F clawbot-web dev -- --host 0.0.0.0\"",
     "neuroworks": "pnpm dev",
     "secondary": "cross-env CLAWBOT_NAME=secondary CLAWBOT_ROLE=persona-shifter NEUROWORKS_PORT=7473 CLAWBOT_PEERS=http://127.0.0.1:7471 CLAWBOT_SUBAGENT_BUDGET=4 CLAWBOT_IO_BUDGET=8 pnpm -F clawbot-server dev"
   },

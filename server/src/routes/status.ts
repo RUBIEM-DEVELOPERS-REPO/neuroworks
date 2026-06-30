@@ -7,6 +7,7 @@ import { latestRun } from "../lib/github.js";
 import { vaultCommitStats } from "../lib/commit-queue.js";
 import { pushOnly, clearStaleVaultLock, pullFromOrigin, getVaultPullStatus } from "../lib/vault.js";
 import { localInflightCount } from "../lib/peers.js";
+import { jobQueueStatus } from "../lib/jobs.js";
 import { jobStoreStats } from "../lib/job-store.js";
 
 export const statusRouter = Router();
@@ -122,6 +123,7 @@ statusRouter.get("/", async (_req, res) => {
       : { enabled: false },
     port: config.port,
     inflightJobs: localInflightCount(),
+    jobQueue: jobQueueStatus(),
     peers: config.peers,
     // Runtime state — what /status carried previously.
     ready: config.ready,

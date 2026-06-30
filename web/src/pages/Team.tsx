@@ -17,7 +17,7 @@ import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { marked } from "marked";
 import { Paperclip, X, RotateCcw, ArrowRight, Plus } from "lucide-react";
-import { api } from "../lib/api";
+import { api, type HandoffRun } from "../lib/api";
 import { Card, Button } from "../components/Card";
 
 type Persona = {
@@ -80,6 +80,13 @@ export function Team() {
   const [teamTemplates, setTeamTemplates] = useState<TeamTpl[]>([]);
   const [pickTemplate, setPickTemplate] = useState("");
 
+  // Hand-off relay (sequential team workflow). The relay passes the objective
+  // down a chain of teammates; we poll the structured run for its timeline.
+  const [relayTeamId, setRelayTeamId] = useState("");
+  const [relayRunId, setRelayRunId] = useState<string | null>(null);
+  const [relayRun, setRelayRun] = useState<HandoffRun | null>(null);
+  const [relayStarting, setRelayStarting] = useState(false);
+
   useEffect(() => { try { localStorage.setItem(STORAGE_KEY, brief); } catch {} }, [brief]);
 
   useEffect(() => {
@@ -124,6 +131,52 @@ export function Team() {
       setDispatching(false);
     }
   }
+
+  // Start a hand-off relay. Uses the picked pre-org team, or — if none picked —
+  // the currently-assigned employees, as the relay chain. The brief is the
+  // objective passed down the line.
+  async function startRelay() {
+    if (relayStarting) return;
+    if (!brief.trim()) { setErr("Type the objective in the Team brief below first — the relay passes it down the chain."); return; }
+    const members = assignments.map(a => ({ personaId: a.personaId }));
+    if (!relayTeamId && members.length < 2) {
+      setErr("Pick a pre-org team for the relay, or assign at least 2 employees below to relay between.");
+      return;
+    }
+    setErr("");
+    setRelayStarting(true);
+    setRelayRun(null);
+    try {
+      const r = await api.startHandoff({
+        objective: brief.trim(),
+        ...(relayTeamId ? { teamId: relayTeamId } : { members }),
+      });
+      setRelayRunId(r.runId);
+    } catch (e: any) {
+      setErr(e?.message ?? String(e));
+    } finally {
+      setRelayStarting(false);
+    }
+  }
+
+  // Poll the relay run every 2s until it reaches a terminal status.
+  useEffect(() => {
+    if (!relayRunId) return;
+    let alive = true;
+    let timer: any;
+    async function tick() {
+      const r = await api.getHandoff(relayRunId!).catch(() => null);
+      if (!alive) return;
+      if (r?.run) {
+        setRelayRun(r.run);
+        if (r.run.status === "running") timer = setTimeout(tick, 2000);
+      } else {
+        timer = setTimeout(tick, 2500);
+      }
+    }
+    tick();
+    return () => { alive = false; if (timer) clearTimeout(timer); };
+  }, [relayRunId]);
 
   // Poll dispatched jobs every 2s until they all finish. Stops itself
   // when every job is in a terminal state.
@@ -368,6 +421,42 @@ export function Team() {
         </Card>
       )}
 
+      <Card title="Hand-off relay (sequential)">
+        <p className="text-xs text-cream-300/60 mb-3">
+          Instead of fanning out in parallel, <span className="text-cream-100">pass the work down a chain</span>: the first
+          teammate does their slice, hands it + a report to the next, and so on until someone marks it complete. Uses the
+          <span className="text-cream-100"> Team brief</span> below as the objective. Pick a pre-org team, or relay between the
+          employees you assign below (2+).
+        </p>
+        <div className="flex flex-wrap items-center gap-2">
+          <select
+            value={relayTeamId}
+            onChange={e => setRelayTeamId(e.target.value)}
+            aria-label="Pick a team to relay through"
+            className="bg-ink-900 border border-ink-800 text-xs text-cream-100 rounded px-2 py-1.5 hover:border-violet-500/40 focus:outline-none focus:border-violet-500/60 cursor-pointer"
+          >
+            <option value="">— Relay between assigned employees —</option>
+            {teams.map(t => (
+              <option key={t.id} value={t.id}>{t.name} · {t.members.length} in chain</option>
+            ))}
+          </select>
+          <button
+            type="button"
+            onClick={startRelay}
+            disabled={relayStarting || (relayRun?.status === "running")}
+            className="inline-flex items-center gap-1 bg-violet-500 hover:bg-violet-600 disabled:opacity-40 text-white px-3 py-1.5 rounded text-xs whitespace-nowrap"
+          >
+            <ArrowRight size={11} /> {relayStarting ? "Starting…" : "Start relay"}
+          </button>
+          {relayRun && (
+            <button type="button" onClick={() => { setRelayRunId(null); setRelayRun(null); }} className="text-[11px] text-cream-300/60 hover:text-cream-100">
+              Clear
+            </button>
+          )}
+        </div>
+        {relayRun && <RelayTimeline run={relayRun} />}
+      </Card>
+
       <Card title="1. Team brief">
         <p className="text-xs text-cream-300/60 mb-2">The shared mission every employee will see — and the objective for any template you dispatch above.</p>
         <textarea
@@ -554,6 +643,61 @@ function StatusPill({ status }: { status: string }) {
     <span className={`text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-full border ${palette}`}>
       {status}
     </span>
+  );
+}
+
+function RelayTimeline({ run }: { run: HandoffRun }) {
+  const statusColor = run.status === "completed"
+    ? "text-leaf-300 bg-leaf-500/15 border-leaf-500/30"
+    : run.status === "running"
+      ? "text-violet-300 bg-violet-500/15 border-violet-500/30"
+      : run.status === "failed"
+        ? "text-coral-300 bg-coral-500/15 border-coral-500/30"
+        : "text-flame-200 bg-flame-500/10 border-flame-500/30";
+  return (
+    <div className="mt-4 border-t border-ink-800 pt-3">
+      <div className="flex items-center justify-between mb-3">
+        <div className="text-xs text-cream-300/70">
+          <span className="text-cream-100">{run.label}</span> · {run.steps.length} step{run.steps.length === 1 ? "" : "s"}
+        </div>
+        <span className={`text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-full border ${statusColor}`}>
+          {run.status === "exhausted" ? "chain ended" : run.status}
+        </span>
+      </div>
+      <ol className="relative border-l border-ink-700 ml-2 space-y-3">
+        {run.steps.map((s) => (
+          <li key={s.index} className="ml-4">
+            <span className={`absolute -left-[6px] w-3 h-3 rounded-full border-2 border-ink-900 ${
+              s.status === "done" ? "bg-leaf-500" : s.status === "running" ? "bg-violet-500 animate-pulse" : s.status === "failed" ? "bg-coral-500" : "bg-ink-600"
+            }`} />
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-sm text-cream-50 font-medium">{s.personaName}</span>
+              <span className="text-[11px] text-cream-300/60">{s.role}</span>
+              {typeof s.elapsedMs === "number" && <span className="text-[10px] text-cream-300/40">{(s.elapsedMs / 1000).toFixed(1)}s</span>}
+              {s.complete
+                ? <span className="text-[10px] text-leaf-300 bg-leaf-500/10 px-1.5 py-0.5 rounded">✓ complete</span>
+                : s.handoffTo && <span className="text-[10px] text-violet-300 bg-violet-500/10 px-1.5 py-0.5 rounded">→ {s.handoffTo}</span>}
+            </div>
+            {s.status_note && <div className="text-[11px] text-cream-300/70 mt-1 italic">{s.status_note}</div>}
+            {s.output && (
+              <details className="mt-1">
+                <summary className="text-[11px] text-cream-300/60 cursor-pointer hover:text-cream-100">View contribution ({s.output.length.toLocaleString()} chars)</summary>
+                <div className="bg-ink-950 border border-ink-800 rounded p-2.5 mt-1 prose-vault text-sm text-cream-100" dangerouslySetInnerHTML={{ __html: marked.parse(s.output.slice(0, 4000)) as string }} />
+              </details>
+            )}
+          </li>
+        ))}
+        {run.status === "running" && run.steps.every(s => s.status !== "running") && (
+          <li className="ml-4 text-[11px] text-cream-300/50 animate-pulse">Routing to the next teammate…</li>
+        )}
+      </ol>
+      {run.status !== "running" && run.finalReport && (
+        <div className="mt-3">
+          <div className="text-[10px] uppercase tracking-wider text-cream-300/50 mb-1">Final report</div>
+          <div className="bg-ink-950 border border-ink-800 rounded p-3 prose-vault text-sm text-cream-100" dangerouslySetInnerHTML={{ __html: marked.parse(run.finalReport.slice(0, 6000)) as string }} />
+        </div>
+      )}
+    </div>
   );
 }
 

@@ -8,7 +8,7 @@
 // like a DDL/DML statement so an agent mistake can't trash production.
 // The operator can flip readonly=false per source for trusted write paths.
 
-import { dirname, resolve } from "node:path";
+import { dirname, resolve, extname, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { randomUUID } from "node:crypto";
@@ -18,7 +18,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const CONFIG_DIR = resolve(__dirname, "../../../.neuroworks");
 const CONFIG_PATH = resolve(CONFIG_DIR, "data-sources.json");
 
-export type DataSourceKind = "postgres" | "mysql" | "sqlite" | "mssql" | "mongodb";
+export type DataSourceKind = "postgres" | "mysql" | "sqlite" | "mssql" | "mongodb" | "excel" | "csv";
 
 export type DataSource = {
   id: string;
@@ -26,6 +26,7 @@ export type DataSource = {
   kind: DataSourceKind;
   connection: string;
   notes?: string;
+  department?: string;   // optional: tag this connection to an org department
   readonly: boolean;
   createdAt: string;
 };
@@ -71,6 +72,11 @@ export function getSource(id: string): DataSource | undefined {
   return load().find(s => s.id === id);
 }
 
+export function getSourceByLabel(label: string): DataSource | undefined {
+  const lower = label.toLowerCase();
+  return load().find(s => s.label.toLowerCase() === lower);
+}
+
 export function addSource(input: Omit<DataSource, "id" | "createdAt">): DataSource {
   const list = load();
   const ds: DataSource = { ...input, id: randomUUID(), createdAt: new Date().toISOString() };
@@ -104,6 +110,11 @@ export function isReadOnlySql(sql: string): boolean {
 export type QueryResult = { rows: any[]; columns: string[]; rowCount: number; truncated: boolean };
 
 export async function runQuery(source: DataSource, sql: string, limit = 200): Promise<QueryResult> {
+  // File-based sources (Excel/CSV) — handle before the SQL keyword gate since
+  // they use a simplified query syntax, not full SQL.
+  if (source.kind === "excel") return runExcelQuery(source, sql, limit);
+  if (source.kind === "csv") return runCsvQuery(source, sql, limit);
+
   // MongoDB takes a JSON query document, not SQL — handle it before the
   // SQL-keyword read-only gate (which would false-positive on field values
   // like {"status":"create"}). Read-only is enforced structurally instead:
@@ -243,6 +254,120 @@ async function runMongoQuery(source: DataSource, raw: string, limit: number): Pr
   } finally { try { await client.close(); } catch { /* tolerate */ } }
 }
 
+// Excel query handler. sql is a simplified lookup: { sheet, filter, limit }
+// or just the sheet name. Uses SheetJS (xlsx) to parse on every call so
+// file changes are reflected immediately — no cache invalidation headache.
+async function runExcelQuery(source: DataSource, raw: string, limit: number): Promise<QueryResult> {
+  let q: any;
+  try { q = JSON.parse(raw); }
+  catch {
+    // Treat bare string as sheet name.
+    q = typeof raw === "string" ? { sheet: raw.trim() } : {};
+  }
+  if (!q || !q.sheet) {
+    // If no sheet specified, use the first sheet.
+    q = { sheet: null, filter: q?.filter, limit: q?.limit };
+  }
+  let XLSX: any;
+  try { XLSX = await import("xlsx"); }
+  catch { throw new Error("xlsx package not installed — run `pnpm -C server add xlsx`"); }
+  if (!existsSync(source.connection)) {
+    throw new Error(`Excel file not found: ${source.connection}`);
+  }
+  const wb = XLSX.readFile(source.connection, { type: "file", codepage: undefined });
+  const sheetName = q.sheet ?? wb.SheetNames[0];
+  if (!sheetName || !wb.Sheets[sheetName]) {
+    throw new Error(`Sheet "${sheetName}" not found. Available: ${wb.SheetNames.join(", ")}`);
+  }
+  const sheet = wb.Sheets[sheetName];
+  const json = XLSX.utils.sheet_to_json(sheet, { defval: null });
+  if (!Array.isArray(json) || json.length === 0) {
+    return { rows: [], columns: [], rowCount: 0, truncated: false };
+  }
+  const columns = Object.keys(json[0] as Record<string, unknown>);
+  let rows = json as Record<string, unknown>[];
+
+  // Optional filter: { col: "Status", op: "eq", val: "Active" }
+  if (q.filter && typeof q.filter === "object") {
+    const f = q.filter;
+    const col = String(f.col ?? "");
+    const op = String(f.op ?? "eq");
+    const val = f.val;
+    if (col && columns.includes(col)) {
+      rows = rows.filter(r => {
+        const cell = r[col];
+        switch (op) {
+          case "eq": return cell == val;
+          case "neq": return cell != val;
+          case "gt": return Number(cell) > Number(val);
+          case "gte": return Number(cell) >= Number(val);
+          case "lt": return Number(cell) < Number(val);
+          case "lte": return Number(cell) <= Number(val);
+          case "contains": return String(cell ?? "").toLowerCase().includes(String(val ?? "").toLowerCase());
+          default: return true;
+        }
+      });
+    }
+  }
+
+  const all = rows;
+  rows = all.slice(0, limit);
+  const truncated = all.length > limit;
+  return { rows, columns, rowCount: rows.length, truncated };
+}
+
+// CSV query handler. Same simplified syntax as Excel: { sheet, filter, limit }.
+// CSV files have a single implicit sheet named after the file (no extension).
+async function runCsvQuery(source: DataSource, raw: string, limit: number): Promise<QueryResult> {
+  let XLSX: any;
+  try { XLSX = await import("xlsx"); }
+  catch { throw new Error("xlsx package not installed — run `pnpm -C server add xlsx` (SheetJS handles CSV too)"); }
+  if (!existsSync(source.connection)) {
+    throw new Error(`CSV file not found: ${source.connection}`);
+  }
+  // SheetJS reads CSV natively — same code path as Excel.
+  const wb = XLSX.readFile(source.connection, { type: "file", raw: true });
+  const sheetName = wb.SheetNames[0];
+  const sheet = wb.Sheets[sheetName];
+  const json = XLSX.utils.sheet_to_json(sheet, { defval: null });
+  if (!Array.isArray(json) || json.length === 0) {
+    return { rows: [], columns: [], rowCount: 0, truncated: false };
+  }
+  const columns = Object.keys(json[0] as Record<string, unknown>);
+  let rows = json as Record<string, unknown>[];
+
+  // Optional filter (same shape as Excel).
+  let q: any;
+  try { q = JSON.parse(raw); }
+  catch { q = {}; }
+  if (q.filter && typeof q.filter === "object") {
+    const f = q.filter;
+    const col = String(f.col ?? "");
+    const op = String(f.op ?? "eq");
+    const val = f.val;
+    if (col && columns.includes(col)) {
+      rows = rows.filter(r => {
+        const cell = r[col];
+        switch (op) {
+          case "eq": return cell == val;
+          case "neq": return cell != val;
+          case "gt": return Number(cell) > Number(val);
+          case "gte": return Number(cell) >= Number(val);
+          case "lt": return Number(cell) < Number(val);
+          case "lte": return Number(cell) <= Number(val);
+          case "contains": return String(cell ?? "").toLowerCase().includes(String(val ?? "").toLowerCase());
+          default: return true;
+        }
+      });
+    }
+  }
+
+  const all = rows;
+  rows = all.slice(0, limit);
+  const truncated = all.length > limit;
+  return { rows, columns, rowCount: rows.length, truncated };
+}
+
 export async function describeSource(source: DataSource): Promise<{ tables: { name: string; columns: { name: string; type: string }[] }[] }> {
   switch (source.kind) {
     case "postgres": {
@@ -328,10 +453,55 @@ export async function describeSource(source: DataSource): Promise<{ tables: { na
         return { tables };
       } finally { try { await client.close(); } catch { /* tolerate */ } }
     }
+    case "excel": {
+      let XLSX: any;
+      try { XLSX = await import("xlsx"); }
+      catch { throw new Error("xlsx package not installed"); }
+      if (!existsSync(source.connection)) {
+        throw new Error(`Excel file not found: ${source.connection}`);
+      }
+      const wb = XLSX.readFile(source.connection, { type: "file" });
+      const tables: { name: string; columns: { name: string; type: string }[] }[] = [];
+      for (const sheetName of wb.SheetNames) {
+        const sheet = wb.Sheets[sheetName];
+        const json = XLSX.utils.sheet_to_json(sheet, { defval: null });
+        const columns = Array.isArray(json) && json.length > 0
+          ? Object.keys(json[0] as Record<string, unknown>).map(k => ({ name: k, type: inferType((json[0] as Record<string, unknown>)[k]) }))
+          : [];
+        tables.push({ name: sheetName, columns });
+      }
+      return { tables };
+    }
+    case "csv": {
+      let XLSX: any;
+      try { XLSX = await import("xlsx"); }
+      catch { throw new Error("xlsx package not installed"); }
+      if (!existsSync(source.connection)) {
+        throw new Error(`CSV file not found: ${source.connection}`);
+      }
+      const wb = XLSX.readFile(source.connection, { type: "file", raw: true });
+      const sheetName = wb.SheetNames[0];
+      const sheet = wb.Sheets[sheetName];
+      const json = XLSX.utils.sheet_to_json(sheet, { defval: null });
+      const columns = Array.isArray(json) && json.length > 0
+        ? Object.keys(json[0] as Record<string, unknown>).map(k => ({ name: k, type: inferType((json[0] as Record<string, unknown>)[k]) }))
+        : [];
+      // Use the filename (without ext) as the table name.
+      const tableName = basename(source.connection).replace(extname(source.connection), "");
+      return { tables: [{ name: tableName, columns }] };
+    }
   }
 }
 
+function inferType(val: unknown): string {
+  if (val === null || val === undefined) return "null";
+  if (typeof val === "number") return Number.isInteger(val) ? "integer" : "number";
+  if (typeof val === "boolean") return "boolean";
+  if (val instanceof Date || (!isNaN(Date.parse(String(val))) && /^\d{4}-\d{2}-\d{2}/.test(String(val)))) return "date";
+  return "string";
+}
+
 export function redactConnection(conn: string, kind: DataSourceKind): string {
-  if (kind === "sqlite") return conn;
+  if (kind === "sqlite" || kind === "excel" || kind === "csv") return conn;
   return conn.replace(/(:\/\/[^:@]+:)([^@]+)(@)/, "$1***$3");
 }

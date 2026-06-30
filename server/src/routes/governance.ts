@@ -2,7 +2,10 @@ import { Router } from "express";
 import { existsSync, unlinkSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { config } from "../config.js";
-import { listGovernance, loadGovernancePrefix, invalidateGovernanceCache } from "../lib/governance.js";
+import {
+  listGovernance, loadGovernancePrefix, invalidateGovernanceCache,
+  getConstraints, updateConstraint, extractConstraints, checkActionAgainstConstraints,
+} from "../lib/governance.js";
 
 export const governanceRouter = Router();
 
@@ -69,4 +72,53 @@ governanceRouter.delete("/:name", (req, res) => {
 governanceRouter.post("/invalidate", (_req, res) => {
   invalidateGovernanceCache();
   res.json({ ok: true });
+});
+
+// ─── Constraint extraction & review ───
+
+// GET /api/governance/constraints — all constraints, optional ?policy= filter.
+governanceRouter.get("/constraints", (req, res) => {
+  const policyName = req.query.policy ? String(req.query.policy) : undefined;
+  const data = getConstraints(policyName);
+  res.json(data);
+});
+
+// POST /api/governance/:name/extract — run LLM extraction on a policy.
+governanceRouter.post("/:name/extract", async (req, res) => {
+  const name = String(req.params.name);
+  if (!/^[A-Za-z0-9._-]+$/.test(name)) return res.status(400).json({ error: "invalid policy name" });
+  try {
+    const constraints = await extractConstraints(name);
+    res.json({ policyName: name, constraints, count: constraints.length });
+  } catch (e: any) {
+    res.status(500).json({ error: e?.message ?? String(e) });
+  }
+});
+
+// PUT /api/governance/:name/constraints/:constraintId — review/accept/reject.
+governanceRouter.put("/:name/constraints/:constraintId", (req, res) => {
+  const name = String(req.params.name);
+  const id = String(req.params.constraintId);
+  if (!/^[A-Za-z0-9._-]+$/.test(name)) return res.status(400).json({ error: "invalid policy name" });
+  const { reviewed, accepted, severity, rule, details, category } = req.body ?? {};
+  const updated = updateConstraint(name, id, { reviewed, accepted, severity, rule, details, category });
+  if (!updated) return res.status(404).json({ error: "constraint not found" });
+  res.json({ constraint: updated });
+});
+
+// POST /api/governance/check-action — HITL gate: check an action against constraints.
+governanceRouter.post("/check-action", (req, res) => {
+  const { action, policy } = req.body ?? {};
+  if (!action) return res.status(400).json({ error: "action (string) is required" });
+  const data = getConstraints(policy ? String(policy) : undefined);
+  const allReviewed = data.constraints.filter(c => c.reviewed && c.accepted);
+  const violations = checkActionAgainstConstraints(String(action), allReviewed);
+  res.json({
+    action: String(action),
+    violations,
+    constrained: violations.length > 0,
+    summary: violations.length > 0
+      ? `This action may violate ${violations.length} constraint${violations.length === 1 ? "" : "s"}: ${violations.map(v => v.violated[0].rule).join("; ")}`
+      : "No constraint violations detected",
+  });
 });

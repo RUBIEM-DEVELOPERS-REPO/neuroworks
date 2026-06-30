@@ -22,6 +22,11 @@ import {
   type DataSourceKind,
 } from "../lib/data-sources.js";
 import { listVault, getVaultHealth } from "../lib/vault.js";
+import {
+  listDepartmentData, listDepartments, addDepartmentDatum,
+  updateDepartmentDatum, removeDepartmentDatum,
+} from "../lib/department-data.js";
+import { ingestDepartmentData } from "../lib/doc-ingest.js";
 
 export const dataSourcesRouter = Router();
 
@@ -44,19 +49,74 @@ dataSourcesRouter.get("/company-files", (_req, res) => {
   }
 });
 
+// ─── Department-specific company data ───────────────────────────────────
+// Declared BEFORE the /:id routes so "departments" isn't matched as a source
+// id. GET lists all (optionally filtered by ?department=), POST adds, PATCH
+// edits, DELETE removes. Agents read this via the company.department_data
+// primitive.
+dataSourcesRouter.get("/departments", (req, res) => {
+  const dept = typeof req.query.department === "string" ? req.query.department : undefined;
+  res.json({ departments: listDepartments(), data: listDepartmentData(dept) });
+});
+
+dataSourcesRouter.post("/departments", (req, res) => {
+  try {
+    const datum = addDepartmentDatum({
+      department: String(req.body?.department ?? ""),
+      title: String(req.body?.title ?? ""),
+      content: String(req.body?.content ?? ""),
+    });
+    res.json({ datum });
+  } catch (e: any) { res.status(400).json({ error: e?.message ?? String(e) }); }
+});
+
+// Scan an uploaded document (any type) for department-specific facts and add
+// them. Body: { filename, contentBase64, department? }. Declared before /:id.
+dataSourcesRouter.post("/departments/import", async (req, res) => {
+  try {
+    const filename = String(req.body?.filename ?? "").trim();
+    const contentBase64 = String(req.body?.contentBase64 ?? "");
+    const departmentHint = req.body?.department ? String(req.body.department).trim() : undefined;
+    if (!filename || !contentBase64) return res.status(400).json({ error: "filename and contentBase64 are required" });
+
+    const entries = await ingestDepartmentData({ filename, contentBase64, departmentHint });
+    const added = entries.map(e => addDepartmentDatum(e));
+    res.json({ scanned: entries.length, added });
+  } catch (e: any) {
+    res.status(400).json({ error: e?.message ?? String(e) });
+  }
+});
+
+dataSourcesRouter.patch("/departments/:id", (req, res) => {
+  const updated = updateDepartmentDatum(String(req.params.id), {
+    department: req.body?.department !== undefined ? String(req.body.department) : undefined,
+    title: req.body?.title !== undefined ? String(req.body.title) : undefined,
+    content: req.body?.content !== undefined ? String(req.body.content) : undefined,
+  });
+  if (!updated) return res.status(404).json({ error: "department datum not found" });
+  res.json({ datum: updated });
+});
+
+dataSourcesRouter.delete("/departments/:id", (req, res) => {
+  const ok = removeDepartmentDatum(String(req.params.id));
+  if (!ok) return res.status(404).json({ error: "department datum not found" });
+  res.json({ ok: true });
+});
+
 dataSourcesRouter.post("/", (req, res) => {
   try {
     const label = String(req.body?.label ?? "").trim();
     const kind = String(req.body?.kind ?? "").trim() as DataSourceKind;
     const connection = String(req.body?.connection ?? "").trim();
     const notes = req.body?.notes ? String(req.body.notes).slice(0, 500) : undefined;
+    const department = req.body?.department ? String(req.body.department).trim().slice(0, 80) : undefined;
     const readonly = req.body?.readonly !== false;
     if (!label) return res.status(400).json({ error: "label required" });
     if (!["postgres", "mysql", "sqlite", "mssql", "mongodb"].includes(kind)) return res.status(400).json({ error: "kind must be postgres | mysql | sqlite | mssql | mongodb" });
     if (!connection) return res.status(400).json({ error: "connection required" });
     if (label.length > 100) return res.status(400).json({ error: "label too long (max 100 chars)" });
     if (connection.length > 1000) return res.status(400).json({ error: "connection too long (max 1000 chars)" });
-    const ds = addSource({ label, kind, connection, notes, readonly });
+    const ds = addSource({ label, kind, connection, notes, department, readonly });
     res.json({ source: { ...ds, connection: redactConnection(ds.connection, ds.kind) } });
   } catch (e: any) { res.status(400).json({ error: e?.message ?? String(e) }); }
 });

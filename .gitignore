@@ -26,3 +26,11 @@ server/_*-harness*
 server/_*.out
 server/eng.traineddata
 server/page1.png
+
+# Scratch / one-off outputs (root + server) — never version these
+_*.out
+_*.err
+server/_*.json
+server/_desk/
+# Stray experimental static export (not the web/ app). Un-ignore to track it.
+server/neuroworks_site/

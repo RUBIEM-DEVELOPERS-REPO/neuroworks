@@ -23,6 +23,20 @@ const DEFAULT_ALLOWLIST = [
   "connector.list", "connector.describe", "connector.call",
   // Integrations directory (read-only — never returns secrets)
   "integration.list",
+  // Org / users directory (read-only — names, emails, roles; never passwords)
+  "users.list", "users.lookup", "org.reports",
+  // Long-term memory — recall/persist durable facts. Without these on the
+  // bridge, the Hermes executor (which can't call clawbot primitives natively)
+  // can neither remember nor recall, so memory was dead under Hermes-primary.
+  "memory.note", "memory.recall", "memory.search",
+  // Calendar — today's meetings (iCal), the agents' own activity, and a
+  // full day plan that folds in dated memory commitments.
+  "calendar.read_today", "calendar.activity", "calendar.plan_day",
+  // Company database connections + department-specific data (read-only)
+  "db.list_sources", "db.schema", "db.query", "company.department_data",
+  // Email — agents send through OUR bridge (Mailjet/SMTP), never an external
+  // mail CLI (Himalaya/sendmail). This is the only sanctioned send path.
+  "email.send",
   // Web reads
   "web.search", "web.fetch", "web.scrape", "web.firecrawl",
   // Document text extraction (read-only)

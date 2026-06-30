@@ -6,6 +6,8 @@ import { ollamaGenerate, ollamaGenerateWithMeta } from "./ollama.js";
 import { listVault, readVaultFile, searchVault, writeVaultFile, importBinaryIntoVault } from "./vault.js";
 import { extractDocText, extractDocsParallel } from "./doc-extractor.js";
 import { listOwnedRepos, recentCommits, openPRs, openIssues, readme, octokit } from "./github.js";
+import { getSourceByLabel, runQuery, describeSource, listSources } from "./data-sources.js";
+import { getConnectionByProvider } from "./integrations.js";
 import { delegateToBestPeer, reviewWithPeer } from "./peers.js";
 import { scanForSecurityRisks, redactHighSeverity, type SecurityKind } from "./security.js";
 import { scrape, interact, renderMarkdownToPdf, type InteractAction } from "./browser.js";
@@ -337,6 +339,196 @@ export const primitives: Primitive[] = [
     handler: async (args) => {
       const { data } = await octokit.issues.create({ owner: String(args.owner), repo: String(args.name), title: String(args.title), body: args.body ? String(args.body) : undefined });
       return { number: data.number, url: data.html_url };
+    },
+  },
+  {
+    name: "github.comment_on_issue",
+    description: "Comment on a GitHub issue or pull request. Provide owner, repo, issue/PR number, and the comment body (markdown).",
+    readonly: false,
+    args: [
+      { name: "owner", type: "string", required: true, description: "GitHub owner" },
+      { name: "name", type: "string", required: true, description: "Repo name" },
+      { name: "issueNumber", type: "number", required: true, description: "Issue or PR number" },
+      { name: "body", type: "string", required: true, description: "Comment body (markdown)" },
+    ],
+    handler: async (args) => {
+      const { data } = await octokit.issues.createComment({ owner: String(args.owner), repo: String(args.name), issue_number: Number(args.issueNumber), body: String(args.body) });
+      return { id: data.id, url: data.html_url };
+    },
+  },
+  {
+    name: "github.update_issue",
+    description: "Update an issue's title, body, state, or labels. Standard GitHub API — pass only the fields you want to change.",
+    readonly: false,
+    args: [
+      { name: "owner", type: "string", required: true, description: "GitHub owner" },
+      { name: "name", type: "string", required: true, description: "Repo name" },
+      { name: "issueNumber", type: "number", required: true, description: "Issue number" },
+      { name: "title", type: "string", required: false, description: "New title" },
+      { name: "body", type: "string", required: false, description: "New body (markdown)" },
+      { name: "state", type: "string", required: false, description: "New state: open or closed" },
+      { name: "labels", type: "string", required: false, description: "Comma-separated labels to set" },
+    ],
+    handler: async (args) => {
+      const payload: any = { owner: String(args.owner), repo: String(args.name), issue_number: Number(args.issueNumber) };
+      if (args.title !== undefined) payload.title = String(args.title);
+      if (args.body !== undefined) payload.body = String(args.body);
+      if (args.state !== undefined) payload.state = String(args.state);
+      if (args.labels !== undefined) payload.labels = String(args.labels).split(",").map(s => s.trim()).filter(Boolean);
+      const { data } = await octokit.issues.update(payload);
+      return { number: data.number, url: data.html_url, state: data.state, labels: data.labels?.map((l: any) => l.name) };
+    },
+  },
+  {
+    name: "github.request_review",
+    description: "Request review on a pull request from specific reviewers. Pass owner, repo, PR number, and a comma-separated list of GitHub usernames as reviewers.",
+    readonly: false,
+    args: [
+      { name: "owner", type: "string", required: true, description: "GitHub owner" },
+      { name: "name", type: "string", required: true, description: "Repo name" },
+      { name: "pullNumber", type: "number", required: true, description: "Pull request number" },
+      { name: "reviewers", type: "string", required: true, description: "Comma-separated GitHub usernames to request review from" },
+    ],
+    handler: async (args) => {
+      const reviewers = String(args.reviewers).split(",").map(s => s.trim()).filter(Boolean);
+      const { data } = await octokit.pulls.requestReviewers({ owner: String(args.owner), repo: String(args.name), pull_number: Number(args.pullNumber), reviewers });
+      return { requestedReviewers: data.requested_reviewers?.map((r: any) => r.login) ?? reviewers };
+    },
+  },
+  {
+    name: "github.list_issues",
+    description: "List open issues for a repo. Optionally filter by label (comma-separated) or assignee. Returns number, title, author, labels, url.",
+    readonly: true,
+    args: [
+      { name: "owner", type: "string", required: true, description: "GitHub owner" },
+      { name: "name", type: "string", required: true, description: "Repo name" },
+      { name: "labels", type: "string", required: false, description: "Comma-separated labels to filter by" },
+      { name: "assignee", type: "string", required: false, description: "Filter by assignee username" },
+      { name: "state", type: "string", required: false, description: "Issue state: open (default), closed, all" },
+    ],
+    handler: async (args) => {
+      const state = (String(args.state ?? "open")) as "open" | "closed" | "all";
+      const { data } = await octokit.issues.listForRepo({
+        owner: String(args.owner), repo: String(args.name),
+        state,
+        ...(args.labels ? { labels: String(args.labels) } : {}),
+        ...(args.assignee ? { assignee: String(args.assignee) } : {}),
+        per_page: 50,
+      });
+      return { issues: data.map(i => ({ number: i.number, title: i.title, author: i.user?.login, labels: i.labels?.map((l: any) => l.name), state: i.state, url: i.html_url, createdAt: i.created_at })) };
+    },
+  },
+  // ── Database connector primitives (db.*) ──
+  {
+    name: "db.list_sources",
+    description: "List all connected database/file sources with their labels, kinds, and read-only status. Handy way to discover what source name to pass to other db.* primitives.",
+    readonly: true,
+    args: [],
+    handler: async () => {
+      const sources = listSources().map(s => ({
+        id: s.id,
+        label: s.label,
+        kind: s.kind,
+        notes: s.notes,
+        department: s.department,
+        readonly: s.readonly,
+      }));
+      return { sources };
+    },
+  },
+  {
+    name: "db.list_tables",
+    description: "List available tables/collections in a connected data source. Source is identified by label (case-insensitive). For Excel sources, tables are the sheet names.",
+    readonly: true,
+    args: [
+      { name: "source", type: "string", required: true, description: "Source label (case-insensitive)" },
+    ],
+    handler: async (args) => {
+      const source = getSourceByLabel(String(args.source));
+      if (!source) throw new Error(`Data source "${args.source}" not found — use db.list_sources to see available sources`);
+      const info = await describeSource(source);
+      const tables = info.tables.map(t => ({
+        name: t.name,
+        columnCount: t.columns.length,
+        columns: t.columns.map(c => `${c.name}:${c.type}`).join(", "),
+      }));
+      return { source: source.label, kind: source.kind, tables };
+    },
+  },
+  {
+    name: "db.describe_table",
+    description: "Describe a specific table/column in a connected data source. Source by label, table by name. Returns column names with their data types.",
+    readonly: true,
+    args: [
+      { name: "source", type: "string", required: true, description: "Source label (case-insensitive)" },
+      { name: "table", type: "string", required: true, description: "Table name (or sheet name for Excel sources)" },
+    ],
+    handler: async (args) => {
+      const source = getSourceByLabel(String(args.source));
+      if (!source) throw new Error(`Data source "${args.source}" not found`);
+      const info = await describeSource(source);
+      const table = info.tables.find(t => t.name.toLowerCase() === String(args.table).toLowerCase());
+      if (!table) throw new Error(`Table "${args.table}" not found in "${args.source}". Available: ${info.tables.map(t => t.name).join(", ")}`);
+      return { source: source.label, kind: source.kind, table: table.name, columns: table.columns };
+    },
+  },
+  {
+    name: "db.query",
+    description: "Run SQL (or query document) on a connected data source. Source is identified by label (case-insensitive). For SQL databases: pass standard SQL — SELECT / WITH / EXPLAIN / DESCRIBE. For MongoDB: pass a JSON document like {\"collection\":\"users\",\"filter\":{\"active\":true},\"limit\":50}. For Excel/CSV: pass a JSON like {\"sheet\":\"Sheet1\",\"filter\":{\"col\":\"Status\",\"op\":\"eq\",\"val\":\"Active\"},\"limit\":100}. Respects the source's read-only setting — writes are blocked unless the source was configured with writes enabled.",
+    readonly: true,
+    args: [
+      { name: "source", type: "string", required: true, description: "Source label (case-insensitive)" },
+      { name: "query", type: "string", required: true, description: "SQL statement or JSON query document" },
+      { name: "limit", type: "number", required: false, description: "Max rows to return (default 200)" },
+    ],
+    handler: async (args) => {
+      const source = getSourceByLabel(String(args.source));
+      if (!source) throw new Error(`Data source "${args.source}" not found`);
+      const limit = Math.max(1, Math.min(5000, Number(args.limit ?? 200)));
+      const result = await runQuery(source, String(args.query), limit);
+      return {
+        source: source.label,
+        kind: source.kind,
+        columns: result.columns,
+        rows: result.rows,
+        rowCount: result.rowCount,
+        truncated: result.truncated,
+      };
+    },
+  },
+  {
+    name: "db.write",
+    description: "INSERT/UPDATE/DELETE on a database source. Requires operator approval (HITL gate). The approval request shows the SQL, target source, and estimated impact. Only works on sources configured with writes enabled (readonly=false).",
+    readonly: false,
+    args: [
+      { name: "source", type: "string", required: true, description: "Source label (case-insensitive)" },
+      { name: "query", type: "string", required: true, description: "SQL statement (INSERT/UPDATE/DELETE)" },
+      { name: "dryRun", type: "boolean", required: false, description: "If true, show what would happen without executing (default true for safety)" },
+    ],
+    handler: async (args) => {
+      const source = getSourceByLabel(String(args.source));
+      if (!source) throw new Error(`Data source "${args.source}" not found`);
+      if (source.readonly) throw new Error(`Source "${args.source}" is read-only — request the operator to enable writes in Company Data settings`);
+      const sql = String(args.query);
+      const dryRun = args.dryRun !== false;
+      if (dryRun) {
+        // Return a preview without executing.
+        return {
+          source: source.label,
+          kind: source.kind,
+          sql,
+          preview: true,
+          message: `Preview of write to "${source.label}". A human operator will review this before execution. Submit with dryRun=false to execute.`,
+        };
+      }
+      const result = await runQuery(source, sql);
+      return {
+        source: source.label,
+        kind: source.kind,
+        affected: result.rowCount,
+        columns: result.columns,
+        rows: result.rows,
+      };
     },
   },
   {
@@ -1530,10 +1722,10 @@ ${vaultHits.slice(0, 8).map(h => `- [[${h.path}]] (line ${h.line})`).join("\n") 
   },
   {
     name: "email.send",
-    description: "Send an actual email via the configured outbound transport (Mailjet HTTPS API, with SMTP fallback). Use this for ANY 'send an email to X', 'email X about Y', 'reply to Z' task — do NOT use web.interact to drive Gmail's web UI, that's not a real send path. Returns { ok, transport, from, to, subject, sentAt } so the synth can confirm actual delivery instead of fabricating one. Body accepts markdown — converted to plaintext + HTML automatically.",
+    description: "Send an actual email via the configured outbound transport (Mailjet HTTPS API, with SMTP fallback). Use this for ANY 'send an email to X', 'email X about Y', 'reply to Z' task — do NOT use web.interact to drive Gmail's web UI, that's not a real send path. RECIPIENTS: if the user names someone by NAME or ROLE rather than giving a literal address (e.g. 'email Godswill', 'send it to the project lead'), you MUST resolve their real address from the org directory FIRST via users.lookup (or users.list) — never invent or guess an address, and never use placeholder/example domains. Returns { ok, transport, from, to, subject, sentAt } so the synth can confirm actual delivery instead of fabricating one. Body accepts markdown — converted to plaintext + HTML automatically.",
     readonly: false,
     args: [
-      { name: "to", type: "string", required: true, description: "Recipient email address (e.g. 'jane@example.com')" },
+      { name: "to", type: "string", required: true, description: "Recipient's REAL email address. If you only have a name/role, call users.lookup first to get it. Must be a real address the user provided or that resolves from the directory — NOT a placeholder like name@example.com or '[project lead email]'." },
       { name: "subject", type: "string", required: true, description: "Email subject line (no Re: prefix unless replying)" },
       { name: "body", type: "string", required: true, description: "Email body in markdown — headings, bullets, links all rendered to HTML AND plaintext" },
       { name: "in_reply_to", type: "string", required: false, description: "Optional Message-ID of the message being replied to" },
@@ -1604,6 +1796,18 @@ ${vaultHits.slice(0, 8).map(h => `- [[${h.path}]] (line ${h.line})`).join("\n") 
       const src = getSource(String(args.source_id));
       if (!src) throw new Error(`unknown source id: ${args.source_id}`);
       return await runQuery(src, String(args.sql), 200);
+    },
+  },
+  {
+    name: "company.department_data",
+    description: "Fetch operator-curated, department-specific company data (facts, policies, assumptions, territories, etc.) from the Company-data page. Pass a department name (e.g. 'Finance', 'HR', 'Sales') to get just that team's entries, or omit it to list every department that has data. Use this before a department task so you have the team's facts instead of guessing. Returns { departments:[{department,count}], data:[{department,title,content}] }.",
+    readonly: true,
+    args: [{ name: "department", type: "string", required: false, description: "Department name to filter by (case-insensitive). Omit to list all departments + their data." }],
+    handler: async (args) => {
+      const { listDepartmentData, listDepartments } = await import("./department-data.js");
+      const department = args.department ? String(args.department) : undefined;
+      const data = listDepartmentData(department).map(d => ({ department: d.department, title: d.title, content: d.content }));
+      return { departments: listDepartments(), data };
     },
   },
   {
@@ -1965,6 +2169,113 @@ When you're uncertain about citation_coverage, lean higher when you see [N] or [
       return { iso: d.toISOString(), local: d.toString(), date: d.toISOString().slice(0, 10), unix: Math.floor(d.getTime() / 1000) };
     },
   },
+  // ── Integration primitives (integration.*) ──
+  {
+    name: "integration.slack.post",
+    description: "Post a message to a connected Slack channel. Uses the first configured Slack webhook connection. Message is markdown text. Returns { ok, ts } on success.",
+    readonly: false,
+    args: [
+      { name: "text", type: "string", required: true, description: "Message text (markdown supported by Slack webhooks)" },
+    ],
+    handler: async (args) => {
+      const conn = getConnectionByProvider("slack");
+      if (!conn) throw new Error("No Slack connection configured — add one on the Integrations page");
+      const webhookUrl = conn.secrets.webhookUrl ?? conn.config.webhookUrl;
+      if (!webhookUrl) throw new Error("Slack webhook URL not found in connection");
+      const r = await fetch(webhookUrl, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text: String(args.text) }) });
+      if (!r.ok) throw new Error(`Slack webhook returned HTTP ${r.status}: ${(await r.text()).slice(0, 200)}`);
+      return { ok: true, ts: (await r.json().catch(() => ({}))).ts ?? "sent" };
+    },
+  },
+  {
+    name: "integration.gmail.send",
+    description: "Send an email via the connected Google (Gmail) integration. Requires a configured Google connection with a Gmail API scope. Returns { id, threadId } on success.",
+    readonly: false,
+    args: [
+      { name: "to", type: "string", required: true, description: "Recipient email address" },
+      { name: "subject", type: "string", required: true, description: "Email subject line" },
+      { name: "body", type: "string", required: true, description: "Email body (plain text or HTML)" },
+      { name: "cc", type: "string", required: false, description: "CC recipient(s), comma-separated" },
+      { name: "contentType", type: "string", required: false, description: "'text/plain' (default) or 'text/html'" },
+    ],
+    handler: async (args) => {
+      const conn = getConnectionByProvider("google");
+      if (!conn) throw new Error("No Google connection configured — add one on the Integrations page");
+      const token = conn.secrets.accessToken;
+      if (!token) throw new Error("Google access token not found");
+      const to = String(args.to);
+      const subject = String(args.subject);
+      const body = String(args.body);
+      const cc = args.cc ? String(args.cc) : "";
+      const contentType = String(args.contentType ?? "text/plain");
+
+      // Build RFC 2822 email raw string, then base64url encode it.
+      const headers = [`To: ${to}`, `Subject: ${subject}`, `MIME-Version: 1.0`, `Content-Type: ${contentType}; charset=UTF-8`];
+      if (cc) headers.push(`Cc: ${cc}`);
+      const raw = btoa(unescape(encodeURIComponent(headers.join("\r\n") + "\r\n\r\n" + body)))
+        .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+      const r = await fetch("https://gmail.googleapis.com/gmail/v1/users/me/messages/send", {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({ raw }),
+      });
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({}));
+        throw new Error(`Gmail API error: ${err?.error?.message ?? `HTTP ${r.status}`}`);
+      }
+      const j: any = await r.json();
+      return { id: j.id, threadId: j.threadId };
+    },
+  },
+  {
+    name: "integration.gmail.read",
+    description: "Read emails from Gmail inbox. Returns messages matching a search query. Requires a configured Google connection with Gmail API scope.",
+    readonly: true,
+    args: [
+      { name: "query", type: "string", required: false, description: "Gmail search query (same syntax as Gmail search bar). Default: recent 10 messages from the last 7 days." },
+      { name: "maxResults", type: "number", required: false, description: "Max messages to return (default 10, max 50)" },
+    ],
+    handler: async (args) => {
+      const conn = getConnectionByProvider("google");
+      if (!conn) throw new Error("No Google connection configured — add one on the Integrations page");
+      const token = conn.secrets.accessToken;
+      if (!token) throw new Error("Google access token not found");
+      const query = String(args.query ?? "newer_than:7d");
+      const maxResults = Math.min(50, Math.max(1, Number(args.maxResults ?? 10)));
+
+      // List matching message IDs.
+      const listR = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages?q=${encodeURIComponent(query)}&maxResults=${maxResults}`, {
+        headers: { authorization: `Bearer ${token}` },
+      });
+      if (!listR.ok) {
+        const err = await listR.json().catch(() => ({}));
+        throw new Error(`Gmail API error: ${err?.error?.message ?? `HTTP ${listR.status}`}`);
+      }
+      const listJ: any = await listR.json();
+      const ids: string[] = (listJ.messages ?? []).map((m: any) => m.id);
+
+      // Fetch full message details for each ID (max 10 by default to avoid rate limits).
+      const messages: any[] = [];
+      for (const id of ids.slice(0, maxResults)) {
+        const msgR = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Subject&metadataHeaders=Date`, {
+          headers: { authorization: `Bearer ${token}` },
+        });
+        if (!msgR.ok) continue;
+        const msg: any = await msgR.json();
+        const headers = (msg.payload?.headers ?? []).reduce((acc: any, h: any) => { acc[h.name] = h.value; return acc; }, {});
+        messages.push({
+          id: msg.id,
+          threadId: msg.threadId,
+          from: headers.From ?? "",
+          to: headers.To ?? "",
+          subject: headers.Subject ?? "",
+          date: headers.Date ?? "",
+          snippet: msg.snippet ?? "",
+        });
+      }
+      return { query, total: listJ.resultSizeEstimate ?? messages.length, messages };
+    },
+  },
   {
     name: "vault.write_pdf",
     description: "Render a markdown answer into a polished PDF (system typography, generous margins, GFM tables) and save it to the vault. Use when the deliverable is a board pack, customer-facing memo, or anything an operator will email out. Returns { path, bytes }.",
@@ -2031,7 +2342,7 @@ When you're uncertain about citation_coverage, lean higher when you see [N] or [
   },
   {
     name: "calendar.plan_day",
-    description: "Synthesise a day plan for a date: today's meetings (from CLAWBOT_CALENDAR_ICAL_URL if configured), scheduled clawbot tasks for that day-of-week, and any open follow-ups carried over from yesterday's activity. Returns the structured pieces; the planner is expected to feed them through the `daily-briefing` skill to produce the prose briefing.",
+    description: "Synthesise a day plan for a date: today's meetings (from CLAWBOT_CALENDAR_ICAL_URL if configured), scheduled clawbot tasks for that day-of-week, dated commitments recalled from long-term memory (memory.note facts anchored to this date), and any open follow-ups carried over from yesterday's activity. Returns the structured pieces; the planner is expected to feed them through the `daily-briefing` skill to produce the prose briefing.",
     readonly: true,
     args: [
       { name: "date", type: "string", required: false, description: "Target date YYYY-MM-DD (default: today)" },
@@ -2082,7 +2393,16 @@ When you're uncertain about citation_coverage, lean higher when you see [N] or [
         }).map(s => ({ id: s.id, templateId: s.templateId, label: s.label, cadence: s.cadence }));
       } catch { /* schedules optional */ }
 
-      return { date, meetings, meetingsError, schedules, activity, carryover };
+      // Memory → calendar link: dated facts the agent was told to remember
+      // ("the Q3 board meeting is on 2026-07-15") surface as commitments on
+      // their day, instead of dying in a JSONL file the planner never reads.
+      let commitments: any[] = [];
+      try {
+        const { datedFactsInWindow } = await import("./memory.js");
+        commitments = datedFactsInWindow(date, date).map(f => ({ subject: f.subject, fact: f.fact, source: f.source }));
+      } catch { /* memory optional */ }
+
+      return { date, meetings, meetingsError, schedules, activity, carryover, commitments };
     },
   },
   {
@@ -2249,16 +2569,17 @@ When you're uncertain about citation_coverage, lean higher when you see [N] or [
   },
   {
     name: "memory.note",
-    description: "Persist a single fact about a subject (a person, project, or topic) into the agent's long-term memory. Use to remember things like 'Priya prefers async over meetings', 'the auth migration is owned by Sam', 'the customer mentioned X budget'. Stored at `_neuroworks/memory/<slug>.jsonl` and available to future sessions via `memory.recall`.",
+    description: "Persist a single fact about a subject (a person, project, or topic) into the agent's long-term memory. Use to remember things like 'Priya prefers async over meetings', 'the auth migration is owned by Sam', 'the customer mentioned X budget'. Pass `date` (YYYY-MM-DD) for time-bound facts (a meeting, deadline, renewal) so they surface on that day's calendar plan. Stored at `_neuroworks/memory/<slug>.jsonl` and available to future sessions via `memory.recall`.",
     readonly: false,
     args: [
       { name: "subject", type: "string", required: true, description: "Who or what the fact is about — a name, project, or topic. Reused as the file key, so prefer canonical forms." },
       { name: "fact", type: "string", required: true, description: "The fact to remember. Short, declarative, attribution-free if possible." },
       { name: "source", type: "string", required: false, description: "Optional pointer (URL / vault path / jobId) so the fact can be re-verified later." },
+      { name: "date", type: "string", required: false, description: "Optional calendar anchor YYYY-MM-DD for time-bound facts — links the fact to that day on calendar.plan_day / the daily briefing." },
     ],
     handler: async (args) => {
       const { noteFact } = await import("./memory.js");
-      return noteFact({ subject: String(args.subject), fact: String(args.fact), source: args.source ? String(args.source) : undefined });
+      return noteFact({ subject: String(args.subject), fact: String(args.fact), source: args.source ? String(args.source) : undefined, date: args.date ? String(args.date) : undefined });
     },
   },
   {
@@ -2328,6 +2649,27 @@ When you're uncertain about citation_coverage, lean higher when you see [N] or [
     handler: async (args) => {
       const { reportsOf } = await import("./org-chart.js");
       return { reports: reportsOf(String(args.query ?? "")) };
+    },
+  },
+  {
+    name: "users.list",
+    description: "List the people in the organization (the Users directory) — their name, email, role (admin/member/viewer), title, and department. Use to answer 'who is part of the org?', 'who's on the team?', 'who works in finance?', or to find someone's email before drafting/sending a message. Returns the directory; never returns passwords.",
+    readonly: true,
+    args: [],
+    handler: async () => {
+      const { directory } = await import("./users.js");
+      return { users: directory() };
+    },
+  },
+  {
+    name: "users.lookup",
+    description: "Look up ONE person in the organization's Users directory by name or email, and return their details (name, email, role, title, department). Use to resolve 'what's Jane's email?', 'who is Mr. Khumalo?', or to confirm someone is part of the org before acting. Returns null when there's no match.",
+    readonly: true,
+    args: [{ name: "query", type: "string", required: true, description: "A name or email (partial name allowed)" }],
+    handler: async (args) => {
+      const { lookupUser } = await import("./users.js");
+      const user = lookupUser(String(args.query ?? ""));
+      return user ? { user } : { user: null, note: "no matching person in the org directory" };
     },
   },
   {
@@ -2608,6 +2950,28 @@ When you're uncertain about citation_coverage, lean higher when you see [N] or [
       return await minimaxMusic(prompt, { lyrics: args.lyrics ? String(args.lyrics) : undefined });
     },
   },
+  {
+    name: "orchestration.plan",
+    description: "Decompose a complex objective into parallel sub-tasks, execute them simultaneously via independent agents, and synthesize the results. Use for multi-faceted research, cross-domain analysis, or any task that benefits from splitting work across specialists. Returns { id, label, status, subTasks: [{label, personaName, status, output}], finalReport }. Sub-tasks run in parallel — each agent sees only their own instructions. Final synthesis merges all outputs.",
+    readonly: false,
+    args: [
+      { name: "objective", type: "string", required: true, description: "The complex objective to decompose and execute" },
+    ],
+    handler: async (args) => {
+      const objective = String(args.objective ?? "").trim();
+      if (!objective) return { error: "objective is required" };
+      const { createOrchestration } = await import("./orchestrator.js");
+      const run = await createOrchestration(objective);
+      return {
+        id: run.id,
+        label: run.label,
+        status: run.status,
+        subTasks: run.subTasks.map(s => ({ id: s.id, label: s.label, personaName: s.personaName, status: s.status, error: s.error, elapsedMs: s.elapsedMs, output: s.output.slice(0, 2000) })),
+        finalReport: run.finalReport.slice(0, 4000),
+        elapsedMs: run.elapsedMs,
+      };
+    },
+  },
 ];
 
 void sep;
@@ -2655,6 +3019,10 @@ export function humanStepLabel(tool: string, args: Record<string, any> = {}): st
     case "github.list_branches":return s("name") ? `Listing branches in ${s("name")}` : "Listing branches";
     case "github.get_file":    return s("path") && s("name") ? `Fetching ${s("path")} from ${s("name")}` : "Fetching a file from GitHub";
     case "github.create_issue":return s("title") ? `Opening issue "${s("title")}"` : "Opening a GitHub issue";
+    case "github.comment_on_issue":return s("issueNumber") ? `Commenting on issue #${s("issueNumber")}` : "Commenting on a GitHub issue";
+    case "github.update_issue":return s("issueNumber") ? `Updating issue #${s("issueNumber")}` : "Updating a GitHub issue";
+    case "github.request_review":return s("pullNumber") ? `Requesting review on PR #${s("pullNumber")}` : "Requesting review on a PR";
+    case "github.list_issues":  return s("name") ? `Listing issues in ${s("name")}` : "Listing GitHub issues";
     case "ollama.generate":    return "Thinking about it";
     case "web.fetch":          return s("url") ? `Reading ${s("url")}` : "Reading a webpage";
     case "web.scrape":         return s("url") ? `Browsing ${s("url")} (Playwright)` : "Browsing a webpage";
@@ -2686,12 +3054,21 @@ export function humanStepLabel(tool: string, args: Record<string, any> = {}): st
       const file = path.split(/[\\/]/).pop() ?? path;
       return `Filing "${file}" into your second brain (${folder})`;
     }
+    case "db.list_sources":    return "Listing connected databases";
+    case "db.list_tables":     return s("source") ? `Listing tables in ${s("source")}` : "Listing database tables";
+    case "db.describe_table":  return s("source") && s("table") ? `Describing ${s("source")}.${s("table")}` : "Describing a table";
+    case "db.query":           return s("source") ? `Querying ${s("source")}` : "Querying a database";
+    case "db.write":           return s("source") ? `Writing to ${s("source")}` : "Writing to a database";
+    case "integration.slack.post":return "Posting to Slack";
+    case "integration.gmail.send":return s("to") ? `Sending email to ${s("to")}` : "Sending an email";
+    case "integration.gmail.read":return s("query") ? `Reading Gmail for "${s("query")}"` : "Reading Gmail";
     case "clock.now":          return "Checking the clock";
     case "web.search":         return s("query") ? `Searching the web for "${s("query")}"` : "Searching the web";
     case "research.deep":      return s("query") ? `Researching "${s("query").slice(0, 80)}${s("query").length > 80 ? "…" : ""}" — vault + web` : "Researching";
     case "research.multiperspective": return s("topic") ? `Multi-perspective research: "${s("topic")}"` : "Multi-perspective research";
     case "peer.delegate":      return s("task") ? `Delegating to a peer clawbot` : "Delegating to a peer";
     case "peer.review":        return "Asking a peer to review the draft";
+    case "orchestration.plan": return "Orchestrating parallel sub-agents for this task";
     case "quality.check":      return "Quality-checking the draft";
     case "security.scan":      return s("kind") ? `Security-scanning the ${s("kind")}` : "Security-scanning the content";
     default:                   return tool;
