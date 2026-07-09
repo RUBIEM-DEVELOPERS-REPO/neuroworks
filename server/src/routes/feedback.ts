@@ -136,7 +136,7 @@ feedbackRouter.post("/retry", async (req, res) => {
 
   void runJob(newJobRec, async (push, progress) => {
     push(`retry of ${jobId}${feedback?.rating === "down" ? " (👎 marked)" : ""}${note ? ` — note: "${note.slice(0, 80)}"` : ""}`);
-    return await planAndExecute(enriched, push, (patch) => progress(patch as Record<string, unknown>), { personaSystemSuffix: personaSuffix });
+    return await planAndExecute(enriched, push, (patch) => progress(patch as Record<string, unknown>), { personaSystemSuffix: personaSuffix, workMode: persona?.workMode });
   });
 });
 

@@ -21,6 +21,18 @@ governanceRouter.get("/", (_req, res) => {
   });
 });
 
+// GET /api/governance/constraints — all constraints, optional ?policy= filter.
+// MUST be registered before GET /:name below: Express matches route patterns
+// in registration order, and "/:name" is a single-segment wildcard that would
+// otherwise capture "/constraints" as name="constraints" and 404 (there's no
+// policy file literally called constraints.md) — this endpoint never actually
+// reached its handler until this route moved above the wildcard.
+governanceRouter.get("/constraints", (req, res) => {
+  const policyName = req.query.policy ? String(req.query.policy) : undefined;
+  const data = getConstraints(policyName);
+  res.json(data);
+});
+
 // Get the full body of one policy for editing/preview.
 governanceRouter.get("/:name", (req, res) => {
   const name = String(req.params.name);
@@ -76,13 +88,6 @@ governanceRouter.post("/invalidate", (_req, res) => {
 
 // ─── Constraint extraction & review ───
 
-// GET /api/governance/constraints — all constraints, optional ?policy= filter.
-governanceRouter.get("/constraints", (req, res) => {
-  const policyName = req.query.policy ? String(req.query.policy) : undefined;
-  const data = getConstraints(policyName);
-  res.json(data);
-});
-
 // POST /api/governance/:name/extract — run LLM extraction on a policy.
 governanceRouter.post("/:name/extract", async (req, res) => {
   const name = String(req.params.name);
@@ -100,8 +105,18 @@ governanceRouter.put("/:name/constraints/:constraintId", (req, res) => {
   const name = String(req.params.name);
   const id = String(req.params.constraintId);
   if (!/^[A-Za-z0-9._-]+$/.test(name)) return res.status(400).json({ error: "invalid policy name" });
-  const { reviewed, accepted, severity, rule, details, category } = req.body ?? {};
-  const updated = updateConstraint(name, id, { reviewed, accepted, severity, rule, details, category });
+  // Only forward fields the caller actually sent. A naive destructure-and-pass
+  // of the whole body (including keys the client omitted) fills those keys
+  // with `undefined`, and updateConstraint's `{...existing, ...patch}` merge
+  // then overwrites them to undefined — a "just accept this constraint" PUT
+  // with only {reviewed, accepted} was silently wiping rule/severity/category
+  // on the stored record. Filtering here keeps the merge a true partial patch.
+  const body = req.body ?? {};
+  const patch: Record<string, any> = {};
+  for (const key of ["reviewed", "accepted", "severity", "rule", "details", "category"]) {
+    if (body[key] !== undefined) patch[key] = body[key];
+  }
+  const updated = updateConstraint(name, id, patch);
   if (!updated) return res.status(404).json({ error: "constraint not found" });
   res.json({ constraint: updated });
 });

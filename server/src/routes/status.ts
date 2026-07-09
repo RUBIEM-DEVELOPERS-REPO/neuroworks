@@ -9,6 +9,10 @@ import { pushOnly, clearStaleVaultLock, pullFromOrigin, getVaultPullStatus } fro
 import { localInflightCount } from "../lib/peers.js";
 import { jobQueueStatus } from "../lib/jobs.js";
 import { jobStoreStats } from "../lib/job-store.js";
+import { listGovernance } from "../lib/governance.js";
+import { listConnectors } from "../lib/connectors.js";
+import { listConnections } from "../lib/integrations.js";
+import { listProviders } from "../lib/model-providers.js";
 
 export const statusRouter = Router();
 
@@ -139,5 +143,38 @@ statusRouter.get("/", async (_req, res) => {
     // Admin page extra calls to /status/vault + a future /jobs/store.
     vaultCommits: vaultCommitStats(),
     jobStore: jobStoreStats(),
+    // Org status summary for the Dashboard's "Mission Control" panel.
+    // /api/governance, /api/connectors, and /api/models are all
+    // superadmin-gated at the router level (they carry secrets/config a
+    // regular viewer shouldn't see) — but a NAME/COUNT-only summary is safe
+    // for anyone who can see the dashboard, so it's projected here instead
+    // of proxying those gated routes to the browser. Every list function
+    // used below already returns a "Public" type with secrets stripped.
+    orgStatus: (() => {
+      const policies = listGovernance().filter(p => !p.reference);
+      const connectorNames = listConnectors().map(c => c.label);
+      const connectionNames = listConnections().map(c => c.providerName);
+      const cloudProviderActive = listProviders().some(p => p.active);
+      // "cloud-assisted" once ANY cloud LLM path can be reached — OpenRouter
+      // (config-level toggle) or an activated Models-page provider (e.g. the
+      // Claude Fable 5 / Anthropic swap). Neither active = every plan/direct/
+      // synth call stays on the local Ollama model, so data never leaves the
+      // machine for inference.
+      const computeMode: "local-only" | "cloud-assisted" = (config.openrouterEnabled || cloudProviderActive) ? "cloud-assisted" : "local-only";
+      return {
+        activePolicyCount: policies.length,
+        activePolicies: policies.map(p => p.name),
+        connectedSystemCount: connectorNames.length + connectionNames.length,
+        connectedSystems: [...connectorNames, ...connectionNames],
+        computeMode,
+        // Operational signal, not a legal certification — flags whether task
+        // content is reachable by a third-party cloud LLM at all, which is
+        // the practical question for Zimbabwe's Data Protection Act (Ch.
+        // 11:12) when handling personal data. "local-only" means inference
+        // never leaves the machine; "cloud-assisted" means it can, and the
+        // operator should confirm a data-sharing agreement covers that.
+        dataResidency: computeMode === "local-only" ? "local" : "mixed",
+      };
+    })(),
   });
 });

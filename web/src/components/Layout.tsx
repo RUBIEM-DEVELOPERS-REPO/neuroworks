@@ -8,6 +8,7 @@ import {
   Calendar, Shield,   CalendarDays, FileEdit, Database,
   Terminal as TerminalIcon, FolderKanban, Wrench, Plug, Eye, Sparkles,
   Boxes, CreditCard, LogOut, LogIn, Contact, Zap, ThumbsUp, BarChart, DollarSign, ScrollText, Hammer, GitBranch,
+  Workflow, Cpu,
   type LucideIcon,
 } from "lucide-react";
 import { BrandMark } from "./BrandMark";
@@ -35,6 +36,7 @@ const workspaceNav: NavItem[] = [
   { to: "/tasks", label: "Tasks", icon: ListChecks },
   { to: "/calendar", label: "Calendar", icon: CalendarDays },
   { to: "/results", label: "Reports", icon: FileText },
+  { to: "/daily-reports", label: "Daily Reports", icon: BookOpen },
   { to: "/edit", label: "Doc editor", icon: FileEdit },
 ];
 
@@ -65,6 +67,8 @@ const systemNav: NavItem[] = [
   { to: "/knowledge", label: "Knowledge", icon: BookOpen },
   { to: "/users", label: "Users", icon: Users },
   { to: "/data-sources", label: "Company data", icon: Database },
+  { to: "/data-pipeline", label: "Intellinexus", icon: Workflow },
+  { to: "/models", label: "Models", icon: Cpu },
   { to: "/connectors", label: "Connectors", icon: Boxes },
   { to: "/integrations", label: "Integrations", icon: Plug },
   { to: "/payments", label: "Payments", icon: CreditCard },
@@ -81,6 +85,18 @@ export function Layout({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [counts, setCounts] = useState<{ approvals: number; activity: number }>({ approvals: 0, activity: 0 });
   const [persona, setPersona] = useState<{ id: string; name: string; role: string } | null>(null);
+  // Access-layer nav filtering. No session (loopback operator) = full nav.
+  // staff → workbench only (no Watch/Monitor/System); admin → no money
+  // (Cost) and no secrets pages; superadmin → everything. Server routes
+  // enforce the same rules — this just stops dead-end clicks.
+  const role = (user?.role ?? "") as string;
+  const layer = !user ? "superadmin" : role === "superadmin" ? "superadmin" : role === "admin" ? "admin" : "staff";
+  const SECRETS_PAGES = ["/models", "/connectors", "/integrations", "/terminal", "/governance", "/admin", "/settings", "/payments", "/data-sources", "/data-pipeline"];
+  const nav = {
+    watch: layer === "staff" ? [] : watchNav,
+    monitoring: layer === "staff" ? [] : monitoringNav.filter(i => i.to !== "/cost" || layer === "superadmin"),
+    system: layer === "staff" ? [] : layer === "superadmin" ? systemNav : systemNav.filter(i => !SECRETS_PAGES.includes(i.to)),
+  };
   // Per-group open state. Undefined = "not toggled yet"; a group with an active
   // child defaults to open so the current page is always visible in the rail.
   const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({});
@@ -174,7 +190,7 @@ export function Layout({ children }: { children: ReactNode }) {
             <BrandMark size={26} />
             <div>
               <div className="font-display font-semibold text-cream-50 text-xl leading-none tracking-tight">NeuroWorks</div>
-              <div className="text-[10px] text-cream-300/70 mt-1 tracking-[0.18em] uppercase">The AI Workforce</div>
+              <div className="text-[10px] text-cream-300/70 mt-1 tracking-[0.18em] uppercase">The Intelligent Organization</div>
             </div>
           </Link>
         </div>
@@ -188,10 +204,10 @@ export function Layout({ children }: { children: ReactNode }) {
         <nav className="flex-1 px-3 space-y-0.5 overflow-y-auto scrollbar-thin">
           {primaryNav.map(renderNavItem)}
           {renderGroup("workspace", "Workspace", FolderKanban, workspaceNav)}
-          {renderGroup("watch", "Watch", Eye, watchNav, counts.approvals + counts.activity)}
+          {nav.watch.length > 0 && renderGroup("watch", "Watch", Eye, nav.watch, counts.approvals + counts.activity)}
           {renderGroup("library", "Library", Library, libraryNav)}
-          {renderGroup("monitoring", "Monitor", BarChart, monitoringNav)}
-          {renderGroup("system", "System", Wrench, systemNav)}
+          {nav.monitoring.length > 0 && renderGroup("monitoring", "Monitor", BarChart, nav.monitoring)}
+          {nav.system.length > 0 && renderGroup("system", "System", Wrench, nav.system)}
         </nav>
 
         <div className="px-3 py-3 border-t border-ink-800">

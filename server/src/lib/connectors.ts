@@ -410,17 +410,17 @@ export async function testConnector(id: string): Promise<{ ok: boolean; detail: 
 
 // ─── Seeding ───
 
-const AIIA_WEBSITE_LABEL = "AIIA Website";
+const Aiia_WEBSITE_LABEL = "Aiia Website";
 
 export function seedAiiAWebsiteConnector(): ConnectorPublic | null {
-  const existing = listConnectors().find(c => c.label === AIIA_WEBSITE_LABEL);
+  const existing = listConnectors().find(c => c.label === Aiia_WEBSITE_LABEL);
   if (existing) return null;
 
   return addConnector({
-    label: AIIA_WEBSITE_LABEL,
+    label: Aiia_WEBSITE_LABEL,
     baseUrl: "https://www.aiinstituteafrica.com",
     description:
-      "AIIA (Africa Institute of Artificial Intelligence) website CMS — events, articles, contact forms, program applications, payments, and admin management. Public endpoints are open; admin endpoints require a bearer token.",
+      "Aiia (Africa Institute of Artificial Intelligence) website CMS — events, articles, contact forms, program applications, payments, and admin management. Public endpoints are open; admin endpoints require a bearer token.",
     writeEnabled: true,
     endpoints: [
       // ── Public ──

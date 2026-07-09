@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import {
-  Terminal, Megaphone, TrendingUp, Users, CreditCard, Scale, Headphones, Settings,
+  Terminal, Megaphone, TrendingUp, Users, CreditCard, Scale, Headphones, Settings, HandHeart,
   ArrowRight, Check, Loader2, Zap, Plug, Calendar, Clock, UserPlus,
   type LucideIcon,
 } from "lucide-react";
@@ -9,7 +9,7 @@ import { api } from "../lib/api";
 import { Card, Button, showToast } from "../components/Card";
 
 const ICON_MAP: Record<string, LucideIcon> = {
-  Terminal, Megaphone, TrendingUp, Users, CreditCard, Scale, Headphones, Settings,
+  Terminal, Megaphone, TrendingUp, Users, CreditCard, Scale, Headphones, Settings, HandHeart,
 };
 
 type DeptInfo = {
@@ -66,7 +66,7 @@ export function Departments() {
               violet: "border-violet-500/30 bg-violet-500/5 text-violet-300",
               coral: "border-coral-500/30 bg-coral-500/5 text-coral-300",
               green: "border-leaf-500/30 bg-leaf-500/5 text-leaf-300",
-              blue: "border-blue-500/30 bg-blue-500/5 text-blue-300",
+              blue: "border-violet-500/30 bg-violet-500/5 text-violet-300",
               amber: "border-amber-500/30 bg-amber-500/5 text-amber-300",
               purple: "border-purple-500/30 bg-purple-500/5 text-purple-300",
               teal: "border-teal-500/30 bg-teal-500/5 text-teal-300",

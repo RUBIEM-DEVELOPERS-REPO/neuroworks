@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { Contact, Bot, User as UserIcon, Mail, ArrowRight, Search, Upload } from "lucide-react";
-import { api, type WorkforceDepartment } from "../lib/api";
+import { api, type WorkforceDepartment, type WorkforcePerson, type WorkMode, type User } from "../lib/api";
 import { Card, Button, showToast } from "../components/Card";
 
 // Read a File into base64 in chunks (avoids call-stack blowups on big files).
@@ -26,6 +26,11 @@ export function Workforce() {
   const [counts, setCounts] = useState<{ agents: number; people: number; departments: number } | null>(null);
   const [q, setQ] = useState("");
   const [err, setErr] = useState("");
+  // Superadmin sessions (and the token-less loopback operator) can MANAGE the
+  // org's humans right here — work mode, salary, department, disable, remove.
+  const [me, setMe] = useState<User | null | undefined>(undefined);
+  useEffect(() => { api.session().then(r => setMe(r.user)).catch(() => setMe(null)); }, []);
+  const canManage = me === undefined ? false : (!me || me.role === "superadmin");
   const [scanning, setScanning] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
@@ -138,26 +143,7 @@ export function Workforce() {
                 ) : (
                   <ul className="space-y-2">
                     {dept.people.map(p => (
-                      <li key={p.email} className="border border-ink-800 rounded-lg p-2.5 bg-ink-950">
-                        <div className="flex items-center justify-between gap-2">
-                          <div className="min-w-0">
-                            <div className="text-sm text-cream-50 font-medium truncate">{p.name}</div>
-                            <div className="text-[11px] text-cream-300/60">{p.title || p.role}</div>
-                          </div>
-                          <div className="flex items-center gap-2 shrink-0">
-                            <span className="text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-ink-800 text-cream-300/70">{p.role}</span>
-                            <button
-                              type="button"
-                              onClick={() => { void navigator.clipboard?.writeText(p.email); showToast(`Email copied: ${p.email}`, "success", 1600); }}
-                              className="text-cream-300/50 hover:text-violet-400"
-                              title={`Copy ${p.email}`}
-                            >
-                              <Mail size={13} />
-                            </button>
-                          </div>
-                        </div>
-                        <div className="text-[11px] text-cream-300/60 font-mono mt-1 truncate">{p.email}</div>
-                      </li>
+                      <PersonCard key={p.email} p={p} canManage={canManage} onChanged={refresh} />
                     ))}
                   </ul>
                 )}
@@ -169,3 +155,90 @@ export function Workforce() {
     </div>
   );
 }
+
+// One human in the contact book. For superadmin viewers the card carries the
+// management row — work mode, salary, department move, disable/enable, remove
+// — all through the same /api/users endpoints the Users page uses, so the two
+// surfaces can never disagree.
+function PersonCard({ p, canManage, onChanged }: { p: WorkforcePerson; canManage: boolean; onChanged: () => void }) {
+  const disabled = p.status === "disabled";
+  const pending = p.status === "pending";
+
+  async function patch(body: any, okMsg: string) {
+    try { await api.updateUser(p.id, body); showToast(okMsg, "success", 1800); onChanged(); }
+    catch (e: any) { showToast(e?.message ?? String(e), "error"); }
+  }
+  async function setSalary() {
+    const raw = window.prompt(`Monthly salary for ${p.name} (blank to clear):`, p.salaryMonthly ? String(p.salaryMonthly) : "");
+    if (raw == null) return;
+    const v = raw.trim() === "" ? null : Number(raw.replace(/[^\d.]/g, ""));
+    if (v !== null && (!Number.isFinite(v) || v <= 0)) { showToast("Enter a positive number", "error"); return; }
+    await patch({ salaryMonthly: v }, v === null ? "Salary cleared" : `Salary set — ${v.toLocaleString()}/mo`);
+  }
+  async function moveDept() {
+    const dept = window.prompt(`Move ${p.name} to department:`, p.department === "Unassigned" ? "" : p.department);
+    if (dept == null) return;
+    await patch({ department: dept.trim() }, dept.trim() ? `Moved to ${dept.trim()}` : "Department cleared");
+  }
+  async function remove() {
+    if (!confirm(`Remove ${p.name} (${p.email}) from the organization?`)) return;
+    try { await api.deleteUser(p.id); showToast("Removed from the org", "success"); onChanged(); }
+    catch (e: any) { showToast(e?.message ?? String(e), "error"); }
+  }
+
+  return (
+    <li className={`border rounded-lg p-2.5 bg-ink-950 ${disabled ? "border-ink-800 opacity-60" : pending ? "border-amber-400/30" : "border-ink-800"}`}>
+      <div className="flex items-center justify-between gap-2">
+        <div className="min-w-0">
+          <div className="text-sm text-cream-50 font-medium truncate">
+            {p.name}
+            {disabled && <span className="ml-2 text-[9px] uppercase tracking-wider text-coral-400/80">disabled</span>}
+            {pending && <span className="ml-2 text-[9px] uppercase tracking-wider text-amber-300/90">pending approval</span>}
+          </div>
+          <div className="text-[11px] text-cream-300/60">{p.title || p.role}</div>
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          <span className="text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-ink-800 text-cream-300/70">{p.role}</span>
+          {p.workMode && <span className="text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-sky-500/15 text-sky-300">{p.workMode}</span>}
+          <button
+            type="button"
+            onClick={() => { void navigator.clipboard?.writeText(p.email); showToast(`Email copied: ${p.email}`, "success", 1600); }}
+            className="text-cream-300/50 hover:text-violet-400"
+            title={`Copy ${p.email}`}
+          >
+            <Mail size={13} />
+          </button>
+        </div>
+      </div>
+      <div className="text-[11px] text-cream-300/60 font-mono mt-1 truncate">{p.email}</div>
+      {canManage && (
+        <div className="flex items-center gap-2 flex-wrap mt-2 pt-2 border-t border-ink-800/70">
+          <select
+            value={p.workMode ?? ""}
+            onChange={e => patch({ workMode: e.target.value || null }, `${p.name} → ${e.target.value || "no"} work mode`)}
+            className="bg-ink-900 border border-ink-800 text-[10px] text-cream-200 rounded px-1.5 py-0.5"
+            title="Work mode — how much of this role the system performs"
+          >
+            <option value="">work mode…</option>
+            <option value="human">human</option>
+            <option value="hybrid">hybrid</option>
+            <option value="agent">agent</option>
+          </select>
+          <button type="button" onClick={setSalary} className="text-[10px] text-cream-300/60 hover:text-leaf-400" title="Set monthly salary (feeds the Cost page)">
+            {p.salaryMonthly ? `${p.salaryMonthly.toLocaleString()}/mo` : "set salary"}
+          </button>
+          <button type="button" onClick={moveDept} className="text-[10px] text-cream-300/60 hover:text-violet-300">move dept</button>
+          <button
+            type="button"
+            onClick={() => patch({ status: disabled ? "active" : "disabled" }, disabled ? `${p.name} re-enabled` : `${p.name} disabled`)}
+            className={`text-[10px] ${disabled ? "text-leaf-400/80 hover:text-leaf-300" : "text-cream-300/60 hover:text-amber-300"}`}
+          >
+            {disabled ? "enable" : "disable"}
+          </button>
+          <button type="button" onClick={remove} className="text-[10px] text-cream-300/60 hover:text-coral-400 ml-auto">remove</button>
+        </div>
+      )}
+    </li>
+  );
+}
+

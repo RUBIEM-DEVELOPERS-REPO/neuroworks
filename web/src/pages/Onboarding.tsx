@@ -4,12 +4,14 @@ import { api, type OnboardingData, type SectorInfo } from "../lib/api";
 import { t, setLanguage, type Language } from "../lib/i18n";
 import {
   Building2, Sprout, HeartPulse, GraduationCap, ShoppingCart, HandHeart, Pickaxe,
+  Palmtree, Landmark, Cpu, Store, MoreHorizontal,
   ChevronRight, ChevronLeft, Check, Globe, Sparkles, ArrowRight,
   type LucideIcon,
 } from "lucide-react";
 
 const SECTOR_ICONS: Record<string, LucideIcon> = {
   Building2, Sprout, HeartPulse, GraduationCap, ShoppingCart, HandHeart, Pickaxe,
+  Palmtree, Landmark, Cpu, Store, MoreHorizontal,
 };
 
 function SectorIcon({ icon, size = 24 }: { icon: string; size?: number }) {
@@ -27,6 +29,7 @@ export function Onboarding() {
   const [sectors, setSectors] = useState<SectorInfo[]>([]);
   const [step, setStep] = useState<Step>("sector");
   const [sectorId, setSectorId] = useState("");
+  const [customSectorName, setCustomSectorName] = useState("");
   const [lang, setLang] = useState<Language>("en");
   const [orgName, setOrgName] = useState("");
 
@@ -34,6 +37,7 @@ export function Onboarding() {
     api.getOnboarding().then(r => {
       setSectors(r.sectors);
       if (r.state?.sector) setSectorId(r.state.sector);
+      if (r.state?.customSectorName) setCustomSectorName(r.state.customSectorName);
       if (r.state?.language) setLang(r.state.language as Language);
       if (r.state?.orgName) setOrgName(r.state.orgName);
     }).catch(() => {});
@@ -46,7 +50,13 @@ export function Onboarding() {
     setBusy(true);
     try {
       setLanguage(lang);
-      await api.setOnboarding({ completed: true, sector: sectorId || undefined, language: lang, orgName: orgName || undefined });
+      await api.setOnboarding({
+        completed: true,
+        sector: sectorId || undefined,
+        customSectorName: sectorId === "custom" ? (customSectorName.trim() || undefined) : undefined,
+        language: lang,
+        orgName: orgName || undefined,
+      });
       navigate("/dashboard");
     } catch (e: any) {
       setBusy(false);
@@ -145,12 +155,24 @@ export function Onboarding() {
                 <h1 className="font-display text-2xl text-cream-50">{t("onboarding.orgName")}</h1>
                 <p className="text-sm text-cream-300/70 mt-1">Give your workforce a name (optional).</p>
               </div>
+              {sectorId === "custom" && (
+                <div>
+                  <label className="text-xs text-cream-300/70 mb-1.5 block">What's your sector called?</label>
+                  <input
+                    value={customSectorName}
+                    onChange={e => setCustomSectorName(e.target.value)}
+                    placeholder="e.g., Renewable Energy"
+                    className="w-full bg-ink-800 border border-ink-700 rounded-xl px-4 py-3 text-cream-100 placeholder:text-cream-300/40 outline-none focus:border-violet-500/60 transition-colors"
+                    autoFocus
+                  />
+                </div>
+              )}
               <input
                 value={orgName}
                 onChange={e => setOrgName(e.target.value)}
                 placeholder={t("onboarding.orgNamePlaceholder")}
                 className="w-full bg-ink-800 border border-ink-700 rounded-xl px-4 py-3 text-cream-100 placeholder:text-cream-300/40 outline-none focus:border-violet-500/60 transition-colors"
-                autoFocus
+                autoFocus={sectorId !== "custom"}
                 onKeyDown={e => { if (e.key === "Enter") handleFinish(); }}
               />
             </div>
@@ -190,7 +212,7 @@ export function Onboarding() {
         </div>
 
         <p className="text-center text-xs text-cream-300/40 mt-6">
-          NeuroWorks — your local AI workforce. Configured for Zimbabwe.
+          NeuroWorks — your intelligent organization. Agents and people, one system. Configured for Zimbabwe.
         </p>
       </div>
     </div>

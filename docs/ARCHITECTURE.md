@@ -82,7 +82,7 @@ flowchart TB
   TV --- VAULTFS
   RA --- DU
 
-  TC -->|Bearer, read-only, SSRF-guarded| AIIA["AIIA finance system"]:::ext
+  TC -->|Bearer, read-only, SSRF-guarded| Aiia["Aiia finance system"]:::ext
   TP -->|REST + signed webhook| STRIPE["Stripe"]:::ext
   TI --> SAAS["Slack · Notion · Jira · …"]:::ext
   EMAIL["Mailjet API / IMAP+SMTP"]:::ext --- RG
@@ -100,14 +100,14 @@ sequenceDiagram
   participant H as Hermes
   participant MCP as MCP bridge
   participant CB as clawbot pipeline
-  participant T as Tools (vault / AIIA / web …)
+  participant T as Tools (vault / Aiia / web …)
   participant J as Jobs journal
 
   U->>API: task (+ Bearer token → attributed to user)
   API->>EX: which executor?
   alt mode = hermes (primary)
     EX->>H: run task + persona/governance preamble
-    H->>MCP: tool call (e.g. connector.call → AIIA)
+    H->>MCP: tool call (e.g. connector.call → Aiia)
     MCP->>T: /api/primitives/call (allowlisted)
     T-->>H: live result
     H-->>API: answer
@@ -139,10 +139,72 @@ flowchart LR
   note["Identity layer, NOT a hard gate.<br/>origin-guard is the real network boundary (loopback)."]
 ```
 
+## 4. Data pipeline — Omnisignal → Intellinexus → agent learning
+
+```mermaid
+flowchart LR
+  classDef ext fill:#3a2740,stroke:#a06bd6,color:#f4e9da;
+  classDef store fill:#26313a,stroke:#5fa8c7,color:#e9f3f7;
+  classDef core fill:#2b2438,stroke:#a06bd6,color:#f4e9da;
+
+  subgraph OMNI["📡  Omnisignal — acquisition (lib/omnisignal.ts)"]
+    direction LR
+    O1["web_search"]
+    O2["web_page"]
+    O3["db (company sources)"]
+    O4["local_file"]
+    O5["vault"]
+  end
+  OMNI -->|"provenance-tagged records<br/>(_source · _category · _acquiredAt)"| Intellinexus
+
+  subgraph Intellinexus["🏭  Intellinexus pipeline (lib/adrs.ts)"]
+    direction LR
+    A1["Normalize"] --> A2["SHA-256 hash<br/>+ Merkle root"] --> A3["Confidence score"] --> A4["HITL gate"] --> A5["Entity resolution<br/>(golden record)"] --> A6["Publish"]
+  end
+
+  A6 -->|"_datasets/&lt;id&gt;/"| OUT["CSV · graph JSONL · RAG chunks · pack card"]:::store
+  OUT --> VIDX["vault index (MiniSearch)"]:::core
+  VIDX -->|"RAG retrieval"| AG["agents learn from published datasets"]:::core
+  OUT --> KP["Knowledge Packs (kind: dataset)"]:::store
+
+  REG["registry: .neuroworks/datasets.json<br/>+ omnisignal-sources.json"]:::store
+  Intellinexus --- REG
+
+  AGENTS["agent primitives:<br/>omnisignal.acquire/publish · data.publish/list_datasets"]:::core
+  AGENTS --> OMNI
+  AGENTS --> Intellinexus
+```
+
+## 5. External dispatch — orchestration layer (lib/dispatch.ts)
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant S as External system
+  participant V as /api/v1/dispatch (API-key auth, origin-guard exempt)
+  participant K as api-keys (sha256 hash, scoped)
+  participant D as dispatch (jobs + tenancy + idempotency)
+  participant CB as generalTaskRunner (agent pipeline)
+  participant W as Webhook (HMAC-signed, SSRF-guarded)
+
+  S->>V: POST task (Bearer nw_… · Idempotency-Key · callbackUrl)
+  V->>K: verify key + scope (dispatch:write)
+  K-->>V: ok
+  V->>D: dispatchTask(keyId, input)
+  D-->>S: 202 { jobId }  (async)
+  D->>CB: run task as a job
+  CB-->>D: result on job
+  D->>W: POST { jobId, status, answer } (X-NeuroWorks-Signature)
+  S->>V: GET /api/v1/dispatch/:jobId (own jobs only)
+```
+
 ## Notes
 
+- **Data pipeline:** Omnisignal acquires multi-source signal → Intellinexus readies it (hash/score/golden-record) → publishes CSV/JSONL/RAG into the vault → the vault index makes it agent-retrievable AND a Knowledge Pack. Agents drive it via `omnisignal.*` / `data.*` primitives.
+- **External dispatch:** other systems run agents via `/api/v1/dispatch` with scoped API keys (sha256-hashed). Async jobs, per-key tenancy, idempotency, and HMAC-signed webhooks. The `/api/v1/` surface is origin-guard-exempt because key auth is stronger; key management (`/api/dispatch-keys`) stays loopback-only. **Four client modes** over this one keystone: REST + webhook, SDK (`sdk/`), CLI (`tools/nw.mjs`), and an MCP server (`server/mcp/neuroworks-dispatch-mcp.mjs`) for MCP hosts.
+- **Intellinexus is a validation/DPA layer, not a user feature:** it validates the data agents produce/consume (normalize → hash → score → HITL → golden record) and *installs* the result into Knowledge Packs the agents load. Omnisignal is its acquisition front-end. Agents are the consumers of the readied packs.
 - **Executor is a live runtime switch** (`POST /api/executor`) — no restart. Hermes is primary now, with automatic offload to clawbot on failure / thin answer / failed quality gate.
-- **MCP bridge** lets Hermes call clawbot's own tools (16-tool allowlist: vault, connectors → AIIA, integrations, web reads, users directory, payment status). Money-moving (`payment.link`) and writes are excluded.
+- **MCP bridge** lets Hermes call clawbot's own tools (16-tool allowlist: vault, connectors → Aiia, integrations, web reads, users directory, payment status). Money-moving (`payment.link`) and writes are excluded.
 - **Secrets** (connector tokens, integration creds, user passwords) are encrypted/hashed at rest under `.neuroworks/` (AES-256-GCM via secret-box; scrypt for passwords).
 - **Two git repos:** the clawbot code repo and the `main-brain` vault repo (auto-committed by the commit queue).
 ```

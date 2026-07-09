@@ -47,6 +47,13 @@ export type PersistedJob = {
   continuesJobId?: string;
   continuesOriginalText?: string;
   continuesSummary?: string;
+  // Human-in-the-loop pause state. humanRequest carries the structured ask
+  // (items + reason + requestedAt, resolvedAt once answered); task is the
+  // full original task text, persisted ONLY for waiting jobs so the resume
+  // endpoint can rebuild the continuation after a restart evicts the
+  // in-memory job. Both absent on normal runs — zero cost to the JSONL.
+  humanRequest?: { items: { type: string; prompt: string }[]; reason?: string; requestedAt: string; resolvedAt?: string };
+  task?: string;
   persona?: string;
   peer?: string;
   // One entry per tool invocation inside the job — used by reflection's
@@ -98,13 +105,23 @@ export function persistJobRecord(j: Job): void {
       continuesJobId: typeof inputs.continuesJobId === "string" ? inputs.continuesJobId : undefined,
       continuesOriginalText: typeof inputs.continuesOriginalText === "string" ? inputs.continuesOriginalText.slice(0, 400) : undefined,
       continuesSummary: typeof inputs.continuesSummary === "string" ? inputs.continuesSummary.slice(0, 200) : undefined,
+      humanRequest: r.humanRequest && Array.isArray(r.humanRequest.items) ? r.humanRequest : undefined,
+      task: j.status === "waiting_on_human" && typeof inputs.task === "string" ? inputs.task.slice(0, 4000)
+        : j.status === "waiting_on_human" && typeof j.task === "string" ? j.task.slice(0, 4000) : undefined,
       // Prefer the dispatch-time name set on the job (canonical) over
       // legacy result/input shapes. Pre-B5 records still read via the
       // fallback chain for back-compat.
       persona: j.personaName ?? r.activePersona?.name ?? inputs.activePersona?.name ?? r.persona?.name,
       peer: r.peer?.name,
       runs: Array.isArray(r.runs)
-        ? r.runs.map((run: any) => ({
+        ? r.runs
+            // Drop runs that never EXECUTED (ok=false, no error, 0ms, never
+            // started) — placeholder entries for steps skipped after a plan
+            // abort or human.request pause. Persisting them poisoned the
+            // reflection's tool stats: 7 phantom "ollama.generate failures at
+            // 0ms" read as an 80% backend failure rate when Ollama was fine.
+            .filter((run: any) => run?.ok === true || run?.error || run?.startedAt || (typeof run?.durationMs === "number" && run.durationMs > 0))
+            .map((run: any) => ({
             tool: run?.step?.tool ?? "unknown",
             durationMs: typeof run?.durationMs === "number" ? run.durationMs : 0,
             ok: run?.ok === true,
@@ -226,13 +243,15 @@ export function asJob(rec: PersistedJob): Job {
     title: rec.title,
     error: rec.error,
     personaName: rec.persona,
-    inputs: (rec.retryOf || rec.continuesJobId) ? {
+    inputs: (rec.retryOf || rec.continuesJobId || rec.task) ? {
       ...(rec.retryOf ? { retryOf: rec.retryOf } : {}),
       ...(rec.continuesJobId ? { continuesJobId: rec.continuesJobId } : {}),
       ...(rec.continuesOriginalText ? { continuesOriginalText: rec.continuesOriginalText } : {}),
       ...(rec.continuesSummary ? { continuesSummary: rec.continuesSummary } : {}),
+      ...(rec.task ? { task: rec.task } : {}),
     } : undefined,
     result: {
+      ...(rec.humanRequest ? { humanRequest: rec.humanRequest } : {}),
       activePersona: rec.persona ? { name: rec.persona } : undefined,
       peer: rec.peer ? { name: rec.peer } : undefined,
       runs: rec.runs?.map(r => ({

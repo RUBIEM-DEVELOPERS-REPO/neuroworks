@@ -11,8 +11,10 @@ import { writeVaultFile, commitAndPush, searchVault, VaultUnreachable } from "..
 import { ollamaGenerate } from "../lib/ollama.js";
 import { syncDownloads } from "../lib/sync-downloads.js";
 import { planAndExecute, executePlan } from "../lib/agent.js";
+import { requireLayer, callerOf, layerOfRole } from "../lib/access.js";
+import { personaDepartment } from "./workforce.js";
 import { loadCustomTemplates, saveCustomTemplate, findCustomTemplate, bumpRunCount, slugify, type CustomTemplate } from "../lib/custom-templates.js";
-import { getActivePersona, personaSystemSuffix } from "../lib/personas.js";
+import { loadPersonas, getActivePersona, personaSystemSuffix } from "../lib/personas.js";
 import { classifyCustomTemplate, type TemplateRole } from "../lib/template-classifier.js";
 import { findPrimitive } from "../lib/primitives.js";
 
@@ -53,6 +55,35 @@ templatesRouter.get("/", (_req, res) => {
 // previously this returned only the in-memory map (RECENT cap, wiped on
 // reload), so scheduled runs and any older task had "no report" even though the
 // record was on disk. In-memory wins on id collision (it's the freshest state).
+// Staff-layer sessions see ONLY their department's work (plus org-general
+// jobs with no persona). Departments are inferred from the persona role/id via
+// the same rules the Workforce page uses, so the two views always agree.
+// Machine callers and admin+ sessions see everything.
+function filterJobsForCaller(req: any, jobs: any[]): any[] {
+  try {
+    const u = callerOf(req);
+    if (!u || layerOfRole(u.role) !== "staff") return jobs;
+    const dept = String(u.department ?? "").trim().toLowerCase();
+    if (!dept) return jobs; // staff without a department set → org-general view
+    const personas: any[] = loadPersonas().personas ?? [];
+    const byName = new Map(personas.map((p: any) => [String(p.name).toLowerCase(), p]));
+    return jobs.filter((j: any) => {
+      const pn = String(j.personaName ?? "").toLowerCase();
+      if (!pn) return true; // no persona = org-general work
+      const p = byName.get(pn);
+      const d = p ? String(personaDepartment(p.role ?? "", p.id ?? "")) : "General";
+      return d === "General" || d.toLowerCase() === dept;
+    });
+  } catch { return jobs; }
+}
+
+// Journal-read cache for the jobs feed. The Tasks page polls every 3s and
+// each poll was re-reading 30 days of JSONL from disk (security/perf sweep
+// 2026-07-04). In-memory jobs stay LIVE every poll — only the persisted slice
+// is cached, and 4s staleness on restart-survived history is invisible.
+let jobsFeedCache: { at: number; persisted: ReturnType<typeof asJob>[] } | null = null;
+const JOBS_FEED_CACHE_MS = 4000;
+
 templatesRouter.get("/jobs", (_req, res) => {
   const mem = listJobs();
   const seen = new Set(mem.map(j => j.id));
@@ -62,9 +93,13 @@ templatesRouter.get("/jobs", (_req, res) => {
   const windowStart = Date.now() - 30 * 24 * 60 * 60 * 1000;
   let persisted: ReturnType<typeof asJob>[] = [];
   try {
-    persisted = loadJobsInWindow(windowStart, Date.now() + 60_000)
-      .filter(rec => !seen.has(rec.id))
-      .map(asJob);
+    if (jobsFeedCache && Date.now() - jobsFeedCache.at < JOBS_FEED_CACHE_MS) {
+      persisted = jobsFeedCache.persisted.filter(j => !seen.has(j.id));
+    } else {
+      const fresh = loadJobsInWindow(windowStart, Date.now() + 60_000).map(asJob);
+      jobsFeedCache = { at: Date.now(), persisted: fresh };
+      persisted = fresh.filter(j => !seen.has(j.id));
+    }
   } catch { /* tolerate — fall back to in-memory only */ }
   // Dedup persisted-vs-persisted too (append-only journal can hold running→
   // succeeded for one id); keep the last (latest status) per id.
@@ -76,8 +111,9 @@ templatesRouter.get("/jobs", (_req, res) => {
   // is surfaced through the vault + Knowledge (reflections + journaled notes),
   // so nothing is lost — it's just not loaded into the live list.
   const MAX_FEED = Number(process.env.CLAWBOT_TASKS_FEED_LIMIT ?? "150");
-  const jobs = all.slice(0, MAX_FEED);
-  res.json({ jobs, total: all.length, limit: MAX_FEED, truncated: all.length > MAX_FEED });
+  const visible = filterJobsForCaller(_req, all);
+  const jobs = visible.slice(0, MAX_FEED);
+  res.json({ jobs, total: visible.length, limit: MAX_FEED, truncated: visible.length > MAX_FEED });
 });
 
 templatesRouter.get("/jobs/:id", (req, res) => {
@@ -129,7 +165,7 @@ templatesRouter.post("/jobs/:id/retry", async (req, res) => {
     push(`retry of job ${req.params.id} (${old.status})`);
     const persona = getActivePersona();
     const suffix = personaSystemSuffix(persona);
-    const r = await planAndExecute(task, push, (patch) => progress(patch as Record<string, unknown>), { personaSystemSuffix: suffix });
+    const r = await planAndExecute(task, push, (patch) => progress(patch as Record<string, unknown>), { personaSystemSuffix: suffix, workMode: persona?.workMode });
     return {
       answer: r.answer,
       plan: r.plan,
@@ -141,6 +177,7 @@ templatesRouter.post("/jobs/:id/retry", async (req, res) => {
       subagentTimings: r.subagentTimings,
       skillUsed: r.skillUsed,
       skillScore: r.skillScore,
+      humanRequest: r.humanRequest,
     };
   });
 });
@@ -213,6 +250,7 @@ templatesRouter.post("/run/:id", async (req, res) => {
       const r = await planAndExecute(taskText, push, (patch) => progress(patch as Record<string, unknown>), {
         personaSystemSuffix: personaSuffix,
         preplan: custom.plan,
+        workMode: persona?.workMode,
       });
       return { ...r, fromCustom: custom.id };
     }
@@ -240,7 +278,7 @@ templatesRouter.post("/grade", async (req, res) => {
   }
 });
 
-templatesRouter.post("/jobs/:id/approve", async (req, res) => {
+templatesRouter.post("/jobs/:id/approve", requireLayer("admin"), async (req, res) => {
   const j = getJob(req.params.id);
   if (!j) return res.status(404).json({ error: "not found" });
   if (j.status !== "awaiting-approval") return res.status(409).json({ error: `cannot approve job in state '${j.status}'` });
@@ -248,6 +286,29 @@ templatesRouter.post("/jobs/:id/approve", async (req, res) => {
   j.log.push(`[${j.approvedAt}] approved`);
   res.json({ jobId: j.id, status: "approved" });
 
+  // Agent-requested Paynow payment: money moves ONLY here, after the operator
+  // clicked approve. The primitive queued the amount/description; approval
+  // executes the real gateway call and the pay link lands in the job result
+  // (visible on Reports + pollable via payment.paynow_poll).
+  if (j.kind === "payments:paynow-approval") {
+    void runJob(j, async (push) => {
+      const inputs: any = j.inputs ?? {};
+      push(`Approved — creating Paynow payment: ${Number(inputs.amount).toFixed(2)} (${String(inputs.description ?? "")})`);
+      const { createPaynowPayment } = await import("../lib/paynow.js");
+      const p = await createPaynowPayment({
+        amount: Number(inputs.amount),
+        description: String(inputs.description ?? ""),
+        reference: inputs.reference ? String(inputs.reference) : undefined,
+        email: inputs.email ? String(inputs.email) : undefined,
+      });
+      push(`Payment created — reference ${p.reference}.`);
+      return {
+        answer: `**Paynow payment created** (approved by operator)\n\n- Pay link (send to the client): ${p.browserUrl}\n- Reference: \`${p.reference}\`\n- Amount: ${p.amount.toFixed(2)}\n\nStatus can be checked any time with payment.paynow_poll or the Payments page.`,
+        payment: p,
+      };
+    });
+    return;
+  }
   // Plan-approval job: execute the EXACT plan the user reviewed (no re-planning),
   // then let planAndExecute finish the loop (synthesise → answer). Empty plans
   // fall through to the normal plan/synth path.
@@ -264,7 +325,7 @@ templatesRouter.post("/jobs/:id/approve", async (req, res) => {
   void runJob(j, async (push) => runner(j.template!, j.inputs ?? {}, push));
 });
 
-templatesRouter.post("/jobs/:id/reject", async (req, res) => {
+templatesRouter.post("/jobs/:id/reject", requireLayer("admin"), async (req, res) => {
   const j = getJob(req.params.id);
   if (!j) return res.status(404).json({ error: "not found" });
   if (j.status !== "awaiting-approval") return res.status(409).json({ error: `cannot reject job in state '${j.status}'` });
@@ -484,14 +545,14 @@ async function addNoteRunner(inputs: Record<string, unknown>, push: (m: string) 
   return { path: rel, ...r };
 }
 
-async function generalTaskRunner(inputs: Record<string, unknown>, push: (m: string) => void, progress?: (p: Record<string, unknown>) => void) {
+export async function generalTaskRunner(inputs: Record<string, unknown>, push: (m: string) => void, progress?: (p: Record<string, unknown>) => void) {
   const task = String(inputs.task ?? "").trim();
   if (!task) throw new Error("missing 'task' input");
   const saveAs = inputs.save_as_template !== false;
   const persona = getActivePersona();
   const personaSuffix = personaSystemSuffix(persona);
   if (persona) push(`Working as ${persona.name} — ${persona.role}.`);
-  const r = await planAndExecute(task, push, (patch) => progress?.(patch as Record<string, unknown>), { personaSystemSuffix: personaSuffix });
+  const r = await planAndExecute(task, push, (patch) => progress?.(patch as Record<string, unknown>), { personaSystemSuffix: personaSuffix, workMode: persona?.workMode });
 
   // If the agent wrote anything to the vault, also commit + push
   if (r.hadWrites) {
@@ -541,6 +602,10 @@ async function generalTaskRunner(inputs: Record<string, unknown>, push: (m: stri
     skillUsed: r.skillUsed,
     skillScore: r.skillScore,
     savedTemplateId,
+    // Must survive this re-shape: runJob keys the waiting_on_human status off
+    // result.humanRequest — dropping it here silently marked paused tasks as
+    // succeeded (the bug the first live test caught).
+    humanRequest: r.humanRequest,
   };
 }
 

@@ -347,7 +347,7 @@ peersRouter.post("/delegate", async (req, res) => {
       // Suffix is captured from THIS run's persona, not from global state.
       // Concurrent delegations with different personas no longer collide.
       const suffix = personaSystemSuffix(resolvedPersona);
-      const r = await planAndExecute(task, push, (patch) => progress(patch as Record<string, unknown>), { personaSystemSuffix: suffix });
+      const r = await planAndExecute(task, push, (patch) => progress(patch as Record<string, unknown>), { personaSystemSuffix: suffix, workMode: resolvedPersona?.workMode });
       return {
         answer: r.answer,
         plan: r.plan,
@@ -372,6 +372,7 @@ peersRouter.post("/delegate", async (req, res) => {
         quality: r.quality,
         security: r.security,
         review: r.review,
+        humanRequest: r.humanRequest,
         delegatedFromPeer: true,
         // Verification trail — the primary's chat handler checks this matches
         // what it sent. Mismatch = persona-shifter bug; log and surface.

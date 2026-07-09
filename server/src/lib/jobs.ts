@@ -2,13 +2,18 @@ import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { journal } from "./journal.js";
 import { getActivePersona } from "./personas.js";
-import { persistJobRecord } from "./job-store.js";
+import { persistJobRecord, loadJobsInWindow } from "./job-store.js";
+import { logAudit } from "./audit-log.js";
 import type { Plan } from "./agent.js"; // type-only — erased at runtime, no import cycle
 
 export type Job = {
   id: string;
   kind: string;
-  status: "pending" | "awaiting-approval" | "running" | "succeeded" | "failed" | "rejected";
+  // waiting_on_human: the agent did what it could and paused on a structured
+  // "I need this from you" ask (result.humanRequest). Resumable via
+  // POST /api/tasks/:id/human-input, which spins a continuation job — the
+  // waiting job itself stays terminal, so it's safe to evict/persist.
+  status: "pending" | "awaiting-approval" | "running" | "succeeded" | "failed" | "rejected" | "waiting_on_human";
   startedAt: string;
   finishedAt?: string;
   log: string[];
@@ -99,7 +104,7 @@ export function newJob(kind: string): Job {
     // pollable by the caller. Without this guard, polling returns 404 on a
     // perfectly-good running job and the caller treats it as failed.
     const sorted = [...jobs.values()].sort((a, b) => a.startedAt.localeCompare(b.startedAt));
-    const oldestTerminal = sorted.find(x => x.status === "succeeded" || x.status === "failed" || x.status === "rejected");
+    const oldestTerminal = sorted.find(x => x.status === "succeeded" || x.status === "failed" || x.status === "rejected" || x.status === "waiting_on_human");
     if (oldestTerminal) jobs.delete(oldestTerminal.id);
     // If everything in the table is in-flight, we let the table grow past
     // RECENT temporarily — it'll trim itself as jobs finish. Better than
@@ -110,6 +115,56 @@ export function newJob(kind: string): Job {
 
 export function getJob(id: string) { return jobs.get(id); }
 export function listJobs() { return [...jobs.values()].sort((a, b) => b.startedAt.localeCompare(a.startedAt)); }
+
+// Normalise a job's type into a stable key for ETA grouping. Strips the peer
+// "insights:" (or any "prefix:") from kind and prefers the template, so an
+// ad-hoc chat task and a delegated copy of it bucket together.
+export function jobTypeKey(rec: { template?: string; kind?: string }): string {
+  const raw = (rec.template && rec.template.trim()) ? rec.template : (rec.kind ?? "");
+  return raw.replace(/^[^:]+:/, "") || "task";
+}
+
+function median(nums: number[]): number {
+  if (nums.length === 0) return 0;
+  const s = [...nums].sort((a, b) => a - b);
+  const mid = Math.floor(s.length / 2);
+  return s.length % 2 ? s[mid] : Math.round((s[mid - 1] + s[mid]) / 2);
+}
+
+// Historical duration stats so the Tasks page can show an ETA on a running
+// job ("~90s expected"). Reads recently-succeeded jobs from the on-disk
+// journal, buckets by jobTypeKey, and returns the MEDIAN wall-clock duration
+// per type (median resists the long-tail outliers that skew a mean). A type
+// needs a few samples to be trusted; the caller falls back to globalMedianMs
+// when a running job's type is unseen or thin. In-memory recent jobs are
+// folded in too so a fresh install with no journal history still learns fast.
+export function etaStats(): {
+  byType: Record<string, { medianMs: number; count: number }>;
+  globalMedianMs: number;
+  count: number;
+} {
+  const now = Date.now();
+  const windowStart = now - 30 * 24 * 3600 * 1000; // last 30 days
+  const durationsByType = new Map<string, number[]>();
+  const all: number[] = [];
+
+  const consider = (rec: { status: string; startedAt?: string; finishedAt?: string; template?: string; kind?: string }) => {
+    if (rec.status !== "succeeded" || !rec.startedAt || !rec.finishedAt) return;
+    const ms = new Date(rec.finishedAt).getTime() - new Date(rec.startedAt).getTime();
+    if (!Number.isFinite(ms) || ms <= 0 || ms > 3 * 3600 * 1000) return; // ignore absurd/negative
+    const key = jobTypeKey(rec);
+    (durationsByType.get(key) ?? durationsByType.set(key, []).get(key)!).push(ms);
+    all.push(ms);
+  };
+
+  try { for (const rec of loadJobsInWindow(windowStart, now)) consider(rec); } catch { /* journal optional */ }
+  // Fold in in-memory jobs (covers the just-finished ones not yet re-read).
+  for (const j of jobs.values()) consider(j as any);
+
+  const byType: Record<string, { medianMs: number; count: number }> = {};
+  for (const [key, arr] of durationsByType) byType[key] = { medianMs: median(arr), count: arr.length };
+  return { byType, globalMedianMs: median(all), count: all.length };
+}
 
 // Mark every still-running / pending job as failed with a clear
 // abort message and persist it to the JSONL store. Called from the
@@ -200,7 +255,10 @@ export async function runJob<T>(j: Job, fn: (push: (msg: string) => void, progre
     } else if (final !== undefined) {
       j.result = final;
     }
-    j.status = "succeeded";
+    // A run that paused on a structured human ask parks in waiting_on_human
+    // instead of succeeded — the Tasks page renders the ask and the resume
+    // endpoint continues the loop once the operator responds.
+    j.status = (j.result as any)?.humanRequest ? "waiting_on_human" : "succeeded";
   } catch (e: any) {
     j.status = "failed";
     j.error = e.message ?? String(e);
@@ -219,6 +277,20 @@ export async function runJob<T>(j: Job, fn: (push: (msg: string) => void, progre
     // appendFileSync is fast, and persistJobRecord swallows errors so a
     // disk hiccup can't fail the response.
     persistJobRecord(j);
+    // Audit trail — one event per finished job so the Audit Log page has a real
+    // "what ran, by whom, did it succeed" record. Best-effort; the audit lib was
+    // dead (logAudit had no callers) so the page always showed empty.
+    try {
+      logAudit({
+        level: j.status === "failed" ? "error" : "info",
+        actor: j.personaName ?? "neuroworks",
+        action: `job.${j.kind ?? "run"}`,
+        target: j.template ?? j.title ?? j.kind ?? "task",
+        detail: (j.title ?? j.template ?? j.kind ?? "").slice(0, 200),
+        jobId: j.id,
+        result: j.status === "succeeded" ? "success" : j.status === "failed" ? "failure" : "pending",
+      });
+    } catch { /* audit is best-effort */ }
     // Notify SSE subscribers the job ended so they can close their
     // streams cleanly, then drop the emitter after a short grace.
     try { ee.emit("done", { status: j.status, error: j.error }); } catch { /* tolerate */ }

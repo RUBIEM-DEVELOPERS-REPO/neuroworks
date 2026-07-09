@@ -40,7 +40,7 @@ export const BUILTIN_TEAMS: PreorgTeam[] = [
     description: "Launches, campaigns, and announcements.",
     members: [
       { personaId: "marketing-manager", role: "Marketing Manager" },
-      { personaId: "aiia-marketing-specialist", role: "AIIA Marketing Specialist" },
+      { personaId: "aiia-marketing-specialist", role: "Aiia Marketing Specialist" },
       { personaId: "product-manager", role: "Product Manager" },
       { personaId: "product-designer", role: "Product Designer" },
     ],

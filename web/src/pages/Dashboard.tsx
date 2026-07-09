@@ -5,7 +5,8 @@ import { Card, RoleIcon } from "../components/Card";
 import { TaskRunner } from "../components/TaskRunner";
 import { AgentVisualizer } from "../components/AgentVisualizer";
 import { t, loadSavedLanguage } from "../lib/i18n";
-import { MapPin, Building2, Globe } from "lucide-react";
+import { MapPin, Building2, Globe, BookOpen, Plug, Zap, ShieldCheck, Server, Flag } from "lucide-react";
+import type { SectorInfo, KnowledgePack } from "../lib/api";
 
 export function Dashboard() {
   const [templates, setTemplates] = useState<Template[] | null>(null);
@@ -16,8 +17,17 @@ export function Dashboard() {
   const [intentBusy, setIntentBusy] = useState(false);
   const [err, setErr] = useState("");
   const [persona, setPersona] = useState<any>(null);
-  const [onboarding, setOnboarding] = useState<{ sector?: string; orgName?: string; completed?: boolean }>({});
+  const [onboarding, setOnboarding] = useState<{ sector?: string; customSectorName?: string; orgName?: string; completed?: boolean }>({});
   const [sectorContext, setSectorContext] = useState("");
+  const [sectorLabel, setSectorLabel] = useState("");
+  const [activeSectorInfo, setActiveSectorInfo] = useState<SectorInfo | null>(null);
+  const [allDepartments, setAllDepartments] = useState<any[]>([]);
+  const [knowledgePack, setKnowledgePack] = useState<KnowledgePack | null>(null);
+  const [orgStatus, setOrgStatus] = useState<{
+    activePolicyCount: number; activePolicies: string[];
+    connectedSystemCount: number; connectedSystems: string[];
+    computeMode: "local-only" | "cloud-assisted"; dataResidency: "local" | "mixed";
+  } | null>(null);
   // Full roster + the live clawbot fleet so the dashboard answers "who can I
   // hire right now, and who's currently working?" The roster comes from
   // /api/personas; the fleet comes from /api/peers (self + reachable peers).
@@ -33,13 +43,16 @@ export function Dashboard() {
 
   async function load() {
     try {
-      const [t, j, p, peers, ext, ob] = await Promise.all([
+      const [t, j, p, peers, ext, ob, depts, packs, st] = await Promise.all([
         api.listTemplates(),
         api.listJobs().catch(() => ({ jobs: [] as any[] })),
         api.listPersonas().catch(() => ({ active: null, personas: [] } as any)),
         api.peers().catch(() => null),
         api.externalAgents().catch(() => ({ agents: [] as any[] })),
         api.getOnboarding().catch(() => ({ state: {} } as any)),
+        api.listDepartments().catch(() => ({ departments: [] as any[] })),
+        api.listKnowledgePacks().catch(() => ({ packs: [] as KnowledgePack[] })),
+        api.status().catch(() => null),
       ]);
       setTemplates(t.templates);
       setRecent(j.jobs.slice(0, 4));
@@ -48,16 +61,32 @@ export function Dashboard() {
       setPersonas(Array.isArray(p.personas) ? p.personas : []);
       if (peers) setFleet(peers);
       setExternalAgents(ext.agents ?? []);
+      setAllDepartments(depts.departments ?? []);
+      if (st?.orgStatus) setOrgStatus(st.orgStatus);
       if (ob.state) {
         setOnboarding(ob.state);
         loadSavedLanguage();
         if (ob.state.sector) {
           api.getOnboardingContext(ob.state.sector).then(ctx => setSectorContext(ctx.context)).catch(() => {});
+          // Sector "name" in the label pill: for the free-text "custom"
+          // sector this is the org's own sector name, not the catalog
+          // entry's generic "Custom" placeholder.
+          const info = (ob.sectors ?? []).find((s: any) => s.id === ob.state.sector) ?? null;
+          setActiveSectorInfo(info);
+          const label = ob.state.sector === "custom" ? (ob.state.customSectorName || "Custom sector") : (info?.name ?? ob.state.sector);
+          setSectorLabel(label);
+          setKnowledgePack((packs.packs ?? []).find(pk => pk.sectorId === ob.state.sector && pk.kind !== "dataset") ?? null);
         }
       }
     } catch (e: any) { setErr(e.message); }
   }
   useEffect(() => { load(); const i = setInterval(load, 6000); return () => clearInterval(i); }, []);
+
+  const featuredDepartments = useMemo(() => {
+    const ids = activeSectorInfo?.suggestedDepartments ?? [];
+    if (ids.length === 0) return [];
+    return ids.map(id => allDepartments.find(d => d.id === id)).filter(Boolean);
+  }, [allDepartments, activeSectorInfo]);
 
   async function hire(personaId: string) {
     setActivating(personaId);
@@ -105,7 +134,7 @@ export function Dashboard() {
         )}
         <h1 className="font-display text-6xl text-cream-50 mt-2">{t("app.title")}</h1>
         <p className="text-cream-300/70 mt-2 text-sm">
-          {onboarding?.sector && <span className="inline-flex items-center gap-1.5 text-violet-400 mr-1.5"><Building2 size={14} />{onboarding.sector}</span>}
+          {sectorLabel && <span className="inline-flex items-center gap-1.5 text-violet-400 mr-1.5"><Building2 size={14} />{sectorLabel}</span>}
           {t("app.subtitle")}
         </p>
       </section>
@@ -120,6 +149,75 @@ export function Dashboard() {
                 {t("dashboard.zimbabweContext")}
               </div>
               <p className="text-xs text-cream-300/80 mt-1.5 leading-relaxed">{sectorContext}</p>
+            </div>
+          </div>
+        </section>
+      )}
+
+      {orgStatus && (
+        <section>
+          <div className="flex items-baseline justify-between mb-3 px-1">
+            <div className="text-xs uppercase tracking-[0.25em] text-cream-300/60">Mission Control</div>
+            <Link to="/quality" className="text-xs text-cream-300 hover:text-cream-50 inline-flex items-center gap-1"><Flag size={11} /> Flag an output →</Link>
+          </div>
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+            <Link to="/governance" className="bg-ink-900 border border-ink-800 hover:border-violet-500/40 rounded-xl p-4 transition-colors">
+              <div className="flex items-center gap-2 text-xs text-cream-300/60 mb-1.5"><ShieldCheck size={13} /> Policy documents</div>
+              <div className="font-display text-2xl text-cream-50">{orgStatus.activePolicyCount}</div>
+              <div className="text-[11px] text-cream-300/50 mt-1 truncate">{orgStatus.activePolicies.slice(0, 2).join(", ") || "None active"}</div>
+            </Link>
+            <Link to="/connectors" className="bg-ink-900 border border-ink-800 hover:border-violet-500/40 rounded-xl p-4 transition-colors">
+              <div className="flex items-center gap-2 text-xs text-cream-300/60 mb-1.5"><Plug size={13} /> Connected systems</div>
+              <div className="font-display text-2xl text-cream-50">{orgStatus.connectedSystemCount}</div>
+              <div className="text-[11px] text-cream-300/50 mt-1 truncate">{orgStatus.connectedSystems.slice(0, 2).join(", ") || "None connected"}</div>
+            </Link>
+            <Link to="/models" className="bg-ink-900 border border-ink-800 hover:border-violet-500/40 rounded-xl p-4 transition-colors">
+              <div className="flex items-center gap-2 text-xs text-cream-300/60 mb-1.5"><Server size={13} /> Compute mode</div>
+              <div className="font-display text-lg text-cream-50 capitalize">{orgStatus.computeMode.replace("-", " ")}</div>
+              <div className="text-[11px] text-cream-300/50 mt-1">{orgStatus.computeMode === "local-only" ? "All inference on this machine" : "Some inference may use a cloud LLM"}</div>
+            </Link>
+            <div className="bg-ink-900 border border-ink-800 rounded-xl p-4">
+              <div className="flex items-center gap-2 text-xs text-cream-300/60 mb-1.5"><Globe size={13} /> Data residency</div>
+              <div className={`font-display text-lg capitalize ${orgStatus.dataResidency === "local" ? "text-leaf-400" : "text-amber-400"}`}>{orgStatus.dataResidency}</div>
+              <div className="text-[11px] text-cream-300/50 mt-1">{orgStatus.dataResidency === "local" ? "Task content stays on this machine" : "Confirm your DPA data-sharing agreement"}</div>
+            </div>
+          </div>
+        </section>
+      )}
+
+      {activeSectorInfo && (featuredDepartments.length > 0 || knowledgePack || (activeSectorInfo.suggestedIntegrations?.length ?? 0) > 0) && (
+        <section>
+          <div className="flex items-baseline justify-between mb-3 px-1">
+            <div className="text-xs uppercase tracking-[0.25em] text-cream-300/60">Featured for {sectorLabel}</div>
+            <Link to="/departments" className="text-xs text-cream-300 hover:text-cream-50">Department marketplace →</Link>
+          </div>
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
+            {featuredDepartments.length > 0 && (
+              <Link to="/departments" className="lg:col-span-2 bg-ink-900 border border-ink-800 hover:border-violet-500/40 rounded-xl p-4 transition-colors">
+                <div className="flex items-center gap-2 text-sm font-medium text-cream-100 mb-2">
+                  <Zap size={14} className="text-violet-400" /> Recommended departments
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {featuredDepartments.map((d: any) => (
+                    <span key={d.id} className="text-xs bg-ink-800 border border-ink-700 rounded-full px-3 py-1 text-cream-200">{d.name}</span>
+                  ))}
+                </div>
+              </Link>
+            )}
+            <div className="bg-ink-900 border border-ink-800 rounded-xl p-4 space-y-3">
+              <Link to="/knowledge-packs" className="flex items-center gap-2 text-sm text-cream-100 hover:text-violet-300 transition-colors">
+                <BookOpen size={14} className={knowledgePack?.installed ? "text-leaf-400" : "text-cream-300/50"} />
+                Knowledge pack
+                <span className={`ml-auto text-[10px] uppercase tracking-wide px-2 py-0.5 rounded-full border ${knowledgePack?.installed ? "border-leaf-500/40 text-leaf-400" : "border-ink-700 text-cream-300/50"}`}>
+                  {knowledgePack?.installed ? "active" : "not installed"}
+                </span>
+              </Link>
+              {(activeSectorInfo.suggestedIntegrations?.length ?? 0) > 0 && (
+                <Link to="/integrations" className="flex items-start gap-2 text-xs text-cream-300/70 hover:text-cream-100 transition-colors">
+                  <Plug size={13} className="mt-0.5 shrink-0" />
+                  <span>Suggested connections: {activeSectorInfo.suggestedIntegrations!.join(", ")}</span>
+                </Link>
+              )}
             </div>
           </div>
         </section>

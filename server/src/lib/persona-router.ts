@@ -126,10 +126,10 @@ const PERSONA_PATTERNS: PersonaPattern[] = [
     { re: /\b(?:draft|create|review|critique) (?:a |the )?wireframe\b/i, weight: 2 },
     /\bwireframe\b/i,
   ] },
-  // AIIA — live financials from the company's AIIA system (read via connector).
-  // Sits above financial-analyst: AIIA = reading real books, Fiona = modelling.
+  // Aiia — live financials from the company's Aiia system (read via connector).
+  // Sits above financial-analyst: Aiia = reading real books, Fiona = modelling.
   { personaId: "aiia-finance", patterns: [
-    { re: /\bAIIA\b/i, weight: 2 },
+    { re: /\bAiia\b/i, weight: 2 },
     { re: /\bfinancial dashboard\b/i, weight: 2 },
     { re: /\b(?:finance|financial|revenue|expense)\s+(?:dashboard|overview|figures?|numbers?|position)\b/i, weight: 2 },
     { re: /\b(?:pull|fetch|read|show me|get)\s+(?:the\s+|our\s+|my\s+)?(?:live\s+)?(?:financials?|finance|dashboard)\b/i, weight: 2 },

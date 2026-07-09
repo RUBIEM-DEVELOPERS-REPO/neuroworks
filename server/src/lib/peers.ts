@@ -165,6 +165,19 @@ export type PeerProgress = {
 // pre-installed in the worker's own personas.json. The worker registers it
 // ephemerally for the run and drops it after. `persona` is the legacy id-only
 // fallback used by code that doesn't have the full object handy.
+
+// 3s reachability check shared by both delegation paths — throws with a
+// distinct message the callers surface, so an unreachable worker costs 3
+// seconds instead of the full delegate timeout.
+async function preflightPing(base: string, name?: string): Promise<void> {
+  try {
+    const ping = await fetch(`${base}/api/health`, { signal: AbortSignal.timeout(3000) });
+    if (!ping.ok) throw new Error(`health returned HTTP ${ping.status}`);
+  } catch (e: any) {
+    throw new Error(`peer ${name ?? base} failed the pre-flight ping (${String(e?.message ?? e).slice(0, 80)}) — not delegating; run locally instead`);
+  }
+}
+
 export async function delegateToPeer(peer: PeerInfo, args: {
   task: string;
   persona?: string;
@@ -173,6 +186,12 @@ export async function delegateToPeer(peer: PeerInfo, args: {
 }): Promise<any> {
   const base = peer.url.replace(/\/+$/, "");
   const t0 = Date.now();
+  // Pre-flight ping: 3s health check before committing to a delegation. A
+  // down/hung worker used to eat the full delegate timeout (up to 12 min)
+  // before surfacing as a failure — the 07-03 reflection put peer.review at a
+  // 22% failure rate largely from exactly that. Fail fast with a clear reason
+  // so the caller keeps the work local instead.
+  await preflightPing(base, peer.name);
   const startRes = await fetch(`${base}/api/peers/delegate`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -199,12 +218,29 @@ export async function delegateToPeer(peer: PeerInfo, args: {
   // Track how many log lines we've already forwarded so each poll only emits
   // the *delta*. Without this we'd resend the whole worker log every 1-3s.
   let forwardedLogCount = 0;
+  // A worker saturated by local inference drops the odd connection — one
+  // thrown poll fetch must NOT fail a 12-min delegation whose job is still
+  // running (observed: parent died "fetch failed" at 46s, worker succeeded at
+  // 64s). Tolerate transient poll errors; only give up after ~1min of
+  // CONSECUTIVE dead air, which means the worker is actually gone.
+  let pollFails = 0;
+  const MAX_CONSECUTIVE_POLL_FAILS = 20;
   while (Date.now() < deadline) {
     attempt++;
     await new Promise(r => setTimeout(r, attempt < 10 ? 1000 : 3000));
-    const r = await fetch(`${base}/api/templates/jobs/${jobId}`);
-    if (!r.ok) continue;
-    const j = await r.json() as any;
+    let j: any;
+    try {
+      const r = await fetch(`${base}/api/templates/jobs/${jobId}`, { signal: AbortSignal.timeout(10_000) });
+      if (!r.ok) { pollFails = 0; continue; } // worker answered — job just isn't visible yet
+      j = await r.json();
+      pollFails = 0;
+    } catch (e: any) {
+      pollFails++;
+      if (pollFails >= MAX_CONSECUTIVE_POLL_FAILS) {
+        throw new Error(`peer ${peer.name ?? base} stopped answering polls (${pollFails} consecutive failures, last: ${String(e?.message ?? e).slice(0, 80)}) — jobId=${jobId}`);
+      }
+      continue;
+    }
 
     // Forward intermediate progress to the caller every poll, even while the
     // worker is still running. The primary's job thus mirrors the worker's
@@ -265,6 +301,7 @@ export async function delegateToBestPeer(args: { task: string; persona?: string 
   if (!peer) throw new Error("no idle peer available");
   const base = peer.url.replace(/\/+$/, "");
   const t0 = Date.now();
+  await preflightPing(base, (peer as any).name);
   const startRes = await fetch(`${base}/api/peers/delegate`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -279,12 +316,26 @@ export async function delegateToBestPeer(args: { task: string; persona?: string 
   const DELEGATE_TIMEOUT_MS = Number(process.env.CLAWBOT_PEER_DELEGATE_TIMEOUT_MS ?? (12 * 60_000));
   const deadline = Date.now() + DELEGATE_TIMEOUT_MS;
   let attempt = 0;
+  // Same transient-poll tolerance as delegateToPeer — one dropped connection
+  // to a busy worker must not fail a delegation whose job is still running.
+  let pollFails = 0;
+  const MAX_CONSECUTIVE_POLL_FAILS = 20;
   while (Date.now() < deadline) {
     attempt++;
     await new Promise(r => setTimeout(r, attempt < 10 ? 1000 : 3000));
-    const r = await fetch(`${base}/api/templates/jobs/${jobId}`);
-    if (!r.ok) continue;
-    const j = await r.json() as any;
+    let j: any;
+    try {
+      const r = await fetch(`${base}/api/templates/jobs/${jobId}`, { signal: AbortSignal.timeout(10_000) });
+      if (!r.ok) { pollFails = 0; continue; }
+      j = await r.json();
+      pollFails = 0;
+    } catch (e: any) {
+      pollFails++;
+      if (pollFails >= MAX_CONSECUTIVE_POLL_FAILS) {
+        throw new Error(`peer ${peer.name ?? base} stopped answering polls (${pollFails} consecutive failures, last: ${String(e?.message ?? e).slice(0, 80)}) — jobId=${jobId}`);
+      }
+      continue;
+    }
     if (j.status === "succeeded" || j.status === "failed" || j.status === "rejected") {
       return {
         peer: { url: peer.url, name: peer.name, model: peer.model },

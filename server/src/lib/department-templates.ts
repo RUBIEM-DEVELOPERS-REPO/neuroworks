@@ -19,7 +19,15 @@ export type DepartmentTemplate = {
     role: string;
     jobDescription: string;
     tone?: string;
+    // Per-agent language pin — falls back to defaultLanguage below when
+    // unset. Both are optional: a department with neither set produces
+    // agents that follow the org-wide onboarding language (unchanged
+    // default behavior for every existing template).
+    language?: "en" | "sn" | "nd";
   }[];
+  // Department-level default language new agents inherit unless they set
+  // their own `language` above.
+  defaultLanguage?: "en" | "sn" | "nd";
   recommendedIntegrations: string[];
   recommendedTemplates: string[];
   schedule?: {             // optional daily briefing
@@ -191,25 +199,95 @@ export const DEPARTMENT_TEMPLATES: DepartmentTemplate[] = [
   },
   {
     id: "customer-support",
-    name: "Customer Support",
+    name: "Customer Service",
     tagline: "Ticket triage, response drafting, satisfaction tracking",
-    description: "Support team that triages incoming tickets, drafts responses, tracks resolution SLAs, and monitors customer satisfaction trends.",
+    description: "Support team that triages incoming tickets, drafts responses, tracks resolution SLAs, and monitors customer satisfaction trends. Both agents can be pinned to Shona or Ndebele independently (Personas page) for a local-language support desk.",
     icon: "Headphones",
     color: "teal",
     agents: [
       {
-        name: "Support Agent",
+        name: "Ticket Responder",
         role: "Operations",
-        jobDescription: "Triage incoming support tickets by urgency and category. Draft response templates for common issues. Track resolution times against SLAs. Summarize weekly support trends and escalation patterns.",
+        jobDescription: "Triage incoming support tickets by urgency and category. Draft customer-facing responses that resolve the underlying issue, not just the surface complaint. Match the customer's tone — acknowledge frustration before troubleshooting.",
         tone: "helpful, patient, solution-focused",
+      },
+      {
+        name: "Support Summariser",
+        role: "Operations",
+        jobDescription: "Track resolution times against SLAs. Summarize weekly support trends, recurring issues, and escalation patterns into a digest for the team lead.",
+        tone: "concise, pattern-focused, actionable",
       },
     ],
     recommendedIntegrations: ["slack", "google"],
     recommendedTemplates: ["daily-briefing"],
     workflow: [
-      { persona: "Support Agent", task: "Triage new tickets and prioritize" },
-      { persona: "Support Agent", task: "Draft responses for pending tickets" },
-      { persona: "Support Agent", task: "Generate weekly support metrics report" },
+      { persona: "Ticket Responder", task: "Triage new tickets and prioritize" },
+      { persona: "Ticket Responder", task: "Draft responses for pending tickets" },
+      { persona: "Support Summariser", task: "Generate weekly support metrics report" },
+    ],
+  },
+  {
+    id: "communications",
+    name: "Communications",
+    tagline: "Press releases, announcements, media & inbound response",
+    description: "Communications team that drafts press releases and announcements, monitors and responds to media/public inquiries, and keeps messaging consistent under normal operations and during a crisis.",
+    icon: "Megaphone",
+    color: "coral",
+    agents: [
+      {
+        name: "Comms Writer",
+        role: "Knowledge",
+        jobDescription: "Draft press releases, announcements, and public statements. Keep messaging consistent with brand voice and, where relevant, crisis-communications guidelines. Prepare statements ahead of known sensitive dates or events.",
+        tone: "clear, on-message, calm under pressure",
+      },
+      {
+        name: "Comms Responder",
+        role: "Knowledge",
+        jobDescription: "Monitor and respond to media and public inquiries. Route sensitive or high-risk questions for human review rather than answering them directly. Log inbound requests and their outcomes.",
+        tone: "measured, accurate, non-committal on anything unconfirmed",
+      },
+    ],
+    recommendedIntegrations: ["slack", "google", "webhook"],
+    recommendedTemplates: ["daily-briefing"],
+    workflow: [
+      { persona: "Comms Writer", task: "Draft a release or statement for a pending announcement" },
+      { persona: "Comms Responder", task: "Triage and respond to inbound media/public inquiries" },
+      { persona: "Comms Writer", task: "Review outgoing statements for consistency before publishing" },
+    ],
+  },
+  {
+    id: "grant-writing",
+    name: "Grant Writing",
+    tagline: "Donor proposals, program reports, funder-ready summaries",
+    description: "Grant writing team for NGOs and development-sector organizations: drafts funding proposals, writes quarterly donor reports, and summarizes program/M&E data into funder-ready narrative. Pairs naturally with the NGO & Civil Society sector.",
+    icon: "HandHeart",
+    color: "green",
+    agents: [
+      {
+        name: "Grant Writer",
+        role: "Knowledge",
+        jobDescription: "Draft funding proposals and letters of inquiry against a donor's stated priorities and format requirements. Translate program activities into the outcomes language funders expect.",
+        tone: "persuasive, evidence-led, funder-aware",
+      },
+      {
+        name: "Donor Report Writer",
+        role: "Knowledge",
+        jobDescription: "Write quarterly and end-of-grant narrative reports pairing program activities with verifiable indicators. Flag any indicator that's off-track early rather than at report deadline.",
+        tone: "precise, indicator-anchored, honest about gaps",
+      },
+      {
+        name: "Program Summariser",
+        role: "Knowledge",
+        jobDescription: "Summarize beneficiary tracking and M&E data into short digests the Grant Writer and Donor Report Writer can draw on, so every proposal and report is grounded in current program numbers.",
+        tone: "concise, numbers-first, current",
+      },
+    ],
+    recommendedIntegrations: ["slack", "google"],
+    recommendedTemplates: ["daily-briefing", "research-deep"],
+    workflow: [
+      { persona: "Program Summariser", task: "Digest current program/M&E data" },
+      { persona: "Grant Writer", task: "Draft a funding proposal against a donor's priorities" },
+      { persona: "Donor Report Writer", task: "Write the quarterly donor narrative report" },
     ],
   },
   {

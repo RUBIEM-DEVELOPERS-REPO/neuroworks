@@ -26,6 +26,8 @@
 //   CLAWBOT_EMAIL=0                hard-disable the bridge even if creds present
 
 import nodemailer, { type Transporter } from "nodemailer";
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { basename, extname } from "node:path";
 import { ImapFlow } from "imapflow";
 import { simpleParser, type ParsedMail } from "mailparser";
 import { marked } from "marked";
@@ -84,31 +86,97 @@ function readEnv(): EmailEnv {
   return { user, pass, from, allowedSenders, pollMs, imapHost, imapPort, smtpHost, smtpPort, mailjetApiKey, mailjetApiSecret, inboundMode, replyTo };
 }
 
+// ── Attachments ──────────────────────────────────────────────────────
+// A loaded, ready-to-send file. Built by loadAttachments() from disk paths;
+// carried through sendOutbound to both transports (Mailjet Base64Content,
+// nodemailer Buffer).
+export type EmailAttachment = { filename: string; contentType: string; base64: string; bytes: number };
+
+const ATTACHMENT_CONTENT_TYPES: Record<string, string> = {
+  ".pdf": "application/pdf",
+  ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  ".xls": "application/vnd.ms-excel",
+  ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  ".doc": "application/msword",
+  ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  ".csv": "text/csv",
+  ".txt": "text/plain",
+  ".md": "text/markdown",
+  ".json": "application/json",
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".zip": "application/zip",
+  ".html": "text/html",
+  ".ics": "text/calendar",
+};
+
+// Mailjet rejects messages over 15MB total; base64 inflates by ~37%, so cap
+// the RAW total at 10MB — comfortably under the wire limit with headroom for
+// the body + envelope.
+const MAX_ATTACHMENT_TOTAL_BYTES = 10 * 1024 * 1024;
+
+/** Load files from disk into sendable attachments. Throws with a clear,
+ *  actionable message on a missing file or an over-size total — a silent
+ *  drop would produce a "please find attached" email with nothing attached. */
+export function loadAttachments(paths: string[]): EmailAttachment[] {
+  const out: EmailAttachment[] = [];
+  let total = 0;
+  for (const raw of paths) {
+    const p = String(raw ?? "").trim();
+    if (!p) continue;
+    if (!existsSync(p)) throw new Error(`attachment not found: ${p} — pass the absolute path from fs.find_in ($step_N.matches.0.path)`);
+    const st = statSync(p);
+    if (st.isDirectory()) throw new Error(`attachment is a directory, not a file: ${p}`);
+    total += st.size;
+    if (total > MAX_ATTACHMENT_TOTAL_BYTES) {
+      throw new Error(`attachments exceed the ${Math.round(MAX_ATTACHMENT_TOTAL_BYTES / 1024 / 1024)}MB email limit (${basename(p)} pushed the total to ${(total / 1024 / 1024).toFixed(1)}MB) — send fewer/smaller files or share a link instead`);
+    }
+    const ext = extname(p).toLowerCase();
+    out.push({
+      filename: basename(p),
+      contentType: ATTACHMENT_CONTENT_TYPES[ext] ?? "application/octet-stream",
+      base64: readFileSync(p).toString("base64"),
+      bytes: st.size,
+    });
+  }
+  return out;
+}
+
 // Mailjet HTTPS sender — POSTs to api.mailjet.com/v3.1/send. Used instead
 // of nodemailer.sendMail when CLAWBOT_MAILJET_API_KEY + _SECRET are set.
 // Auth is HTTP Basic with API_KEY:SECRET. The From: address must be on a
 // domain verified in the Mailjet dashboard or the send is rejected with
 // a "sender_unverified" / domain_not_authorized style error.
 async function sendViaMailjet(env: EmailEnv, opts: {
-  to: string;
+  to: string[];
   subject: string;
   text: string;
   html?: string;
   inReplyTo?: string;
   references?: string[];
+  attachments?: EmailAttachment[];
 }): Promise<void> {
   const headers: Record<string, string> = {};
   if (opts.inReplyTo) headers["In-Reply-To"] = opts.inReplyTo;
   if (opts.references?.length) headers["References"] = opts.references.join(" ");
   const message: any = {
     From: { Email: env.from },
-    To: [{ Email: opts.to }],
+    To: opts.to.map(e => ({ Email: e })),
     Subject: opts.subject,
     TextPart: opts.text,
   };
   if (env.replyTo) message.ReplyTo = { Email: env.replyTo };
   if (opts.html) message.HTMLPart = opts.html;
   if (Object.keys(headers).length) message.Headers = headers;
+  if (opts.attachments?.length) {
+    message.Attachments = opts.attachments.map(a => ({
+      ContentType: a.contentType,
+      Filename: a.filename,
+      Base64Content: a.base64,
+    }));
+  }
 
   const authHeader = "Basic " + Buffer.from(`${env.mailjetApiKey}:${env.mailjetApiSecret}`).toString("base64");
   const res = await fetch("https://api.mailjet.com/v3.1/send", {
@@ -150,12 +218,13 @@ async function sendViaMailjet(env: EmailEnv, opts: {
 // call sites (reply and test) route through here so the transport choice
 // lives in one place.
 async function sendOutbound(env: EmailEnv, opts: {
-  to: string;
+  to: string[];
   subject: string;
   text: string;
   html?: string;
   inReplyTo?: string;
   references?: string[];
+  attachments?: EmailAttachment[];
 }): Promise<void> {
   if (env.mailjetApiKey && env.mailjetApiSecret) {
     return sendViaMailjet(env, opts);
@@ -163,13 +232,16 @@ async function sendOutbound(env: EmailEnv, opts: {
   if (!transporter) throw new Error("email transport not initialised");
   await transporter.sendMail({
     from: env.from,
-    to: opts.to,
+    to: opts.to.join(", "),  // nodemailer accepts a comma-separated address list natively
     subject: opts.subject,
     text: opts.text,
     ...(env.replyTo ? { replyTo: env.replyTo } : {}),
     ...(opts.html ? { html: opts.html } : {}),
     ...(opts.inReplyTo ? { inReplyTo: opts.inReplyTo } : {}),
     ...(opts.references?.length ? { references: opts.references } : {}),
+    ...(opts.attachments?.length ? {
+      attachments: opts.attachments.map(a => ({ filename: a.filename, content: Buffer.from(a.base64, "base64"), contentType: a.contentType })),
+    } : {}),
   });
 }
 
@@ -368,7 +440,7 @@ function buildEmailHtml(innerHtml: string): string {
           Sent by <strong style="color:${ink};">Neuro</strong>, your AI workforce. Just reply to this email to assign another task — add <span style="font-family:monospace;">[team]</span> to the subject to route it to a specialist.
         </td></tr>
       </table>
-      <div style="font-family:${font};font-size:11px;color:#a7a6b3;margin-top:14px;">NeuroWorks by RUBIEM Innovations · AIIA</div>
+      <div style="font-family:${font};font-size:11px;color:#a7a6b3;margin-top:14px;">NeuroWorks by RUBIEM Innovations · Aiia</div>
     </td></tr>
   </table>
 </body>
@@ -397,7 +469,7 @@ async function sendReply(env: EmailEnv, opts: {
   let html: string | undefined;
   try { html = await renderHtml(opts.body); } catch { html = undefined; }
   await sendOutbound(env, {
-    to: opts.to,
+    to: [opts.to],
     subject,
     text,
     html,
@@ -835,23 +907,55 @@ function coerceToBodyString(v: unknown): string {
  *  message id the provider returned so the calling agent can SHOW the
  *  user it actually sent — instead of synthesising a "looks sent" answer.
  */
+// Recipient count cap — a broadcast that fans out to hundreds of addresses
+// off a single planner call is more likely a mis-resolved wildcard (e.g. an
+// unfiltered users.list) than an intentional send; fail loud so the agent
+// narrows the recipient set instead of spamming the whole org directory.
+const MAX_RECIPIENTS = 50;
+
+// Accepts one address or many (comma-separated string / array — both the
+// email.send primitive and POST /api/email/send normalise into this before
+// calling sendEmail). Every address is validated + placeholder-checked
+// individually so one bad address in a broadcast fails loud with which one,
+// rather than silently dropping it or rejecting the whole batch opaquely.
+export function normalizeRecipients(to: string | string[]): string[] {
+  const raw = Array.isArray(to) ? to : String(to ?? "").split(",");
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const r of raw) {
+    const addr = String(r ?? "").trim();
+    if (!addr) continue;
+    const key = addr.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(addr);
+  }
+  return out;
+}
+
 export async function sendEmail(opts: {
-  to: string;
+  to: string | string[];
   subject: string;
   body: string;              // markdown — auto-rendered to text + html
   inReplyTo?: string;
   references?: string[];
-}): Promise<{ ok: true; transport: "mailjet" | "smtp"; from: string; to: string; subject: string; sentAt: string }> {
+  attachPaths?: string[];    // absolute file paths — loaded + base64'd here
+}): Promise<{ ok: true; transport: "mailjet" | "smtp"; from: string; to: string; recipients: string[]; subject: string; sentAt: string; attachments?: { filename: string; bytes: number }[] }> {
   const env = readEnv();
   if (!emailConfigured()) throw new Error("email not configured — set CLAWBOT_MAILJET_API_KEY + _SECRET, or CLAWBOT_EMAIL_USER + _APP_PASSWORD");
-  if (!opts.to || !opts.to.includes("@")) throw new Error(`email.send: invalid 'to' address "${opts.to}"`);
-  // Reject obvious placeholder / example addresses. A planner that couldn't
-  // resolve a real recipient sometimes emits a fake one (name@example.com,
-  // "[project lead email]"); sending there is worse than failing. Fail LOUD
-  // with a corrective hint so the agent resolves the real address from the
-  // org directory (users.lookup) and retries.
-  const badTo = placeholderAddressReason(opts.to);
-  if (badTo) throw new Error(`email.send: "${opts.to.trim()}" looks like a placeholder (${badTo}). Resolve the recipient's real address from the org directory with users.lookup / users.list before sending — don't use example/placeholder addresses.`);
+  const recipients = normalizeRecipients(opts.to);
+  if (recipients.length === 0) throw new Error(`email.send: invalid 'to' — no recipients resolved from "${opts.to}"`);
+  if (recipients.length > MAX_RECIPIENTS) throw new Error(`email.send: ${recipients.length} recipients exceeds the ${MAX_RECIPIENTS}-address cap — this usually means a wildcard/list reference wasn't filtered. Narrow the recipient list.`);
+  for (const addr of recipients) {
+    if (!addr.includes("@")) throw new Error(`email.send: invalid 'to' address "${addr}"`);
+    // Reject obvious placeholder / example addresses. A planner that couldn't
+    // resolve a real recipient sometimes emits a fake one (name@example.com,
+    // "[project lead email]"); sending there is worse than failing. Fail LOUD
+    // with a corrective hint so the agent resolves the real address from the
+    // org directory (users.lookup) and retries.
+    const badTo = placeholderAddressReason(addr);
+    if (badTo) throw new Error(`email.send: "${addr}" looks like a placeholder (${badTo}). Resolve the recipient's real address from the org directory with users.lookup / users.list before sending — don't use example/placeholder addresses.`);
+  }
   if (!opts.subject?.trim()) throw new Error("email.send: subject required");
   // Safety net for EVERY caller (schedules, replies, the email.send primitive):
   // never let a non-string body render as "[object Object]".
@@ -869,21 +973,27 @@ export async function sendEmail(opts: {
   const text = mdToPlainText(opts.body);
   let html: string | undefined;
   try { html = await renderHtml(opts.body); } catch { html = undefined; }
+  // Load attachments BEFORE sending — a missing file must fail the send, not
+  // produce a "please find attached" email with nothing on it.
+  const attachments = opts.attachPaths?.length ? loadAttachments(opts.attachPaths) : undefined;
   await sendOutbound(env, {
-    to: opts.to,
+    to: recipients,
     subject: opts.subject,
     text,
     html,
     inReplyTo: opts.inReplyTo,
     references: opts.references,
+    attachments,
   });
   return {
     ok: true,
     transport: useMailjet ? "mailjet" : "smtp",
     from: env.from,
-    to: opts.to,
+    to: recipients.join(", "),
+    recipients,
     subject: opts.subject,
     sentAt: new Date().toISOString(),
+    ...(attachments?.length ? { attachments: attachments.map(a => ({ filename: a.filename, bytes: a.bytes })) } : {}),
   };
 }
 
@@ -904,7 +1014,7 @@ export async function sendTestEmail(to: string): Promise<void> {
   let testHtml: string | undefined;
   try { testHtml = await renderHtml(testMd); } catch { testHtml = undefined; }
   await sendOutbound(env, {
-    to,
+    to: [to],
     subject: "Neuro email bridge — test",
     text: mdToPlainText(testMd),
     html: testHtml,

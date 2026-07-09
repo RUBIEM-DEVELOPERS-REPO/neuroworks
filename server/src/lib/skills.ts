@@ -135,7 +135,15 @@ export function suggestSkillsForIntent(intent: string, limit = 2): Skill[] {
 // insensitive). Word-boundary matching for short tokens prevents false hits
 // ("api" wouldn't match "rapid").
 const SKILL_KEYWORDS: { skill: string; patterns: RegExp[] }[] = [
-  { skill: "email-writing",          patterns: [/\bemail\b/i, /\breply\s+to\b/i, /\bsend\s+(?:\w+\s+){0,3}(?:a\s+|an\s+|the\s+)?(?:report|update|summary|recap|status)\b/i] },
+  // The bare \bemail\b trigger is deliberately broad ("catch ANY email
+  // task"), which meant it TIED with send-attachment's keyword score on any
+  // "attach the file to the email" ask (both flat +15, and email-writing
+  // wins ties by file/array order) — so the agent loaded generic email
+  // guidance instead of the attach-don't-inline rule on exactly the tasks
+  // that needed it (2026-07-08, Summit Recon incident regression guard).
+  // Negative lookahead excludes tasks that also mention "attach" so those
+  // route to send-attachment instead; plain email tasks are unaffected.
+  { skill: "email-writing",          patterns: [/^(?!.*\battach).*\bemail\b/is, /\breply\s+to\b/i, /\bsend\s+(?:\w+\s+){0,3}(?:a\s+|an\s+|the\s+)?(?:report|update|summary|recap|status)\b/i] },
   { skill: "memo-writing",           patterns: [/\bmemo\b/i] },
   { skill: "report-writing",         patterns: [/\b(?:full|quarterly|annual)\s+report\b/i, /\banalysis\s+report\b/i] },
   { skill: "brief-writing",          patterns: [/(?<!negotiation[\s-])(?<!campaign[\s-])\b(?:executive\s+)?brief\b/i, /\bone[-\s]?pager\b/i] },
@@ -223,7 +231,10 @@ const SKILL_KEYWORDS: { skill: string; patterns: RegExp[] }[] = [
   { skill: "video-prompt",           patterns: [/\b(?:make|create|generate|produce|render)\s+(?:a\s+|an\s+|the\s+)?(?:short\s+)?(?:video|clip|reel|teaser|ad)\b/i, /\b(?:video|reel|tiktok|shorts)\s+(?:clip|ad|teaser|prompt)\b/i, /\bimage[\s-]?to[\s-]?video\b/i, /\bstoryboard\b/i, /\bproduct\s+teaser\b/i] },
   { skill: "music-brief",            patterns: [/\b(?:compose|generate|produce|write|make)\s+(?:a\s+|an\s+|some\s+)?(?:jingle|music|track|theme|soundtrack|beat|tune)\b/i, /\b(?:background|hold)\s+music\b/i, /\bjingle\b/i, /\bsoundtrack\b/i, /\b(?:theme|backing)\s+(?:song|track|music)\b/i] },
   { skill: "multimedia-package",     patterns: [/\b(?:content|media|video|ad)\s+package\b/i, /\b(?:script|storyboard)\s+(?:\+|and)\s+(?:voice(?:over)?|video|music|audio)\b/i, /\bexplainer\s+(?:video|with\s+(?:voice|narration|music))\b/i, /\b(?:social|video|content)\s+ad\b.{0,30}\b(?:voice(?:over)?|narration|music|audio)\b/i, /\b(?:voice(?:over)?|narration)\s+(?:\+|and)\s+(?:video|music)\b/i, /\b(?:video|music)\s+(?:\+|and)\s+(?:voice(?:over)?|narration|music)\b/i] },
-  { skill: "aiia-finance-readout",   patterns: [/\bAIIA\b/i, /\bfinancial dashboard\b/i, /\b(?:finance|financial|revenue|expense)\s+(?:dashboard|overview|figures?|numbers?|position)\b/i, /\b(?:pull|fetch|read|show me|get)\s+(?:the\s+|our\s+|my\s+)?(?:live\s+)?(?:financials?|finance|dashboard)\b/i, /\bdashboard\s+for\s+(?:year\s+)?\d{4}\b/i] },
+  // Aiia must appear NEAR a finance/readout cue — a bare mention (e.g. "save
+  // the Aiia reference letter to my vault") is a doc-handling task, not a
+  // finance readout, so don't let \bAiia\b hijack it (regression guard).
+  { skill: "aiia-finance-readout",   patterns: [/\bAiia\b.{0,40}\b(?:financ|revenue|expenses?|dashboard|figures?|numbers?|position|readout|P&L|balance|cash\s*flow|report)\b/i, /\b(?:financ|revenue|expenses?|dashboard|figures?|numbers?|position|readout|P&L|balance|cash\s*flow)\b.{0,40}\bAiia\b/i, /\bfinancial dashboard\b/i, /\b(?:finance|financial|revenue|expense)\s+(?:dashboard|overview|figures?|numbers?|position)\b/i, /\b(?:pull|fetch|read|show me|get)\s+(?:the\s+|our\s+|my\s+)?(?:live\s+)?(?:financials?|finance|dashboard)\b/i, /\bdashboard\s+for\s+(?:year\s+)?\d{4}\b/i] },
   // ─── 2026-06-10: department task-type skills (cover the 12 new dept personas) ───
   { skill: "brd-writing",                patterns: [/\bBR[DS]\b/i, /\bbusiness requirements?\b/i, /\bbusiness requirements?\s+(?:doc|document|spec|specification)\b/i, /\brequirements?\s+(?:doc|document|specification)\b/i] },
   { skill: "user-stories",               patterns: [/\buser stor(?:y|ies)\b/i, /\bacceptance criteria\b/i, /\bgiven\b.{0,12}\bwhen\b.{0,12}\bthen\b/i, /\bepic\b.{0,20}\bstor(?:y|ies)\b/i] },
@@ -286,6 +297,13 @@ const SKILL_KEYWORDS: { skill: string; patterns: RegExp[] }[] = [
   { skill: "risk-register",              patterns: [/\brisk register\b/i] },
   { skill: "standup-summary",            patterns: [/\bstand[\s-]?up\s+(?:summary|notes|update|recap)\b/i, /\bdaily stand[\s-]?up\b/i] },
   { skill: "timesheet-fill",             patterns: [/\btimesheet\b/i, /\b(?:fill in|complete|log)\s+(?:my\s+|the\s+)?(?:hours|time|timesheet)\b/i] },
+  // ─── 2026-07-08: new-feature skills (email attachments, hybrid-workforce
+  // hand-off, Paynow/Stripe payment collection, Intellinexus publishing) ───
+  { skill: "send-attachment",            patterns: [/\battach(?:ment|ed|ing)?\b/i, /\bsend\s+(?:me\s+|him\s+|her\s+|them\s+)?(?:the\s+|that\s+|this\s+)?(?:file|document|doc|spreadsheet|pdf|report)\b.{0,20}\b(?:email|attached|attachment)\b/i, /\bemail\b.{0,25}\b(?:the\s+|that\s+|this\s+)?(?:file|document|doc|spreadsheet|pdf)\b/i] },
+  { skill: "human-handoff",              patterns: [/\bhuman[\s-]?(?:request|handoff|hand[\s-]?off|in[\s-]?the[\s-]?loop)\b/i, /\bask\s+(?:a\s+|the\s+)?human\b/i, /\bwaiting\s+on\s+(?:a\s+)?human\b/i, /\bneeds?\s+(?:human|manual)\s+(?:input|approval|review)\b/i] },
+  { skill: "payment-collection",         patterns: [/\b(?:payment|paynow)\s+link\b/i, /\bcollect\s+payment\b/i, /\b(?:send|create)\s+(?:an?\s+)?invoice\s+(?:link|for)\b/i, /\bcharge\s+(?:the\s+)?(?:customer|client)\b/i, /\bhas\s+\w+\s+paid\b/i, /\bpayment\s+status\b/i] },
+  { skill: "dataset-publish",            patterns: [/\bpublish\s+(?:this\s+|the\s+)?(?:data|dataset)\b/i, /\bintellinexus\b/i, /\badd\s+(?:this\s+|to\s+)?(?:the\s+)?data\s+pipeline\b/i, /\bturn\s+this\s+into\s+a\s+dataset\b/i, /\bmake\s+(?:this\s+)?(?:data\s+)?(?:available\s+to|queryable\s+by)\s+(?:the\s+)?(?:other\s+)?agents\b/i] },
+  { skill: "caveman-mode",                patterns: [/\bcaveman\s+mode\b/i, /\btalk\s+like\s+(?:a\s+)?caveman\b/i, /\/caveman\b/i, /\b(?:be|reply|answer)\s+(?:more\s+)?(?:brief|terse|concise)\b.{0,20}\b(?:tokens?|words?)\b/i, /\bfewer\s+(?:tokens|words)\b/i, /\bless\s+tokens\b/i] },
 ];
 
 // Combined picker: matches BOTH on intent AND on doc-type keywords in the

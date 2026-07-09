@@ -44,6 +44,7 @@ departmentsRouter.post("/:id/apply", async (req, res) => {
         jobDescription: agent.jobDescription,
         tone: agent.tone ?? "professional",
         responsibilities: tpl.workflow.filter(w => w.persona === agent.name).map(w => w.task),
+        language: agent.language ?? tpl.defaultLanguage,
         createdAt: new Date().toISOString(),
       };
       addPersona(persona);

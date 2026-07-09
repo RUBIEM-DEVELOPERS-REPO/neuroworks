@@ -27,6 +27,8 @@ import { Users } from "./pages/Users";
 import { Workforce } from "./pages/Workforce";
 import { Departments } from "./pages/Departments";
 import { KnowledgePacks } from "./pages/KnowledgePacks";
+import { DataPipeline } from "./pages/DataPipeline";
+import { Models } from "./pages/Models";
 import { Quality } from "./pages/Quality";
 import { Cost } from "./pages/Cost";
 import { AuditLog } from "./pages/AuditLog";
@@ -34,6 +36,7 @@ import { SkillForge } from "./pages/SkillForge";
 import { Orchestrate } from "./pages/Orchestrate";
 import { Login } from "./pages/Login";
 import { Onboarding } from "./pages/Onboarding";
+import { DailyReports } from "./pages/DailyReports";
 
 function AppShell() {
   return (
@@ -47,6 +50,7 @@ function AppShell() {
         <Route path="/tasks" element={<Tasks />} />
         <Route path="/results" element={<ResultsIndex />} />
         <Route path="/results/:jobId" element={<Results />} />
+        <Route path="/daily-reports" element={<DailyReports />} />
         <Route path="/templates" element={<Templates />} />
         <Route path="/skills" element={<Skills />} />
         <Route path="/approvals" element={<Approvals />} />
@@ -66,6 +70,8 @@ function AppShell() {
         <Route path="/workforce" element={<Workforce />} />
         <Route path="/departments" element={<Departments />} />
         <Route path="/knowledge-packs" element={<KnowledgePacks />} />
+        <Route path="/data-pipeline" element={<DataPipeline />} />
+        <Route path="/models" element={<Models />} />
         <Route path="/quality" element={<Quality />} />
         <Route path="/cost" element={<Cost />} />
         <Route path="/audit" element={<AuditLog />} />

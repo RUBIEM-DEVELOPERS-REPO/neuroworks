@@ -3,7 +3,7 @@ export type Language = "en" | "sn" | "nd";
 const strings: Record<Language, Record<string, string>> = {
   en: {
     "app.title": "NeuroWorks",
-    "app.tagline": "The AI Workforce",
+    "app.tagline": "The Intelligent Organization",
     "app.subtitle": "Describe what you want done, delegate, get results.",
     "dashboard.welcome": "Welcome to",
     "dashboard.quickStart": "Quick start",
@@ -19,8 +19,8 @@ const strings: Record<Language, Record<string, string>> = {
     "dashboard.delegate": "Delegate",
     "dashboard.routing": "Routing…",
     "dashboard.zimbabweContext": "Zimbabwe Context",
-    "dashboard.zimbabweContextDesc": "Your AI workforce is tuned for the Zimbabwe market. Here's what you should know about your sector.",
-    "onboarding.title": "Configure your AI Workforce",
+    "dashboard.zimbabweContextDesc": "Your intelligent organization is tuned for the Zimbabwe market. Here's what you should know about your sector.",
+    "onboarding.title": "Configure your Intelligent Organization",
     "onboarding.subtitle": "Help us tailor NeuroWorks to your needs",
     "onboarding.sector": "What sector do you operate in?",
     "onboarding.sectorDesc": "This helps us pre-configure templates, integrations, and knowledge packs for your industry.",
@@ -35,7 +35,7 @@ const strings: Record<Language, Record<string, string>> = {
     "onboarding.next": "Next",
     "onboarding.back": "Back",
     "onboarding.skipped": "Skip for now",
-    "onboarding.done": "Your AI Workforce is ready",
+    "onboarding.done": "Your Intelligent Organization is ready",
     "onboarding.doneDesc": "You can change these settings anytime in Settings.",
   },
   sn: {

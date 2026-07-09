@@ -11,25 +11,37 @@ onboardingRouter.get("/", (_req, res) => {
     sectors: SECTORS.map(s => ({
       id: s.id, name: s.name, nameShona: s.nameShona, nameNdebele: s.nameNdebele,
       description: s.description, icon: s.icon,
+      suggestedDepartments: s.suggestedDepartments, suggestedIntegrations: s.suggestedIntegrations,
     })),
   });
 });
 
-// PUT /api/onboarding — update onboarding state.
+// PUT /api/onboarding — update onboarding state. `completed` is always
+// required (the wizard's own contract), everything else is a TRUE partial
+// patch — a field only changes if the caller actually sent it. This matters
+// now that Settings.tsx can PUT just {completed:true, language:"sn"} to
+// change language alone: naively defaulting omitted fields to `undefined`
+// and spreading them into the saved state would silently wipe the
+// previously chosen sector/orgName on every such call.
 onboardingRouter.put("/", (req, res) => {
-  const { completed, sector, language, orgName } = req.body ?? {};
-  if (typeof completed !== "boolean") {
+  const body = req.body ?? {};
+  if (typeof body.completed !== "boolean") {
     return res.status(400).json({ error: "completed (boolean) is required" });
   }
-  if (language && !["en", "sn", "nd"].includes(language)) {
+  if (body.language !== undefined && !["en", "sn", "nd"].includes(body.language)) {
     return res.status(400).json({ error: "language must be en, sn, or nd" });
   }
-  const state = setOnboardingState({
-    completed,
-    sector: sector ? String(sector) : undefined,
-    language: language ?? undefined,
-    orgName: orgName ? String(orgName) : undefined,
-  });
+  const patch: Partial<import("../lib/sector-packs.js").OnboardingState> & { completed: boolean } = { completed: body.completed };
+  if (body.sector !== undefined) patch.sector = String(body.sector);
+  if (body.language !== undefined) patch.language = body.language;
+  if (body.orgName !== undefined) patch.orgName = String(body.orgName);
+  // customSectorName only makes sense alongside sector "custom" — sent with
+  // a non-custom sector (or with sector omitted while a custom one is
+  // already active) it's ignored rather than silently persisted as stale.
+  if (body.customSectorName !== undefined && (body.sector === "custom" || (body.sector === undefined && getOnboardingState().sector === "custom"))) {
+    patch.customSectorName = String(body.customSectorName).slice(0, 100);
+  }
+  const state = setOnboardingState(patch);
   res.json({ state });
 });
 

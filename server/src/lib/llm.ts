@@ -1,6 +1,7 @@
 import { config } from "../config.js";
 import { pickModelFor, type TaskNeeds } from "./models.js";
-import { openrouterGenerateWithMeta, openrouterHealth, isTransientError } from "./openrouter.js";
+import { openrouterGenerateWithMeta, openrouterHealth, isTransientError, openrouterCircuitOpen, openrouterDailyQuotaExhausted, openrouterBillingExhausted } from "./openrouter.js";
+import { recordLlmCost } from "./cost-tracker.js";
 
 export type LLMCallOptions = {
   model?: string;
@@ -262,7 +263,16 @@ async function callOllamaStream(prompt: string, system: string | undefined, mode
 // local Ollama model when no token has streamed yet, so a temporary upstream
 // rate-limit doesn't fail the whole task with a partial result. Disable the
 // fallback with CLAWBOT_OR_FALLBACK_OLLAMA=0.
+// Public entry — wraps the dispatcher to record cost for EVERY call (this is
+// how the Cost monitor page gets its data; recording is best-effort and never
+// blocks or breaks the actual generation).
 export async function llmGenerateWithMeta(prompt: string, system?: string, opts: LLMCallOptions = {}): Promise<{ text: string; model: string }> {
+  const result = await generateWithMetaInner(prompt, system, opts);
+  try { recordLlmCost(result.model, result.text, prompt, system, opts.profile ?? "none"); } catch { /* best-effort */ }
+  return result;
+}
+
+async function generateWithMetaInner(prompt: string, system?: string, opts: LLMCallOptions = {}): Promise<{ text: string; model: string }> {
   const { backend, model, reason } = await chooseBackendAndModel(opts, prompt, system);
   const tokenEstimate = estimateTokens(prompt) + estimateTokens(system);
   // Customer-facing notification: caller decides whether to push the
@@ -357,7 +367,7 @@ export type { LLMCallOptions as OllamaCallOptions };
 // model is pulled; for OpenRouter means the API key works.
 export async function llmHealth(): Promise<{
   ollama: { ok: boolean; model: string; error?: string };
-  openrouter: { enabled: boolean; ok: boolean; model: string; error?: string };
+  openrouter: { enabled: boolean; ok: boolean; model: string; error?: string; circuitOpen?: boolean; dailyQuotaExhausted?: boolean; billingExhausted?: boolean };
   minimax: { enabled: boolean; ok: boolean; model: string; error?: string };
   littleCoder: { enabled: boolean; available: boolean; error?: string };
   primary: Backend;
@@ -394,7 +404,7 @@ export async function llmHealth(): Promise<{
   const primary: Backend = shouldRouteToOpenRouter("balanced") ? "openrouter" : "ollama";
   return {
     ollama,
-    openrouter: { enabled: config.openrouterEnabled, ...or },
+    openrouter: { enabled: config.openrouterEnabled, ...or, circuitOpen: openrouterCircuitOpen(), dailyQuotaExhausted: openrouterDailyQuotaExhausted(), billingExhausted: openrouterBillingExhausted() },
     minimax: { enabled: config.minimaxEnabled, ...mm },
     littleCoder: lc,
     primary,

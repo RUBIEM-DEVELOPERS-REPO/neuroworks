@@ -273,3 +273,102 @@ export function checkActionAgainstConstraints(action: string, constraints: Extra
   }
   return results;
 }
+
+// ─── Enforcement ───
+// Everything above this line (extract/review/checkAction) already existed as
+// a standalone review workbench — an admin could upload a policy, extract
+// constraints, accept/reject them, and manually paste an action into the
+// "test" box. None of that touched real agent execution: quality.check and
+// security.scan run automatically after every synth, but there was no third
+// gate reading accepted constraints, and no gate on the plan steps
+// themselves. A hard "never email outside the finance domain" constraint
+// could sit accepted in the review UI while email.send fired anyway — the
+// exact class of incident this system exists to prevent. The functions below
+// close that gap: one pre-execution check on side-effecting plan steps
+// (blocks before the tool runs), one post-synth check on the final answer
+// text (mirrors quality.check/security.scan's Phase-A wiring in agent.ts).
+
+// Tools whose side effects are worth gating before they run. Deliberately a
+// narrow, explicit allowlist — read-only tools (vault.read, web.fetch,
+// research.*) can't violate an org policy by running, only by what they DO
+// with the result, which the post-synth content check catches instead.
+export const CONSEQUENTIAL_TOOLS = new Set([
+  "email.send",
+  "vault.write", "vault.edit", "vault.create_zettel", "vault.append", "vault.write_pdf",
+  "fs.import_to_vault",
+  "github.create_issue", "github.comment_on_issue", "github.update_issue", "github.request_review",
+  "webhook.post", "slack.post", "telegram.send", "discord.post", "msteams.post", "googlechat.post",
+  "connector.call",
+  "payment.link", "payment.paynow_link",
+  "db.write",
+  "code.exec",
+]);
+
+// Build a compact, keyword-rich description of a plan step so the overlap
+// check in checkActionAgainstConstraints has real signal to match against —
+// the tool name alone ("email.send") shares no words with a policy rule
+// ("never email customer financial data to external domains"), but the
+// resolved args usually do.
+export function describeStepAction(tool: string, args: Record<string, any>): string {
+  const parts: string[] = [tool];
+  for (const key of ["to", "path", "vaultFolder", "title", "subject", "body", "content", "url", "channel", "source", "code", "kind"]) {
+    const v = args?.[key];
+    if (v === undefined || v === null) continue;
+    const s = Array.isArray(v) ? v.join(", ") : String(v);
+    if (s.trim().length === 0) continue;
+    parts.push(s.slice(0, 500));
+  }
+  return parts.join(" | ");
+}
+
+export type GovernanceGate = {
+  blocked: boolean;
+  violations: { rule: string; policyName: string; severity: ConstraintSeverity; category: string }[];
+};
+
+// Only "reviewed && accepted && hard" constraints are enforceable — matches
+// the bar the /check-action route already uses for "accepted" (an
+// extracted-but-unreviewed constraint is a draft, not policy yet), narrowed
+// further to hard since soft constraints are preferences, not something a
+// step or answer should be blocked over.
+export function filterEnforceable(constraints: ExtractedConstraint[]): ExtractedConstraint[] {
+  return constraints.filter(c => c.reviewed && c.accepted && c.severity === "hard");
+}
+
+// Pure core: given an action/content string and an already-filtered
+// enforceable set, decide block/pass. Disk-free and deterministic — the I/O
+// wrappers below (checkStepAgainstGovernance, checkContentAgainstGovernance)
+// just supply the enforceable set from getConstraints().
+export function gateAction(action: string, enforceable: ExtractedConstraint[]): GovernanceGate {
+  if (enforceable.length === 0) return { blocked: false, violations: [] };
+  const hits = checkActionAgainstConstraints(action, enforceable);
+  if (hits.length === 0) return { blocked: false, violations: [] };
+  return {
+    blocked: true,
+    violations: hits.map(h => ({ rule: h.violated[0].rule, policyName: h.violated[0].policyName, severity: h.violated[0].severity, category: h.violated[0].category })),
+  };
+}
+
+// Pre-execution gate for a single plan step.
+export function checkStepAgainstGovernance(tool: string, args: Record<string, any>): GovernanceGate {
+  if (!CONSEQUENTIAL_TOOLS.has(tool)) return { blocked: false, violations: [] };
+  const enforceable = filterEnforceable(getConstraints().constraints);
+  if (enforceable.length === 0) return { blocked: false, violations: [] };
+  return gateAction(describeStepAction(tool, args), enforceable);
+}
+
+// Post-synth gate for the final answer text — checked against the drafted
+// answer rather than a tool call. Wired into agent.ts's Phase A alongside
+// quality.check/security.scan via the governance.check primitive.
+export function checkContentAgainstGovernance(content: string): GovernanceGate {
+  const enforceable = filterEnforceable(getConstraints().constraints);
+  return gateAction(content, enforceable);
+}
+
+// Fast pre-check so callers on a hot path (runStep, once per consequential
+// step) can skip the getConstraints() read entirely when governance isn't in
+// use. listGovernance() is already 60s-cached, so this is cheap even when
+// called often, but most installs will never touch _governance/ at all.
+export function hasEnforceableConstraints(): boolean {
+  return filterEnforceable(getConstraints().constraints).length > 0;
+}

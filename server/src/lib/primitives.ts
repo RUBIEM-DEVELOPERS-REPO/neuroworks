@@ -7,6 +7,8 @@ import { listVault, readVaultFile, searchVault, writeVaultFile, importBinaryInto
 import { extractDocText, extractDocsParallel } from "./doc-extractor.js";
 import { listOwnedRepos, recentCommits, openPRs, openIssues, readme, octokit } from "./github.js";
 import { getSourceByLabel, runQuery, describeSource, listSources } from "./data-sources.js";
+import { publishDataset, listDatasets } from "./adrs.js";
+import { acquire as omniAcquire, acquireAndPublish as omniAcquirePublish, type OmniSpec } from "./omnisignal.js";
 import { getConnectionByProvider } from "./integrations.js";
 import { delegateToBestPeer, reviewWithPeer } from "./peers.js";
 import { scanForSecurityRisks, redactHighSeverity, type SecurityKind } from "./security.js";
@@ -14,6 +16,7 @@ import { scrape, interact, renderMarkdownToPdf, type InteractAction } from "./br
 import { enqueueVaultCommit } from "./commit-queue.js";
 import { searchWeb, smartFetch } from "./web-client.js";
 import { classifyDeliverable } from "./deliverable.js";
+import { checkContentAgainstGovernance } from "./governance.js";
 
 export type ArgSpec = { name: string; type: "string" | "number" | "boolean"; required: boolean; description: string };
 
@@ -100,6 +103,25 @@ export function isJunkFileName(name: string): boolean {
     name.toLowerCase() === "thumbs.db" ||
     name.toLowerCase() === "desktop.ini"
   );
+}
+
+// Flexible list-arg parser — a planner-emitted value that's semantically a
+// list arrives in one of several shapes depending on the model: an already-
+// parsed array, a JSON-array string, or a comma-separated string. Used for
+// any arg that can take multiple values (email.send's `to`, `attach_paths`).
+function parseFlexibleList(raw: any): string[] {
+  let items: any[] = [];
+  if (Array.isArray(raw)) items = raw;
+  else if (typeof raw === "string" && raw.trim()) {
+    const s = raw.trim();
+    if (s.startsWith("[")) {
+      try { const parsed = JSON.parse(s); items = Array.isArray(parsed) ? parsed : [s]; }
+      catch { items = s.split(","); }
+    } else {
+      items = s.split(",");
+    }
+  }
+  return items.map((x: any) => String(x ?? "").trim()).filter(Boolean);
 }
 
 export const primitives: Primitive[] = [
@@ -879,11 +901,11 @@ export const primitives: Primitive[] = [
   },
   {
     name: "fs.find_in",
-    description: "Find files in a known user folder (downloads / desktop / documents / vault) whose name matches a substring. Use this FIRST when the customer says 'check my downloads for X', 'look in my documents for Y', or just 'whats in this doc X' (use folder='all' for the latter — searches Downloads, Desktop, Documents, and the vault Inbox in parallel). Cross-platform: resolves to ~/Downloads etc. on macOS/Linux and %USERPROFILE%\\Downloads on Windows. Returns matches sorted newest-first so 'the X I just saved' is first.",
+    description: "Find files in a known user folder (downloads / desktop / documents / vault) whose name matches a substring. Use this FIRST when the customer says 'check my downloads for X', 'look in my documents for Y', or just 'whats in this doc X' (use folder='all' for the latter — searches Downloads, Desktop, Documents, and the vault Inbox in parallel). Cross-platform: resolves to ~/Downloads etc. on macOS/Linux and %USERPROFILE%\\Downloads on Windows. Returns matches sorted by how closely the name matches (an exact-ish match beats a token buried in a much longer name, e.g. an auto-captured vault research note titled after a whole sentence); ties fall back to newest-first so 'the X I just saved' wins among equally-good matches.",
     readonly: true,
     args: [
       { name: "folder", type: "string", required: true, description: "Folder shortcut: 'downloads' | 'desktop' | 'documents' | 'vault' | 'inbox' | 'home' | 'all' — or an absolute path. 'all' searches Downloads + Desktop + Documents + Inbox in parallel." },
-      { name: "name", type: "string", required: true, description: "Filename substring to match (case-insensitive). E.g. 'AIIA Reference Letter' matches 'AIIA-Reference-Letter.pdf'." },
+      { name: "name", type: "string", required: true, description: "Filename substring to match (case-insensitive). E.g. 'Aiia Reference Letter' matches 'Aiia-Reference-Letter.pdf'." },
       { name: "limit", type: "number", required: false, description: "Max matches to return (default 10, cap 50)" },
       { name: "depth", type: "number", required: false, description: "Subfolder recursion depth (default 2, cap 4)" },
     ],
@@ -945,7 +967,7 @@ export const primitives: Primitive[] = [
       }
       const needle = asciifyForSearch(nameArg).toLowerCase();
       // Allow simple wildcard support: spaces or hyphens are interchangeable
-      // ("AIIA Reference Letter" matches "AIIA-Reference-Letter.pdf"), and
+      // ("Aiia Reference Letter" matches "Aiia-Reference-Letter.pdf"), and
       // multiple needle tokens all need to be present somewhere in the name.
       // Strip common noise words so a planner-generated needle like "the
       // CUT student offer letter" still finds "CUT_student_offer_letter.docx"
@@ -1162,8 +1184,33 @@ export const primitives: Primitive[] = [
           hits = fuzzyHits(fresh, minMatch);
         }
       }
-      // Newest first — "the X I just downloaded" is the most likely match.
-      hits.sort((a, b) => (a.modified < b.modified ? 1 : -1));
+      // Match-quality first, newest as a tie-breaker. Pure recency sort let
+      // a short, unrelated-but-token-overlapping name outrank the actual
+      // target whenever it happened to be newer — e.g. an auto-captured
+      // vault research note titled after the whole task sentence
+      // ("...summit-recon-conso-to-all-the-.md", 893 bytes) outranked the
+      // real "Summit Recon CONSO.xlsx" (610KB) because the note was
+      // created more recently by an earlier failed attempt at the same
+      // task, even though the needle only explains a small fraction of the
+      // note's much longer slugified name (2026-07-09 incident: the wrong
+      // file was actually emailed to 5 people before this fix). Score =
+      // fraction of the basename (extension stripped) the matched needle
+      // tokens actually cover — near 1.0 for an exact-ish match, low for a
+      // token buried in a long unrelated name. Near-ties (genuinely
+      // comparable matches) still fall back to newest-first, preserving
+      // "the X I just downloaded" for the common multi-candidate case.
+      function matchQuality(h: Hit): number {
+        const base = h.name.replace(/\.[^.]+$/, "");
+        const normalised = asciifyForSearch(base).toLowerCase().replace(/[-_]+/g, " ");
+        if (normalised.length === 0) return 0;
+        const covered = needleTokens.reduce((sum, t) => sum + (normalised.includes(t) ? t.length : 0), 0);
+        return covered / normalised.length;
+      }
+      hits.sort((a, b) => {
+        const dq = matchQuality(b) - matchQuality(a);
+        if (Math.abs(dq) > 0.05) return dq;
+        return a.modified < b.modified ? 1 : -1;
+      });
       return {
         folder: folderArg,
         resolvedRoots: livingRoots,
@@ -1177,7 +1224,7 @@ export const primitives: Primitive[] = [
   },
   {
     name: "fs.import_to_vault",
-    description: "Copy a file from the user's PC into their Obsidian vault and write a markdown sidecar so it shows up in NeuroWorks's knowledge view. Use for any 'move/copy/save/import/file this doc into my vault/knowledge/neuroworks' request. Preserves the original on disk by default — the user gets a SEARCHABLE copy in their second brain while the source stays where they had it. Chain with fs.find_in to resolve a partial filename first (e.g. find then import 'AIIA Reference Letter'). Returns the vault-relative paths of both the imported binary and the sidecar so the synth can render a link.",
+    description: "Copy a file from the user's PC into their Obsidian vault and write a markdown sidecar so it shows up in NeuroWorks's knowledge view. Use for any 'move/copy/save/import/file this doc into my vault/knowledge/neuroworks' request. Preserves the original on disk by default — the user gets a SEARCHABLE copy in their second brain while the source stays where they had it. Chain with fs.find_in to resolve a partial filename first (e.g. find then import 'Aiia Reference Letter'). Returns the vault-relative paths of both the imported binary and the sidecar so the synth can render a link.",
     readonly: false,
     args: [
       { name: "path", type: "string", required: true, description: "Absolute path to the source file on the user's PC (chain from $step_0.matches.0.path after fs.find_in)" },
@@ -1368,7 +1415,12 @@ export const primitives: Primitive[] = [
     ],
     handler: async (args) => {
       const query = String(args.query);
-      const depth = Math.min(5, Math.max(1, Number(args.depth ?? 3)));
+      // Depth cap is env-tunable (CLAWBOT_RESEARCH_MAX_DEPTH, default 3).
+      // Jobs 36172d9e/b6d90f2a burned ~346s each in research.deep — most of it
+      // fetch+synth over sources 4-5 that rarely change the answer. Planners
+      // habitually ask for depth 3; anything above the cap now clamps.
+      const DEPTH_CAP = Math.min(5, Math.max(1, Number(process.env.CLAWBOT_RESEARCH_MAX_DEPTH ?? "3")));
+      const depth = Math.min(DEPTH_CAP, Math.max(1, Number(args.depth ?? 2)));
       const capture = args.capture !== false;
 
       // 1+2. Vault search + web search in PARALLEL — was sequential, costing
@@ -1722,23 +1774,31 @@ ${vaultHits.slice(0, 8).map(h => `- [[${h.path}]] (line ${h.line})`).join("\n") 
   },
   {
     name: "email.send",
-    description: "Send an actual email via the configured outbound transport (Mailjet HTTPS API, with SMTP fallback). Use this for ANY 'send an email to X', 'email X about Y', 'reply to Z' task — do NOT use web.interact to drive Gmail's web UI, that's not a real send path. RECIPIENTS: if the user names someone by NAME or ROLE rather than giving a literal address (e.g. 'email Godswill', 'send it to the project lead'), you MUST resolve their real address from the org directory FIRST via users.lookup (or users.list) — never invent or guess an address, and never use placeholder/example domains. Returns { ok, transport, from, to, subject, sentAt } so the synth can confirm actual delivery instead of fabricating one. Body accepts markdown — converted to plaintext + HTML automatically.",
+    description: "Send an actual email via the configured outbound transport (Mailjet HTTPS API, with SMTP fallback). Use this for ANY 'send an email to X', 'email X about Y', 'reply to Z' task — do NOT use web.interact to drive Gmail's web UI, that's not a real send path. RECIPIENTS: if the user names someone by NAME or ROLE rather than giving a literal address (e.g. 'email Godswill', 'send it to the project lead'), you MUST resolve their real address from the org directory FIRST via users.lookup (or users.list) — never invent or guess an address, and never use placeholder/example domains. MULTIPLE RECIPIENTS (e.g. 'send to all users'): `to` accepts a comma-separated list or a JSON array of addresses — do NOT use a wildcard reference like \"$step_N.users.*.email\", it will NOT resolve; instead reference the resolved array directly, e.g. {\"to\":\"$step_N.users.*.email\"} only works if step_N's args used users.list — if unsure, prefer building the array explicitly from users.list's result. ATTACHMENTS: when the user asks to 'send/attach the document/file/report', pass its absolute path(s) in attach_paths (from fs.find_in's matches[].path) — do NOT paste a document's raw content into the body as a substitute for attaching it. Returns { ok, transport, from, to, recipients, subject, sentAt, attachments? } so the synth can confirm actual delivery instead of fabricating one — ALWAYS check `ok` before claiming the email sent. Body accepts markdown — converted to plaintext + HTML automatically.",
     readonly: false,
     args: [
-      { name: "to", type: "string", required: true, description: "Recipient's REAL email address. If you only have a name/role, call users.lookup first to get it. Must be a real address the user provided or that resolves from the directory — NOT a placeholder like name@example.com or '[project lead email]'." },
+      { name: "to", type: "string", required: true, description: "Recipient's REAL email address, or MULTIPLE addresses as a comma-separated list / JSON array for a broadcast. If you only have a name/role, call users.lookup first to get it. Every address must be real — NOT a placeholder like name@example.com or '[project lead email]'." },
       { name: "subject", type: "string", required: true, description: "Email subject line (no Re: prefix unless replying)" },
       { name: "body", type: "string", required: true, description: "Email body in markdown — headings, bullets, links all rendered to HTML AND plaintext" },
       { name: "in_reply_to", type: "string", required: false, description: "Optional Message-ID of the message being replied to" },
+      { name: "attach_paths", type: "string", required: false, description: "Absolute file path(s) to attach — typically $step_N.matches.0.path from fs.find_in. Accepts a single path, a comma-separated list, or a JSON array. Files are read from disk and attached as-is (PDF/XLSX/DOCX/images/etc, 10MB total cap). Use this instead of inlining a document's content in the body." },
     ],
     handler: async (args) => {
       const { sendEmail, coerceEmailBody } = await import("./email.js");
-      const to = String(args.to ?? "").trim();
+      const { assertSafeExternalPath } = await import("./security-gates.js");
+      // `to` is a real string, an array (a resolved $step_N.path.*.field
+      // wildcard resolves to one), a JSON-array string, or comma-separated.
+      const to = parseFlexibleList(args.to);
       const subject = String(args.subject ?? "").trim();
       // Body may arrive as a prior step's result OBJECT, not a string — coerce
       // to readable markdown (pulls .answer/.text/etc.) instead of "[object Object]".
       const body = coerceEmailBody(args.body).trim();
       const inReplyTo = args.in_reply_to ? String(args.in_reply_to).trim() : undefined;
-      return await sendEmail({ to, subject, body, inReplyTo });
+      const attachPaths = parseFlexibleList(args.attach_paths);
+      // Same sensitive-path gate as fs.read_external/doc.ocr — an agent
+      // attaching a file must clear the same bar as one reading it.
+      for (const p of attachPaths) assertSafeExternalPath(p);
+      return await sendEmail({ to, subject, body, inReplyTo, attachPaths: attachPaths.length ? attachPaths : undefined });
     },
   },
   {
@@ -1847,12 +1907,18 @@ ${vaultHits.slice(0, 8).map(h => `- [[${h.path}]] (line ${h.line})`).join("\n") 
       { name: "answer", type: "string", required: true, description: "The draft answer to check" },
       { name: "sources", type: "string", required: false, description: "Optional sources/evidence text (comma-separated paths or free text)" },
       { name: "context", type: "string", required: false, description: "Optional framing for what the asker actually wanted (role, title/summary, deliverable intent). Lets the grader judge persona_fit and completeness against real intent instead of a terse task line." },
+      { name: "grounded", type: "boolean", required: false, description: "Whether grounding/citations are EXPECTED for this answer. Pass false for a direct conversational answer produced from the model's own knowledge (no retrieval) — the grader then won't treat missing citations as factuality risk and judges mainly on persona_fit. Defaults to the deliverable-class heuristic (research = grounded)." },
     ],
     handler: async (args) => {
       const task = String(args.task);
       const answer = String(args.answer);
       const sources = args.sources ? String(args.sources) : "";
       const context = args.context ? String(args.context) : "";
+      // Explicit ungrounded override: the caller knows this answer was produced
+      // WITHOUT retrieval (e.g. a Hermes/direct conversational answer). Missing
+      // citations are then expected, not a fault — so we don't let the research
+      // rubric inflate factuality_risk for uncited-but-correct prose.
+      const forceUngrounded = args.grounded === false;
 
       // Deterministic counts the grader uses to bound the LLM verdict.
       // Citations in this system come in three forms the synth is taught to
@@ -1891,12 +1957,18 @@ ${vaultHits.slice(0, 8).map(h => `- [[${h.path}]] (line ${h.line})`).join("\n") 
       // Classify against task + context: the context (title/summary/intent)
       // often carries the deliverable signal a terse task line omits.
       const deliverableClass = classifyDeliverable(context ? `${task}\n${context}` : task);
-      const citationApplies = deliverableClass === "research";
-      // For non-research deliverables, citation_coverage doesn't apply — floor
-      // it to 1.0 so it can't drag the score, and let persona_fit carry weight.
+      // Citations apply only for a research deliverable that's ALSO expected to
+      // be grounded. An explicit grounded:false override (conversational/direct
+      // answer) drops the citation gate even for a research-classified task.
+      const citationApplies = deliverableClass === "research" && !forceUngrounded;
+      // For non-research / ungrounded deliverables, citation_coverage doesn't
+      // apply — floor it to 1.0 so it can't drag the score, and let persona_fit
+      // carry weight.
       const effectiveFloor = citationApplies ? citationFloor : 1.0;
       const classNote =
-        deliverableClass === "creative"
+        forceUngrounded
+          ? `\n\nDELIVERABLE TYPE: direct conversational answer. The model answered from its OWN knowledge with NO retrieved sources — it is EXPECTED to carry NO citations. Report citation_coverage as 1.0 (not applicable). Do NOT raise factuality_risk for uncited claims; raise it ONLY for internal contradictions or clearly false / implausible statements. Judge mainly on persona_fit: did it directly and correctly answer the question in the requested tone and format?`
+        : deliverableClass === "creative"
           ? `\n\nDELIVERABLE TYPE: creative / marketing copy. This is aspirational product or marketing writing — it is EXPECTED to make forward-looking claims and carry NO citations. Do NOT raise factuality_risk for uncited or aspirational claims; raise it only for internal contradictions or clearly implausible statements. Report citation_coverage as 1.0 (not applicable). Judge mainly on persona_fit: tone, format adherence (e.g. requested bullet count), and persuasiveness.`
           : deliverableClass === "procedural"
           ? `\n\nDELIVERABLE TYPE: procedural / how-to / runbook. This draws on operational know-how, not external sources — it is EXPECTED to carry NO citations. Report citation_coverage as 1.0 (not applicable). Raise factuality_risk only for incorrect or unsafe steps. Judge mainly on persona_fit: completeness, correct ordering, and whether it honors the requested structure (e.g. number of steps).`
@@ -1940,6 +2012,11 @@ When you're uncertain about citation_coverage, lean higher when you see [N] or [
       // return a non-passing verdict rather than letting the QA gate hang.
       let raw: string = "";
       let timer: ReturnType<typeof setTimeout> | undefined;
+      // Wall cap tightened 300s → 120s (CLAWBOT_QUALITY_TIMEOUT_MS): with the
+      // extraction profile on the cheap cloud tier the grader answers in
+      // seconds, so anything past 2 min is a stall, not a slow grade. The
+      // 2026-07-03 reflection flagged 76s→171s doublings under the old cap.
+      const QUALITY_CAP_MS = Math.max(15_000, Number(process.env.CLAWBOT_QUALITY_TIMEOUT_MS ?? "120000"));
       try {
         raw = await Promise.race<string>([
           (async () => {
@@ -1951,9 +2028,17 @@ When you're uncertain about citation_coverage, lean higher when you see [N] or [
               return await ollamaGenerate(scorePrompt, sys + classNote + contextNote, { profile: undefined, maxTokens: 256, temperature: 0 });
             }
           })(),
-          new Promise<string>((_, rej) => { timer = setTimeout(() => rej(new Error("quality.check wall-time cap (300s) exceeded")), 300_000); }),
+          new Promise<string>((_, rej) => { timer = setTimeout(() => rej(new Error(`quality.check wall-time cap (${Math.round(QUALITY_CAP_MS / 1000)}s) exceeded`)), QUALITY_CAP_MS); }),
         ]);
       } catch (e: any) {
+        // Routine (non-research) deliverables fail OPEN on a grader stall: the
+        // check is advisory there, and a fail-closed verdict cascades into
+        // skill-draft + rescue re-synths that cost far more than the risk of
+        // an ungraded runbook. Research stays fail-closed — uncited claims
+        // slipping through is the exact failure the gate exists to catch.
+        if (deliverableClass !== "research") {
+          return { pass: true, factuality_risk: 0.3, citation_coverage: 1, persona_fit: 0.7, score: 0.7, issues: [`grader unavailable (${String(e?.message ?? e).slice(0, 100)}) — advisory pass for ${deliverableClass} deliverable`], deliverableClass, graderSkipped: true };
+        }
         return { pass: false, factuality_risk: 1, citation_coverage: 0, persona_fit: 0, score: 0, issues: [`scorer failed: ${String(e?.message ?? e).slice(0, 160)}`], deliverableClass };
       } finally {
         if (timer) clearTimeout(timer);
@@ -1976,12 +2061,25 @@ When you're uncertain about citation_coverage, lean higher when you see [N] or [
         // as "hallucinations"), so the rubric matches what was asked for.
         const score = citationApplies
           ? (1 - factualityRisk) * 0.4 + citationCoverage * 0.3 + personaFit * 0.3
-          : (1 - factualityRisk) * 0.3 + citationCoverage * 0.2 + personaFit * 0.5;
-        // Re-derive pass per class. Non-research drops the citation gate and
-        // relaxes the factuality threshold; persona_fit becomes the bar.
+          : forceUngrounded
+            ? (1 - factualityRisk) * 0.2 + personaFit * 0.8
+            : (1 - factualityRisk) * 0.3 + citationCoverage * 0.2 + personaFit * 0.5;
+        // Re-derive pass per class:
+        //  • research   — factuality + citations + persona_fit all gate.
+        //  • ungrounded (direct conversational, grounded:false) — persona_fit is
+        //    THE bar (did it answer correctly in the right shape). A small local
+        //    grader's factuality_risk on uncited prose is noisy: empirically it
+        //    parks CORRECT answers at ~0.7 (measured: a right burndown-chart
+        //    explanation and a stub both scored 0.7), while persona_fit cleanly
+        //    separates good (0.8+) from bad (<0.5) — including egregiously false
+        //    answers (persona_fit 0). So factuality is only a high safety catch
+        //    for egregious hallucination (>= 0.85), NOT the primary gate.
+        //  • creative/procedural/code — persona_fit-led, factuality relaxed.
         const pass = citationApplies
           ? (factualityRisk < 0.4 && citationCoverage > 0.4 && personaFit > 0.5)
-          : (factualityRisk < 0.5 && personaFit > 0.5);
+          : forceUngrounded
+            ? (personaFit > 0.5 && factualityRisk < 0.85)
+            : (factualityRisk < 0.5 && personaFit > 0.5);
         const issues = Array.isArray(parsed.issues) ? parsed.issues.slice(0, 6).map((s: any) => String(s).slice(0, 200)) : [];
         // If the floor lifted the verdict over the LLM's call, note that
         // openly so the operator can see when the deterministic guard fired.
@@ -2021,6 +2119,19 @@ When you're uncertain about citation_coverage, lean higher when you see [N] or [
       const high = findings.filter(f => f.severity === "high").length;
       const redacted = high > 0 ? redactHighSeverity(content, findings) : content;
       return { pass: high === 0, findings, redacted, kind };
+    },
+  },
+  {
+    name: "governance.check",
+    description: "Check a draft answer against the organization's accepted HARD governance constraints (extracted from uploaded policy docs under Governance). Returns { pass, violations }. Auto-injected after synthesis alongside quality.check/security.scan when any hard constraint has been reviewed and accepted — a no-op elsewhere.",
+    readonly: true,
+    args: [
+      { name: "content", type: "string", required: true, description: "The draft answer text to check" },
+    ],
+    handler: async (args) => {
+      const content = String(args.content);
+      const gate = checkContentAgainstGovernance(content);
+      return { pass: !gate.blocked, violations: gate.violations };
     },
   },
   {
@@ -2406,6 +2517,120 @@ When you're uncertain about citation_coverage, lean higher when you see [N] or [
     },
   },
   {
+    name: "data.list_datasets",
+    description: "List datasets published by the Intellinexus data pipeline. Returns [{ id, name, sector, source, recordCount, avgConfidence, rootHash, createdAt }]. These are the curated, hashed, golden-record datasets agents learn from — their RAG chunks are in the vault and surface via vault.search. Use this to discover what published data exists before answering a domain question.",
+    readonly: true,
+    args: [],
+    handler: async () => {
+      return {
+        datasets: listDatasets().map(d => ({
+          id: d.id, name: d.name, sector: d.sector, source: d.source,
+          recordCount: d.recordCount, avgConfidence: d.avgConfidence,
+          reviewQueue: d.reviewQueue, rootHash: d.rootHash, createdAt: d.createdAt,
+          fields: d.fields, outputs: d.outputs,
+        })),
+      };
+    },
+  },
+  {
+    name: "omnisignal.acquire",
+    description: "BASE RESEARCH TOOL. Acquire raw signal from many sources at once via Omnisignal (the Intellinexus pipeline's acquisition front-end) and get a merged, provenance-tagged record stream. Each source is a spec object: {kind:'web_search',query} | {kind:'web_page',urls:[...]} | {kind:'db',sourceLabel,query} | {kind:'local_file',path} | {kind:'vault',query}. Read-only — use to gather multi-source research before answering, or before publishing a dataset with omnisignal.publish.",
+    readonly: true,
+    args: [
+      { name: "sources", type: "string", required: true, description: "JSON array of source specs, e.g. '[{\"kind\":\"web_search\",\"query\":\"Zimbabwe mobile tariffs\"},{\"kind\":\"vault\",\"query\":\"pricing\"}]'." },
+    ],
+    handler: async (args) => {
+      let specs: OmniSpec[];
+      try {
+        const parsed = JSON.parse(String(args.sources ?? "[]"));
+        if (!Array.isArray(parsed)) return { error: "sources must be a JSON array of specs" };
+        specs = parsed;
+      } catch { return { error: "sources is not valid JSON" }; }
+      if (specs.length === 0) return { error: "provide at least one source spec" };
+      const result = await omniAcquire(specs);
+      return { total: result.total, report: result.report, records: result.records.slice(0, 200) };
+    },
+  },
+  {
+    name: "omnisignal.publish",
+    description: "BASE RESEARCH SYSTEM. Acquire from multiple sources via Omnisignal, then run the full Intellinexus pipeline and PUBLISH a dataset agents learn from (normalize → hash → score → HITL → golden record → CSV/JSONL/RAG). One call turns live multi-source research into a readied, hashed, deduplicated knowledge pack. Sources use the same spec shape as omnisignal.acquire.",
+    readonly: false,
+    args: [
+      { name: "name", type: "string", required: true, description: "Dataset name (becomes the knowledge-pack title)." },
+      { name: "sources", type: "string", required: true, description: "JSON array of source specs (see omnisignal.acquire)." },
+      { name: "sector", type: "string", required: false, description: "Optional sector tag." },
+      { name: "keyField", type: "string", required: false, description: "Field to merge duplicates on (entity resolution). Omit for hash-only dedup." },
+    ],
+    handler: async (args) => {
+      const name = String(args.name ?? "").trim();
+      if (!name) return { error: "name is required" };
+      let specs: OmniSpec[];
+      try {
+        const parsed = JSON.parse(String(args.sources ?? "[]"));
+        if (!Array.isArray(parsed)) return { error: "sources must be a JSON array of specs" };
+        specs = parsed;
+      } catch { return { error: "sources is not valid JSON" }; }
+      if (specs.length === 0) return { error: "provide at least one source spec" };
+      const out = await omniAcquirePublish(name, specs, {
+        sector: args.sector ? String(args.sector) : undefined,
+        keyField: args.keyField ? String(args.keyField) : undefined,
+      });
+      if (!out.published) return { published: false, note: out.note, report: out.acquisition.report };
+      const m = out.published.manifest;
+      return {
+        published: true, id: m.id, name: m.name, recordCount: m.recordCount, rawCount: m.rawCount,
+        avgConfidence: m.avgConfidence, reviewQueue: m.reviewQueue, rootHash: m.rootHash,
+        report: out.acquisition.report, outputs: m.outputs,
+      };
+    },
+  },
+  {
+    name: "data.publish",
+    description: "Run the Intellinexus data pipeline (normalize → cryptographic hash → confidence score → HITL gate → entity-resolution golden record → publish) and PUBLISH a dataset into the vault as ML CSV + knowledge-graph JSONL + RAG chunks + a knowledge-pack card. The dataset becomes a knowledge pack agents learn from. Provide rows either inline (rows = JSON array string) OR from a connected company data source (source = its label, query = SQL/JSON for that source).",
+    readonly: false,
+    args: [
+      { name: "name", type: "string", required: true, description: "Human name for the dataset (becomes the pack title)." },
+      { name: "rows", type: "string", required: false, description: "Inline records as a JSON array string, e.g. '[{\"name\":\"A\",\"value\":1}]'. Omit if using source+query." },
+      { name: "source", type: "string", required: false, description: "Label of a connected company data source to pull rows from (see db.list)." },
+      { name: "query", type: "string", required: false, description: "SQL (or the source's query syntax) to run against `source`. Read-only." },
+      { name: "sector", type: "string", required: false, description: "Optional sector tag (fintech, agriculture, health, etc.)." },
+      { name: "keyField", type: "string", required: false, description: "Field name used to merge duplicate rows into one golden record (entity resolution). Omit for hash-only dedup." },
+    ],
+    handler: async (args) => {
+      const name = String(args.name ?? "").trim();
+      if (!name) return { error: "name is required" };
+      let rows: Record<string, unknown>[] = [];
+      if (args.source && args.query) {
+        const src = getSourceByLabel(String(args.source));
+        if (!src) return { error: `no connected data source labelled "${args.source}" (see db.list)` };
+        const r = await runQuery(src, String(args.query), 5000);
+        rows = r.rows;
+      } else if (args.rows) {
+        try {
+          const parsed = JSON.parse(String(args.rows));
+          if (!Array.isArray(parsed)) return { error: "rows must be a JSON array" };
+          rows = parsed;
+        } catch { return { error: "rows is not valid JSON" }; }
+      } else {
+        return { error: "provide either rows (inline JSON array) or source+query" };
+      }
+      if (rows.length === 0) return { error: "no rows to publish" };
+      const { manifest } = publishDataset({
+        name,
+        records: rows,
+        sector: args.sector ? String(args.sector) : undefined,
+        source: args.source ? `data-source:${args.source}` : "agent-inline",
+        keyField: args.keyField ? String(args.keyField) : undefined,
+      });
+      return {
+        published: true, id: manifest.id, name: manifest.name,
+        recordCount: manifest.recordCount, rawCount: manifest.rawCount,
+        avgConfidence: manifest.avgConfidence, reviewQueue: manifest.reviewQueue,
+        rootHash: manifest.rootHash, outputs: manifest.outputs,
+      };
+    },
+  },
+  {
     name: "calendar.read_today",
     description: "Read today's events from an iCal feed (URL) or local .ics file. Returns [{ summary, start, end?, location?, description? }]. Source defaults to CLAWBOT_CALENDAR_ICAL_URL in env — pass `source` to override per call. Use as the first step of a daily-briefing skill or whenever the persona needs to know what's on the calendar.",
     readonly: true,
@@ -2568,6 +2793,93 @@ When you're uncertain about citation_coverage, lean higher when you see [N] or [
     },
   },
   {
+    name: "knowledge.graph_query",
+    description: "Build/update or query a local code+doc knowledge graph via the `graphify` CLI (github.com/Graphify-Labs/graphify) — turns a folder of code/docs into concepts + relationships you can query instead of grepping files. 'update' extracts/re-extracts the target folder into a graph (no LLM call, safe to re-run after edits — incremental). 'explain' returns a plain-language description of one concept and its neighbors. 'path' finds the shortest relationship path between two concepts. Requires the `graphify` CLI on PATH (uv tool install graphifyy).",
+    readonly: false,
+    args: [
+      { name: "action", type: "string", required: true, description: "'update' (build/refresh the graph for target_path), 'explain' (describe one node), or 'path' (shortest path between two nodes)" },
+      { name: "target_path", type: "string", required: true, description: "Absolute folder path to graph (for 'update') or the folder whose graphify-out/graph.json to query (for 'explain'/'path')" },
+      { name: "node", type: "string", required: false, description: "Concept/node name — required for 'explain'" },
+      { name: "node_a", type: "string", required: false, description: "Start node — required for 'path'" },
+      { name: "node_b", type: "string", required: false, description: "End node — required for 'path'" },
+    ],
+    handler: async (args) => {
+      const action = String(args.action ?? "").toLowerCase();
+      if (!["update", "explain", "path"].includes(action)) return { error: "action must be 'update', 'explain', or 'path'" };
+      const targetPath = String(args.target_path ?? "").trim();
+      if (!targetPath) return { error: "target_path is required" };
+      const { assertSafeExternalPath } = await import("./security-gates.js");
+      assertSafeExternalPath(targetPath);
+      const { spawn } = await import("node:child_process");
+      const bin = process.env.CLAWBOT_GRAPHIFY_BIN ?? "graphify";
+      let cliArgs: string[];
+      if (action === "update") {
+        cliArgs = ["update", targetPath];
+      } else if (action === "explain") {
+        const node = String(args.node ?? "").trim();
+        if (!node) return { error: "node is required for action 'explain'" };
+        cliArgs = ["explain", node, "--graph", `${targetPath}/graphify-out/graph.json`];
+      } else {
+        const nodeA = String(args.node_a ?? "").trim();
+        const nodeB = String(args.node_b ?? "").trim();
+        if (!nodeA || !nodeB) return { error: "node_a and node_b are required for action 'path'" };
+        cliArgs = ["path", nodeA, nodeB, "--graph", `${targetPath}/graphify-out/graph.json`];
+      }
+      const TIMEOUT_MS = action === "update" ? 120_000 : 20_000;
+      return await new Promise<any>((resolve) => {
+        const t0 = Date.now();
+        let proc: any;
+        try { proc = spawn(bin, cliArgs, { stdio: ["ignore", "pipe", "pipe"] }); }
+        catch (e: any) { resolve({ error: `graphify not runnable (${e.message}) — install with: uv tool install graphifyy` }); return; }
+        let stdout = ""; let stderr = "";
+        proc.stdout.on("data", (chunk: Buffer) => { stdout += chunk.toString("utf8"); if (stdout.length > 32_000) stdout = stdout.slice(0, 32_000); });
+        proc.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString("utf8"); if (stderr.length > 8_000) stderr = stderr.slice(0, 8_000); });
+        const timer = setTimeout(() => { try { proc.kill("SIGKILL"); } catch { /* already dead */ } }, TIMEOUT_MS);
+        proc.on("close", (code: number | null) => {
+          clearTimeout(timer);
+          resolve({ action, targetPath, exitCode: code, ok: code === 0, output: stdout.trim(), error: code === 0 ? undefined : (stderr.trim() || undefined), elapsedMs: Date.now() - t0 });
+        });
+        proc.on("error", (e: Error) => { clearTimeout(timer); resolve({ error: `graphify not runnable (${e.message}) — install with: uv tool install graphifyy` }); });
+      });
+    },
+  },
+  {
+    name: "browser.harness_exec",
+    description: "Run a short Python snippet against a REAL Chrome browser tab via browser-harness (github.com/browser-use/browser-harness) — CDP-level control: navigate, click by pixel coordinate, extract via JS, screenshot. Pre-imported helpers available in the snippet: new_tab(url) (use for FIRST navigation), ensure_real_tab(), page_info(), capture_screenshot(), click_at_xy(x,y), wait_for_load(), js(expr) for DOM extraction, cdp(\"Domain.method\", ...) for raw CDP. Use print(...) to return data — stdout is what comes back. Prefer this over web.interact when a site needs real browser rendering/login state the headless path can't reach. GATED: requires CLAWBOT_BROWSER_HARNESS=1 (off by default — executes arbitrary Python with live browser + network access; only enable in trusted environments). Requires local Chrome with chrome://inspect/#remote-debugging enabled (the harness will prompt on first use) OR `browser-harness auth login` for a cloud browser.",
+    readonly: false,
+    args: [
+      { name: "code", type: "string", required: true, description: "Python snippet to run. Helpers are pre-imported — do not import browser_harness yourself. End with print(...) to surface results." },
+      { name: "timeout_ms", type: "number", required: false, description: "Wall budget (default 45000, max 120000) — browser actions are slower than plain code.exec" },
+    ],
+    handler: async (args) => {
+      if (process.env.CLAWBOT_BROWSER_HARNESS !== "1") {
+        return { error: "browser.harness_exec disabled — set CLAWBOT_BROWSER_HARNESS=1 in clawbot/.env and restart to enable. This primitive runs arbitrary Python with live browser + network access; only enable in trusted environments." };
+      }
+      const code = String(args.code ?? "");
+      if (!code.trim()) return { error: "code is required" };
+      const timeoutMs = Math.min(120_000, Math.max(5_000, Number(args.timeout_ms ?? 45_000)));
+      const { spawn } = await import("node:child_process");
+      const bin = process.env.CLAWBOT_BROWSER_HARNESS_BIN ?? "browser-harness";
+      return await new Promise<any>((resolve) => {
+        const t0 = Date.now();
+        let proc: any;
+        try { proc = spawn(bin, [], { stdio: ["pipe", "pipe", "pipe"] }); }
+        catch (e: any) { resolve({ error: `browser-harness not runnable (${e.message}) — install with: uv tool install browser-harness` }); return; }
+        let stdout = ""; let stderr = "";
+        proc.stdout.on("data", (chunk: Buffer) => { stdout += chunk.toString("utf8"); if (stdout.length > 32_000) stdout = stdout.slice(0, 32_000); });
+        proc.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString("utf8"); if (stderr.length > 8_000) stderr = stderr.slice(0, 8_000); });
+        const timer = setTimeout(() => { try { proc.kill("SIGKILL"); } catch { /* already dead */ } }, timeoutMs);
+        proc.on("close", (code: number | null) => {
+          clearTimeout(timer);
+          resolve({ exitCode: code, ok: code === 0, output: stdout.trim(), error: code === 0 ? undefined : (stderr.trim() || undefined), elapsedMs: Date.now() - t0 });
+        });
+        proc.on("error", (e: Error) => { clearTimeout(timer); resolve({ error: `browser-harness not runnable (${e.message}) — install with: uv tool install browser-harness` }); });
+        proc.stdin.write(code);
+        proc.stdin.end();
+      });
+    },
+  },
+  {
     name: "memory.note",
     description: "Persist a single fact about a subject (a person, project, or topic) into the agent's long-term memory. Use to remember things like 'Priya prefers async over meetings', 'the auth migration is owned by Sam', 'the customer mentioned X budget'. Pass `date` (YYYY-MM-DD) for time-bound facts (a meeting, deadline, renewal) so they surface on that day's calendar plan. Stored at `_neuroworks/memory/<slug>.jsonl` and available to future sessions via `memory.recall`.",
     readonly: false,
@@ -2673,6 +2985,43 @@ When you're uncertain about citation_coverage, lean higher when you see [N] or [
     },
   },
   {
+    name: "human.request",
+    description: "PAUSE the task and ask the human operator for something the system genuinely cannot supply itself: missing internal information (figures, credentials, context not in the vault/connectors/databases), a decision or sign-off, a document only they hold, or an offline/physical action. The task parks in a waiting state; when the human responds, it automatically continues with their input. items is a JSON array of {\"type\":\"answer\"|\"upload\"|\"approval\"|\"action\",\"prompt\":\"exactly what you need and why\"}. Use ONLY after the catalog truly can't provide it — never to dodge doable work.",
+    readonly: true,
+    args: [
+      { name: "items", type: "string", required: true, description: "JSON array of typed asks, e.g. [{\"type\":\"answer\",\"prompt\":\"What is the approved Q3 budget ceiling (ZAR)?\"}]" },
+      { name: "reason", type: "string", required: false, description: "One sentence on why the system can't finish without this" },
+    ],
+    handler: async (args) => {
+      // Tolerant parsing — small planners emit the array as a string, an
+      // already-parsed array, or a single bare object. Anything unusable
+      // degrades to one generic "answer" item rather than failing the step
+      // (failing here would turn a legitimate pause into a task error).
+      const VALID = new Set(["answer", "upload", "approval", "action"]);
+      let raw: any = args.items;
+      if (typeof raw === "string") {
+        try { raw = JSON.parse(raw); } catch { raw = [{ type: "answer", prompt: String(args.items) }]; }
+      }
+      if (raw && !Array.isArray(raw) && typeof raw === "object") raw = [raw];
+      const items = (Array.isArray(raw) ? raw : [])
+        .map((it: any) => ({
+          type: VALID.has(String(it?.type)) ? String(it.type) : "answer",
+          prompt: String(it?.prompt ?? it?.question ?? it?.ask ?? "").trim(),
+        }))
+        .filter((it: any) => it.prompt.length > 0)
+        .slice(0, 10);
+      if (items.length === 0) items.push({ type: "answer", prompt: "Provide the missing information needed to finish this task." });
+      return {
+        humanRequest: {
+          items,
+          reason: typeof args.reason === "string" && args.reason.trim() ? args.reason.trim().slice(0, 300) : undefined,
+          requestedAt: new Date().toISOString(),
+        },
+        note: "task paused — waiting on the human operator",
+      };
+    },
+  },
+  {
     name: "integration.list",
     description: "List the external services the user has connected on the Integrations page (Slack, Telegram, Discord, GitHub, Notion, Linear, Google, etc.). Use to discover what channels/tools you can act on before reaching for slack.post / telegram.send / discord.post. Returns provider, label, and category — never secrets.",
     readonly: true,
@@ -2684,17 +3033,37 @@ When you're uncertain about citation_coverage, lean higher when you see [N] or [
   },
   {
     name: "slack.post",
-    description: "Post a message to the user's connected Slack (via the saved Incoming Webhook). Use to notify the user or a channel of a result/alert. Requires a Slack connection on the Integrations page.",
+    description: "Post a message to the user's connected Slack. Uses the Web API bot token (chat.postMessage) to a channel when configured — pass `channel` (id or #name) or rely on the connection's default channel — otherwise falls back to the saved Incoming Webhook. Requires a Slack connection on the Integrations page.",
     readonly: false,
-    args: [{ name: "text", type: "string", required: true, description: "Message text (Slack mrkdwn supported)" }],
+    args: [
+      { name: "text", type: "string", required: true, description: "Message text (Slack mrkdwn supported)" },
+      { name: "channel", type: "string", required: false, description: "Channel id (C0123…) or #name. Bot-token mode only; defaults to the connection's default channel." },
+    ],
     handler: async (args) => {
       const { getConnectionByProvider } = await import("./integrations.js");
       const conn = getConnectionByProvider("slack");
-      if (!conn?.secrets?.webhookUrl) return { error: "no Slack connection — add one on the Integrations page" };
+      if (!conn) return { error: "no Slack connection — add one on the Integrations page" };
       const text = String(args.text ?? "").trim();
       if (!text) return { error: "text is required" };
-      const r = await fetch(conn.secrets.webhookUrl, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text }) });
-      return r.ok ? { ok: true, posted: true, chars: text.length } : { error: `slack ${r.status}: ${(await r.text()).slice(0, 200)}` };
+      const botToken = conn.secrets?.botToken;
+      // Bot token → Web API chat.postMessage (needs a channel).
+      if (botToken) {
+        const channel = String(args.channel ?? conn.config?.defaultChannel ?? "").trim();
+        if (!channel) return { error: "bot-token Slack needs a channel — pass `channel` or set a default channel on the connection" };
+        const r = await fetch("https://slack.com/api/chat.postMessage", {
+          method: "POST",
+          headers: { authorization: `Bearer ${botToken}`, "content-type": "application/json; charset=utf-8" },
+          body: JSON.stringify({ channel, text }),
+        });
+        const j: any = await r.json().catch(() => ({}));
+        return j?.ok ? { ok: true, posted: true, channel: j.channel, ts: j.ts, chars: text.length } : { error: `slack ${j?.error ?? r.status}` };
+      }
+      // Fall back to Incoming Webhook.
+      if (conn.secrets?.webhookUrl) {
+        const r = await fetch(conn.secrets.webhookUrl, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text }) });
+        return r.ok ? { ok: true, posted: true, chars: text.length } : { error: `slack ${r.status}: ${(await r.text()).slice(0, 200)}` };
+      }
+      return { error: "Slack connection has neither a bot token nor a webhook URL" };
     },
   },
   {
@@ -2825,7 +3194,7 @@ When you're uncertain about citation_coverage, lean higher when you see [N] or [
       { name: "body", type: "string", required: false, description: "Request body as JSON (or a raw string). Only used for non-GET methods." },
     ],
     handler: async (args) => {
-      const { callConnector } = await import("./connectors.js");
+      const { callConnector, listConnectors } = await import("./connectors.js");
       // query/body may arrive as a real object (planner emitted JSON) or a
       // JSON string (LLM stringified it) — accept both.
       const coerce = (v: any): any => {
@@ -2834,12 +3203,44 @@ When you're uncertain about citation_coverage, lean higher when you see [N] or [
         return v;
       };
       const query = coerce(args.query);
-      const result = await callConnector(String(args.connector ?? ""), {
+      const connectorRef = String(args.connector ?? "");
+      let path = String(args.path ?? "");
+      let pathNote: string | undefined;
+      // Path resolution against the connector's DECLARED endpoints. Live
+      // orchestration testing showed agents guess paths from memory
+      // ("/dashboard") instead of reading the manifest ("/api/public/
+      // dashboard") and eat 404s. Resolve, in order: exact endpoint NAME,
+      // exact declared path, then a declared path whose tail matches the
+      // guess. Unknown paths still go through unchanged (some APIs have
+      // undeclared routes) — but a 404 now returns the declared endpoint
+      // list so the agent can self-correct in the next step.
+      let declared: { name: string; method: string; path: string }[] = [];
+      try {
+        const ref = connectorRef.toLowerCase();
+        const conn = listConnectors().find((c: any) => c.id === connectorRef || String(c.label ?? "").toLowerCase() === ref);
+        declared = (conn?.endpoints ?? []).map((e: any) => ({ name: String(e.name ?? ""), method: String(e.method ?? "GET"), path: String(e.path ?? "") }));
+        const guess = path.replace(/^\//, "").toLowerCase();
+        const byName = declared.find(e => e.name.toLowerCase() === guess || e.name.toLowerCase() === guess.replace(/[/ ]+/g, "-") || e.name.toLowerCase() === guess.replace(/[/ ]+/g, "_"));
+        const byPath = declared.find(e => e.path.replace(/^\//, "").toLowerCase() === guess);
+        const byTail = !byName && !byPath && guess.length >= 4
+          ? declared.find(e => e.path.toLowerCase().endsWith("/" + guess) || e.path.toLowerCase().endsWith(guess))
+          : undefined;
+        const hit = byName ?? byPath ?? byTail;
+        if (hit && hit.path && hit.path !== path) {
+          pathNote = `resolved "${path}" to the connector's declared endpoint ${hit.name} (${hit.path})`;
+          path = hit.path;
+        }
+      } catch { /* resolution is best-effort — fall through to the raw path */ }
+      const result: any = await callConnector(connectorRef, {
         method: args.method ? String(args.method) : "GET",
-        path: String(args.path ?? ""),
+        path,
         query: (query && typeof query === "object") ? query as Record<string, any> : undefined,
         body: coerce(args.body),
       });
+      if (pathNote && result && typeof result === "object") result.pathNote = pathNote;
+      if (result && typeof result === "object" && result.status === 404 && declared.length > 0) {
+        result.hint = `404 — "${path}" is not a declared endpoint on this connector. Declared endpoints: ${declared.slice(0, 12).map(e => `${e.name} (${e.method} ${e.path})`).join(", ")}. Retry with one of these paths.`;
+      }
       return result;
     },
   },
@@ -2863,6 +3264,66 @@ When you're uncertain about citation_coverage, lean higher when you see [N] or [
         const { createPaymentLink } = await import("./payments.js");
         const link = await createPaymentLink({ amount, description, currency: args.currency ? String(args.currency) : undefined });
         return { ok: true, url: link.url, amount: link.amount, currency: link.currency, description: link.description };
+      } catch (e: any) {
+        return { error: String(e?.message ?? e) };
+      }
+    },
+  },
+  {
+    name: "payment.paynow_link",
+    description: "Request a Paynow (Zimbabwe) payment for a client — EcoCash, OneMoney, card, or bank transfer. MONEY MOVES ONLY AFTER OPERATOR APPROVAL: this queues the payment on the Approvals page and returns { pendingApproval, approvalJobId }. Tell the user the payment is awaiting their approval — once they approve it, the payment link is created and appears in Reports (payment.paynow_poll checks it afterwards). Amount is in major units of the merchant account's currency. Requires Paynow configured (PAYNOW_INTEGRATION_ID/KEY).",
+    readonly: false,
+    args: [
+      { name: "amount", type: "number", required: true, description: "Amount in major units, e.g. 150.00" },
+      { name: "description", type: "string", required: true, description: "What the payment is for (shown to the payer)" },
+      { name: "reference", type: "string", required: false, description: "Unique reference (auto-generated when omitted)" },
+      { name: "email", type: "string", required: false, description: "Payer's email (Paynow auth email)" },
+    ],
+    handler: async (args) => {
+      const { config } = await import("../config.js");
+      if (!config.paynowEnabled) return { error: "Paynow not configured — set PAYNOW_INTEGRATION_ID and PAYNOW_INTEGRATION_KEY in .env" };
+      const amount = Number(args.amount);
+      if (!Number.isFinite(amount) || amount <= 0) return { error: "amount must be a positive number" };
+      const description = String(args.description ?? "").trim();
+      if (!description) return { error: "description is required" };
+      // Agent-initiated payments NEVER execute directly — they queue an
+      // awaiting-approval job the operator confirms on the Approvals page
+      // (the approve endpoint then creates the real Paynow payment). The
+      // operator's own Payments-page form still creates directly: a human
+      // clicking the button IS the approval.
+      const { newJob } = await import("./jobs.js");
+      const j = newJob("payments:paynow-approval");
+      j.status = "awaiting-approval";
+      j.requiresApproval = true;
+      j.template = "paynow-payment";
+      j.title = `Paynow payment — ${amount.toFixed(2)}: ${description.slice(0, 80)}`;
+      j.inputs = {
+        amount,
+        description,
+        reference: args.reference ? String(args.reference) : undefined,
+        email: args.email ? String(args.email) : undefined,
+      };
+      j.log.push(`[${new Date().toISOString()}] agent requested a Paynow payment — waiting for operator approval`);
+      return {
+        pendingApproval: true,
+        approvalJobId: j.id,
+        amount,
+        description,
+        note: "Payment queued for operator approval on the Approvals page. It will be created (and the pay link issued) only once approved — tell the user to approve it there.",
+      };
+    },
+  },
+  {
+    name: "payment.paynow_poll",
+    description: "Check the outcome of a Paynow payment created earlier with payment.paynow_link, using its pollUrl. Returns { status, paid } — status is one of Created/Sent/Cancelled/Failed/Paid/Awaiting Delivery/Delivered/Refunded.",
+    readonly: true,
+    args: [{ name: "pollUrl", type: "string", required: true, description: "The pollUrl returned by payment.paynow_link" }],
+    handler: async (args) => {
+      const { config } = await import("../config.js");
+      if (!config.paynowEnabled) return { error: "Paynow not configured" };
+      try {
+        const { pollPaynowStatus } = await import("./paynow.js");
+        return await pollPaynowStatus(String(args.pollUrl ?? ""));
       } catch (e: any) {
         return { error: String(e?.message ?? e) };
       }
@@ -2948,6 +3409,56 @@ When you're uncertain about citation_coverage, lean higher when you see [N] or [
       const prompt = String(args.prompt ?? "").trim();
       if (!prompt) return { error: "prompt is required" };
       return await minimaxMusic(prompt, { lyrics: args.lyrics ? String(args.lyrics) : undefined });
+    },
+  },
+  {
+    name: "media.avatar_video",
+    description: "Generate an AI avatar / spokesperson video (a presenter speaking your script) using HeyGen. Use for 'make a talking-head/explainer/presenter video', 'have an avatar read this announcement'. Async — a render can take a few minutes; this waits for it. Returns { videoUrl, videoId, avatarId, voiceId }. Pass avatarId/voiceId from media.avatars / media.voices, or omit to use the account defaults. Requires HEYGEN_API_KEY.",
+    readonly: false,
+    args: [
+      { name: "script", type: "string", required: true, description: "The words the avatar should say" },
+      { name: "avatar_id", type: "string", required: false, description: "HeyGen avatar id (from media.avatars); omit for the account default" },
+      { name: "voice_id", type: "string", required: false, description: "HeyGen voice id (from media.voices); omit for the account default" },
+      { name: "background", type: "string", required: false, description: "Optional solid background colour hex, e.g. #ffffff" },
+    ],
+    handler: async (args) => {
+      const { config } = await import("../config.js");
+      if (!config.heygenEnabled) return { error: "HeyGen not configured — add HEYGEN_API_KEY to enable avatar video generation." };
+      const script = String(args.script ?? "").trim();
+      if (!script) return { error: "script is required" };
+      const { heygenGenerateAndWait } = await import("./heygen.js");
+      return await heygenGenerateAndWait({
+        script,
+        avatarId: args.avatar_id ? String(args.avatar_id) : undefined,
+        voiceId: args.voice_id ? String(args.voice_id) : undefined,
+        background: args.background ? String(args.background) : undefined,
+      });
+    },
+  },
+  {
+    name: "media.avatars",
+    description: "List the HeyGen avatars available on the account (id + name) so you can pick one for media.avatar_video. Requires HEYGEN_API_KEY.",
+    readonly: true,
+    args: [],
+    handler: async () => {
+      const { config } = await import("../config.js");
+      if (!config.heygenEnabled) return { error: "HeyGen not configured — add HEYGEN_API_KEY." };
+      const { heygenListAvatars } = await import("./heygen.js");
+      const avatars = await heygenListAvatars();
+      return { avatars: avatars.map(a => ({ avatar_id: a.avatar_id, name: a.avatar_name, gender: a.gender })) };
+    },
+  },
+  {
+    name: "media.voices",
+    description: "List the HeyGen voices available (id + name + language) so you can pick one for media.avatar_video. Requires HEYGEN_API_KEY.",
+    readonly: true,
+    args: [],
+    handler: async () => {
+      const { config } = await import("../config.js");
+      if (!config.heygenEnabled) return { error: "HeyGen not configured — add HEYGEN_API_KEY." };
+      const { heygenListVoices } = await import("./heygen.js");
+      const voices = await heygenListVoices();
+      return { voices: voices.map(v => ({ voice_id: v.voice_id, name: v.name, language: v.language, gender: v.gender })) };
     },
   },
   {
@@ -3071,6 +3582,7 @@ export function humanStepLabel(tool: string, args: Record<string, any> = {}): st
     case "orchestration.plan": return "Orchestrating parallel sub-agents for this task";
     case "quality.check":      return "Quality-checking the draft";
     case "security.scan":      return s("kind") ? `Security-scanning the ${s("kind")}` : "Security-scanning the content";
+    case "governance.check":   return "Checking against governance policies";
     default:                   return tool;
   }
 }

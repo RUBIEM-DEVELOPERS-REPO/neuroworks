@@ -4,9 +4,25 @@ import { pollPeers } from "./peers.js";
 import { searchVault, searchVaultFilenames } from "./vault.js";
 import { suggestSkillsForIntent, suggestSkillsForTask, topSkillScoreForTask } from "./skills.js";
 import { config } from "../config.js";
+import { openrouterCircuitOpen, openrouterDailyQuotaExhausted, openrouterBillingExhausted } from "./openrouter.js";
 import { PLAN_SYSTEM, POLISHED_DIRECT, POLISHED_SYNTH, TRIVIAL_DIRECT } from "./agent-prompts.js";
 import { injectLanguagePrompt } from "./language-prompts.js";
 import { classifyDeliverable, taskWantsResearch } from "./deliverable.js";
+
+// Shared local-filesystem detector — "does this task point at a file on the
+// operator's PC?" Used at three points (the planner's system-prompt hint,
+// the post-plan repair step, and defaultVaultPlan's last-resort fallback)
+// so a task like "the doc called Summit Recon" is recognised consistently
+// everywhere instead of only where each site's own regex happened to be
+// broad enough. Was previously three independently-copied regexes that only
+// matched "file called/named X" — "doc called X" / "document called X" (an
+// extremely natural phrasing) matched NONE of them, so tasks phrased that
+// way skipped local search entirely and fell through to a useless
+// research.deep web search (2026-07-08 regression: "send an attachment doc
+// called Summit Recon CONSO..." never even looked at the filesystem).
+// Keep the "called/named" synonym list in sync with the (file|doc|document|
+// pdf|docx?|xlsx?|pptx?) set defaultVaultPlan's needle-stripper already uses.
+const LOCAL_FS_HINT_RE = /\b(downloads?|desktop|documents?|my\s+pc|my\s+computer|on\s+disk|local\s+file|(?:file|doc|document|pdf|docx?|xlsx?|pptx?)\s+(?:called|named))\b/i;
 
 // Parse the "Interpretation: intent=foo, target=..." line that chat.ts
 // appends to enriched tasks. Returns the intent label when present, or
@@ -33,15 +49,21 @@ export function parseUserRequestFromTask(task: string): string {
   //    text in via "${activeTemplate.task}\n\nTopic: ${topic}" — without this
   //    extraction the planner sees the full template prose as the topic
   //    (cause of the 5-min "whats the hanta virus" research run).
-  const topicMatch = task.match(/(?:^|\n)\s*Topic:\s*([\s\S]+?)(?:\n\nInterpretation:|\n\nDeliverable shape:|$)/i);
+  const topicMatch = task.match(/(?:^|\n)\s*Topic:\s*([\s\S]+?)(?:\n\nInterpretation:|\n\nDeliverable shape:|\n\n\*\*Alignment check|\n\n\*\*Source-of-truth notice|$)/i);
   if (topicMatch && topicMatch[1].trim().length > 0) return topicMatch[1].trim().slice(0, 400);
   // 2. Thread-context block.
-  const m = task.match(/Current request \(.*?\):\s*([\s\S]*?)(?:\n\nInterpretation:|\n\nDeliverable shape:|$)/);
+  const m = task.match(/Current request \(.*?\):\s*([\s\S]*?)(?:\n\nInterpretation:|\n\nDeliverable shape:|\n\n\*\*Alignment check|\n\n\*\*Source-of-truth notice|$)/);
   if (m && m[1].trim().length > 0) return m[1].trim().slice(0, 400);
-  // 3. Plain enriched task — strip wrappers and return the body.
+  // 3. Plain enriched task — strip wrappers and return the body. The
+  //    Alignment-check / Source-of-truth blocks are planner directives chat.ts
+  //    appends AFTER the user's text — without stripping them here they leak
+  //    into customer-facing surfaces (a rescue-summary email once opened with
+  //    "…in an email to X **Alignment check — required before responding…**").
   return task
     .replace(/\n*Interpretation:[\s\S]*$/i, "")
     .replace(/\n*Deliverable shape:[\s\S]*$/i, "")
+    .replace(/\n*\*?\*?Alignment check — required[\s\S]*$/i, "")
+    .replace(/\n*\*?\*?Source-of-truth notice\.?\*?\*?[\s\S]*$/i, "")
     .replace(/^\(You are operating as[^)]+\)\n+/, "")
     .trim()
     .slice(0, 400);
@@ -85,11 +107,33 @@ export type SecurityScan = {
   kind?: string;
 };
 
+// Structured "I need a human" ask — the heart of the hybrid-workforce loop.
+// When a plan reaches a human.request step (or the active hire is a human
+// worker), the task PAUSES instead of failing: the job lands in
+// waiting_on_human with this shape attached, the Tasks page renders each
+// item as an input the operator can answer, and POST /api/tasks/:id/human-input
+// spins the continuation job with the answers injected.
+export type HumanRequestItem = {
+  type: "answer" | "upload" | "approval" | "action";
+  prompt: string;
+};
+export type HumanRequest = {
+  items: HumanRequestItem[];
+  reason?: string;
+  requestedAt: string;
+  // Stamped by the resume endpoint once the operator responds — a request
+  // with resolvedAt set no longer shows in the waiting queue.
+  resolvedAt?: string;
+};
+
 export type AgentResult = {
   task: string;
   plan: Plan;
   runs: StepRun[];
   answer: string;
+  // Present when the run paused on a human.request step — the caller (runJob)
+  // parks the job in waiting_on_human instead of marking it succeeded.
+  humanRequest?: HumanRequest;
   // Streamed partial answer surfaced during synthesis. Replaced by the final
   // `answer` once synthesis completes; the UI prefers `answer` when present.
   partialAnswer?: string;
@@ -176,7 +220,7 @@ export function detectResearchSignals(text: string): string | null {
 // it isn't, the fallback is faster than waiting any longer.
 const PLAN_TIMEOUT_MS = Number(process.env.CLAWBOT_PLAN_TIMEOUT_MS ?? "18000");
 
-export async function plan(task: string, _personaSystemSuffix?: string, push?: (msg: string) => void): Promise<Plan> {
+export async function plan(task: string, _personaSystemSuffix?: string, push?: (msg: string) => void, workMode?: "agent" | "hybrid" | "human"): Promise<Plan> {
   // Persona deliberately omitted from the TOOL CHOICE prompt: tool selection
   // is mechanical and must not be gated by role. (Head of AI asking about
   // NeuroWorks is still allowed to search the vault.) The persona colors the
@@ -262,7 +306,7 @@ export async function plan(task: string, _personaSystemSuffix?: string, push?: (
   // planner often picks research.deep, then narrates a fabricated "I
   // searched your Downloads" answer.
   let localFsContext = "";
-  if (/\b(downloads?|desktop|documents?|my\s+pc|my\s+computer|on\s+disk|local\s+file|file\s+(called|named))\b/i.test(task)) {
+  if (LOCAL_FS_HINT_RE.test(task)) {
     localFsContext = `\n\nLocal filesystem context: the task mentions a file on the operator's PC (Downloads / Desktop / Documents / "my PC"). The FIRST step MUST be fs.find_in with folder='downloads'|'desktop'|'documents'|'all' and the filename substring. Do NOT use research.deep — it cannot see the operator's local filesystem. Chain fs.read_external (for the absolute path returned) or fs.import_to_vault afterward as the task requires.\n`;
   }
   // Email-send hint — when the task is about sending email, use the
@@ -312,8 +356,31 @@ export async function plan(task: string, _personaSystemSuffix?: string, push?: (
   } else if (recallRe.test(task)) {
     memoryContext = `\n\nMemory-recall context: the task asks what the agent REMEMBERS / has on file about something. The FIRST step MUST be memory.search with {query: "<the key terms — the entity/topic the user named>"} (NOT research.deep / vault.search — durable facts live in _neuroworks/memory, which those tools do not read). If the user named an exact subject stored before, memory.recall {subject} is more precise. Synthesise the answer from the returned facts; if none are found, say so plainly rather than inventing.\n`;
   }
+  // Complexity fan-out hint: big or multi-part tasks should be decomposed into
+  // PARALLEL sub-agents, not one serial chain. The executor already runs
+  // independent steps as concurrent sub-agents (waves + dual-lane budgets) —
+  // but only if the planner actually emits independent steps. Small planners
+  // default to serial chains, leaving that speed on the table. Signals:
+  // multi-part phrasing (numbered items, "and also", semicolons), several
+  // deliverable verbs, or simply a long brief.
+  const partSignals =
+    (task.match(/(?:^|\n)\s*(?:\d+[.)]|[-•*])\s+/g)?.length ?? 0) +
+    (task.match(/\b(?:and (?:also|then)|as well as|plus|additionally)\b|;/gi)?.length ?? 0);
+  const verbSignals = (task.match(/\b(?:research|compare|summari[sz]e|draft|analy[sz]e|list|find|gather|review|check|prepare|compile)\b/gi)?.length ?? 0);
+  const looksComplex = task.length > 400 || partSignals >= 2 || verbSignals >= 3;
+  const fanOutContext = looksComplex
+    ? `\n\nComplex task — FAN OUT: this task has multiple parts. Decompose the information-gathering into 3-6 INDEPENDENT steps with NO $step_ references between them (each becomes a parallel sub-agent — e.g. research.deep on distinct sub-topics, vault.search, connector.call, db.query side by side), then ONE final synthesis step that references their outputs. Parallel sub-agents finish far faster than a serial chain; only chain steps that genuinely need an earlier step's output.\n`
+    : "";
+  // Hybrid-hire hint: this role is agent + human. The planner should lean on
+  // human.request for anything the catalog genuinely can't supply (internal
+  // decisions, offline actions, documents only the person holds) instead of
+  // guessing or producing a thin answer. Pure-agent roles get no hint — for
+  // them human.request stays a last resort per the base PLAN_SYSTEM rule.
+  const workModeContext = workMode === "hybrid"
+    ? `\n\nHybrid role context: this hire is part agent, part human. Split the work deliberately — plan agent steps for everything the catalog can do, and add ONE human.request step (with typed items) for the parts that genuinely need the person: internal figures not in the vault/connectors/databases, judgment calls, sign-offs, offline actions, or documents only they hold. Do NOT fabricate content to avoid asking.\n`
+    : "";
   // Compact catalog: ~40% smaller prompt → faster planning on small models.
-  const sys = injectLanguagePrompt(PLAN_SYSTEM, "plan") + primitivesPromptCatalog({ compact: true }) + vaultContext + researchContext + companyDataContext + localFsContext + emailContext + activityContext + memoryContext + explicitToolContext;
+  const sys = injectLanguagePrompt(PLAN_SYSTEM, "plan") + primitivesPromptCatalog({ compact: true }) + vaultContext + researchContext + companyDataContext + localFsContext + emailContext + activityContext + memoryContext + explicitToolContext + workModeContext + fanOutContext;
 
 
   // Race the planner LLM call against PLAN_TIMEOUT_MS. If the LLM stalls,
@@ -452,7 +519,10 @@ const TRANSIENT_ERROR_RE = /\b(?:ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|fetch 
 // retry these (the next attempt will fail the same way) but we ALSO don't
 // abort the whole plan: the wave-level check decides whether to continue.
 const FATAL_ERROR_RE = /\b(?:401|403|model not found|model not pulled|API key|invalid_request_error|insufficient_quota)\b/i;
-const STEP_RETRY_BACKOFF_MS = [1500, 4000]; // two retries: 1.5s, then 4s
+// Three retries: 1.5s, 4s, 8s. Was two — the 2026-07-03 reflection found 4 of
+// 5 "fetch failed" general-task failures looked transient enough that one
+// more, longer-spaced attempt would likely have recovered them.
+const STEP_RETRY_BACKOFF_MS = [1500, 4000, 8000];
 
 export async function executePlan(p: Plan, push: (msg: string) => void, onProgress?: (runs: StepRun[]) => void): Promise<{ runs: StepRun[]; hadWrites: boolean; budgets?: { llm: number; io: number; idlePeers: number }; subagentTimings?: { wave: number; elapsedMs: number; ioCount: number; llmCount: number }[] }> {
   const runs: StepRun[] = p.steps.map(step => ({ step, ok: false, durationMs: 0 }));
@@ -491,6 +561,36 @@ export async function executePlan(p: Plan, push: (msg: string) => void, onProgre
     runs[i] = { step, ok: false, durationMs: 0, startedAt: Date.now() };
     onProgress?.([...runs]);
     const t0 = Date.now();
+
+    // Governance gate — runs BEFORE the tool call, only for side-effecting
+    // tools (email.send, vault.write, github.*, webhook/chat posts, payments,
+    // db.write, code.exec — see CONSEQUENTIAL_TOOLS). Checks the step's
+    // resolved args against accepted+reviewed HARD constraints extracted from
+    // policy docs under Governance. This is the actual enforcement point —
+    // the governance system-prompt prefix (see loadGovernancePrefix above)
+    // only ever asked the model nicely not to violate a policy; this blocks
+    // the tool call outright when a hard constraint matches, same failure
+    // mode as the org-policy incident this was built to prevent (an accepted
+    // "never email outside the finance domain" rule sitting inert in the
+    // review UI while email.send fired anyway). Wrapped in try/catch and
+    // fails OPEN on any internal error — governance must never be the reason
+    // an unrelated task breaks.
+    try {
+      const { checkStepAgainstGovernance } = await import("./governance.js");
+      const gate = checkStepAgainstGovernance(step.tool, args);
+      if (gate.blocked) {
+        const reason = gate.violations.map(v => `"${v.rule}" (policy: ${v.policyName})`).join("; ");
+        const msg = `Blocked by governance policy — ${reason}`;
+        runs[i] = { step, ok: false, error: msg, durationMs: Date.now() - t0, startedAt: t0 };
+        push(`  ⛔ ${step.label ?? step.tool}: ${msg}`);
+        onProgress?.([...runs]);
+        try {
+          const { logAudit } = await import("./audit-log.js");
+          logAudit({ level: "warn", actor: "governance", action: "governance.block_step", target: step.tool, detail: reason.slice(0, 200), result: "failure" });
+        } catch { /* audit is best-effort */ }
+        return;
+      }
+    } catch { /* governance is non-fatal — never block a task on its own failure */ }
     let attempt = 0;
     while (true) {
       try {
@@ -500,6 +600,15 @@ export async function executePlan(p: Plan, push: (msg: string) => void, onProgre
         const modelUsed = result && typeof result === "object" && "model" in result ? String((result as any).model) : undefined;
         runs[i] = { step, ok: true, result, durationMs: Date.now() - t0, startedAt: t0, modelUsed };
         onProgress?.([...runs]);
+        // A human.request step means the plan cannot proceed without the
+        // operator — stop launching later waves. The caller detects the
+        // request in the runs and parks the job in waiting_on_human; the
+        // remaining work happens in the continuation job once the human
+        // supplies what's needed.
+        if (step.tool === "human.request") {
+          aborted = true;
+          push(`⏸ Pausing here — this task needs input from you before the remaining steps can run.`);
+        }
         return;
       } catch (e: any) {
         const msg = String(e.message ?? e);
@@ -739,12 +848,53 @@ TOOLS examples: anything mentioning "my vault/notes/brain", repo names, file pat
   } catch { return false; }
 }
 
+// Pull the structured human ask out of a finished run list. The human.request
+// primitive returns { humanRequest } as its result; the LAST successful one
+// wins (there's normally only one — the executor aborts the plan on it).
+function extractHumanRequest(runs: StepRun[]): HumanRequest | undefined {
+  for (let i = runs.length - 1; i >= 0; i--) {
+    const r = runs[i];
+    if (r.ok && r.step.tool === "human.request" && r.result && typeof r.result === "object") {
+      const hr = (r.result as any).humanRequest;
+      if (hr && Array.isArray(hr.items) && hr.items.length > 0) return hr as HumanRequest;
+    }
+  }
+  return undefined;
+}
+
+// The customer-facing text shown while a task waits on its human. Kept short —
+// the structured items render as real input fields in the Tasks page; this is
+// just the narrative line above them.
+function humanWaitAnswer(hr: HumanRequest): string {
+  const lines = [
+    `⏸ **Waiting on you** — I've done what I can on my side. To finish this task I need:`,
+    "",
+    ...hr.items.map((it, i) => `${i + 1}. ${it.prompt}${it.type !== "answer" ? ` _(${it.type})_` : ""}`),
+  ];
+  if (hr.reason) lines.push("", `Why: ${hr.reason}`);
+  lines.push("", `Reply on the Tasks page (or re-run this task with the missing details) and I'll pick up where I left off.`);
+  return lines.join("\n");
+}
+
 export async function planAndExecute(
   task: string,
   push: (msg: string) => void,
   onProgress?: (patch: Partial<AgentResult> & { phase?: string }) => void,
-  opts: { personaSystemSuffix?: string; autoReview?: boolean; preplan?: Plan } = {},
+  opts: { personaSystemSuffix?: string; autoReview?: boolean; preplan?: Plan; workMode?: "agent" | "hybrid" | "human" } = {},
 ): Promise<AgentResult> {
+  // Human-worker gate: a hire whose workMode is "human" doesn't get an agent
+  // loop at all — the task is logged, parked in waiting_on_human, and the
+  // person does the work. The system's job here is tracking (who owes what,
+  // for how long), not doing.
+  if (opts.workMode === "human") {
+    const hr: HumanRequest = {
+      items: [{ type: "action", prompt: `Complete this task and report back with the outcome or deliverable: ${parseUserRequestFromTask(task).slice(0, 600)}` }],
+      reason: "This role is staffed by a human worker — the system tracks the work; a person performs it.",
+      requestedAt: new Date().toISOString(),
+    };
+    push(`This hire is a human worker — parking the task in the waiting queue instead of running the agent loop.`);
+    return { task, plan: { steps: [] }, runs: [], answer: humanWaitAnswer(hr), hadWrites: false, humanRequest: hr };
+  }
   // CRITICAL: every heuristic below MUST run against the bare user text, not
   // the enriched task (which is prefixed with persona framing + thread
   // context + interpretation/deliverable blocks). Otherwise:
@@ -805,6 +955,10 @@ export async function planAndExecute(
       runsBuffer.splice(0, runsBuffer.length, ...rs);
       onProgress?.({ runs: [...rs] });
     });
+    const preplanHumanReq = extractHumanRequest(runs);
+    if (preplanHumanReq) {
+      return { task, plan: p, runs, answer: humanWaitAnswer(preplanHumanReq), hadWrites, humanRequest: preplanHumanReq };
+    }
     onProgress?.({ phase: "synthesizing", runs });
     const synth = await synthesize(task, p, runs, opts.personaSystemSuffix, (partial) => {
       onProgress?.({ partialAnswer: partial });
@@ -820,9 +974,15 @@ export async function planAndExecute(
   // signals ("latest", "search", "our docs", a URL) — those mean the user
   // wants grounding — and never override a template-driven run.
   const deliverableClass = classifyDeliverable(bareTask);
+  // A task that literally names a registered tool must NEVER shortcut to a
+  // toolless direct answer — "Create a Paynow payment … using the
+  // payment.paynow_link tool" classified as creative and got a prose reply
+  // instead of the payment (caught live 2026-07-04).
+  const namesRegisteredTool = primitives.some(pr => new RegExp(`\\b${pr.name.replace(/\./g, "\\.")}\\b`).test(bareTask));
   const forceDirect = !fromTemplate
     && !memoryIntent
     && !briefingIntent
+    && !namesRegisteredTool
     && (deliverableClass === "creative" || deliverableClass === "procedural")
     && !taskWantsResearch(bareTask);
   if (forceDirect) {
@@ -972,7 +1132,10 @@ export async function planAndExecute(
           const sIntent = parseIntentFromTask(task);
           const sBare = parseUserRequestFromTask(task);
           const sTop = topSkillScoreForTask(sBare, sIntent);
-          if (sTop && sTop.score >= 15) {
+          // 20+ means intent + keyword AGREE on the skill. 15-19 is a
+          // keyword-only match — the 07-03 reflection found that tier too weak
+          // a trigger (wrong playbook applied more often than it helped).
+          if (sTop && sTop.score >= 20) {
             const sk = suggestSkillsForTask(sBare, sIntent, 1);
             if (sk.length > 0) {
               directSkillName = sk[0].name;
@@ -1110,7 +1273,7 @@ export async function planAndExecute(
     push(`Recognised the shape — ${tier}, ${p.steps.length} step${p.steps.length === 1 ? "" : "s"}.`);
   } else {
     push(`Thinking about the best approach…`);
-    p = await plan(task, opts.personaSystemSuffix, push);
+    p = await plan(task, opts.personaSystemSuffix, push, opts.workMode);
   }
   if (p.steps.length === 0) {
     // Vault-first fallback uses bareTask so extractTopic doesn't fold the
@@ -1128,7 +1291,7 @@ export async function planAndExecute(
   // vault.* step, swap the first research.deep / web.* step for a
   // proper local-fs chain. Idempotent: skipped when the planner already
   // included fs.find_in / fs.read_external.
-  const localFsTaskHint = bareTask.match(/\b(downloads?|desktop|documents?|my\s+pc|my\s+computer|on\s+disk|local\s+file|file\s+(called|named))\b/i);
+  const localFsTaskHint = bareTask.match(LOCAL_FS_HINT_RE);
   if (localFsTaskHint) {
     const planTools = new Set(p.steps.map(s => s.tool));
     const hasLocalFs = ["fs.find_in", "fs.read_external", "fs.list_external"].some(t => planTools.has(t));
@@ -1148,6 +1311,16 @@ export async function planAndExecute(
 
   const { runs, hadWrites, budgets, subagentTimings } = await executePlan(p, push, (runs) => onProgress?.({ runs: [...runs] }));
   if (budgets) onProgress?.({ budgets, subagentTimings });
+
+  // Human-in-the-loop pause: the plan hit a human.request step, so the rest of
+  // the work belongs to the operator. Skip synthesis + QA entirely (there's no
+  // finished deliverable to grade) and hand back the structured ask — runJob
+  // parks the job in waiting_on_human and the Tasks page renders the items.
+  const humanReq = extractHumanRequest(runs);
+  if (humanReq) {
+    onProgress?.({ phase: "waiting_on_human", runs });
+    return { task, plan: p, runs, answer: humanWaitAnswer(humanReq), hadWrites, humanRequest: humanReq };
+  }
 
   // Synthesize a chat-friendly answer from the step results. Stream tokens as
   // they arrive into job.result.partialAnswer so the UI can render the answer
@@ -1195,13 +1368,28 @@ export async function planAndExecute(
   // Passing the same numbered evidence the synth saw makes the score meaningful.
   const evidenceForQA = buildEvidenceCatalog(runs);
 
+  // Only add governance.check to the QA wave when there's actually an
+  // accepted+reviewed HARD constraint to check against — most installs never
+  // touch Governance, so this stays a silent no-op cost for them instead of
+  // an extra step on every single task.
+  let govActive = false;
+  try {
+    const { hasEnforceableConstraints } = await import("./governance.js");
+    govActive = hasEnforceableConstraints();
+  } catch { /* governance is non-fatal */ }
+
   if (wantQA && !trivialTask && !skipQAForExplainer) {
     onProgress?.({ phase: "reviewing", runs });
-    // ---- Phase A: quality + security (parallel) ----
+    // ---- Phase A: quality + security (+ governance when active), parallel ----
     const phaseASteps: PlanStep[] = [
       {
         tool: "quality.check",
-        args: { task, answer: synth.answer, sources: evidenceForQA },
+        // Task-aligned grading: grounded when we actually gathered evidence OR
+        // the task explicitly asked for sources/current/company data. An
+        // evidence-less direct answer to a knowledge question is graded as
+        // ungrounded (persona_fit-led) so the research rubric doesn't inflate
+        // factuality_risk on correct-but-uncited prose. Mirrors the Hermes gate.
+        args: { task, answer: synth.answer, sources: evidenceForQA, grounded: evidenceForQA.trim().length > 0 || taskWantsResearch(task) },
         rationale: "auto-injected: score factuality, citation coverage, persona fit (evidence-aware)",
         label: humanStepLabel("quality.check", {}),
       },
@@ -1212,7 +1400,15 @@ export async function planAndExecute(
         label: humanStepLabel("security.scan", { kind: "note" }),
       },
     ];
-    push(`Reviewing the draft — running quality and security checks in parallel.`);
+    if (govActive) {
+      phaseASteps.push({
+        tool: "governance.check",
+        args: { content: synth.answer },
+        rationale: "auto-injected: check answer against accepted hard governance constraints",
+        label: humanStepLabel("governance.check", {}),
+      });
+    }
+    push(`Reviewing the draft — running quality${govActive ? ", security, and governance checks" : " and security checks"} in parallel.`);
     const baseIdxA = p.steps.length;
     const waveA = phaseASteps.map((_, i) => baseIdxA + i);
     p.steps.push(...phaseASteps);
@@ -1265,9 +1461,30 @@ export async function planAndExecute(
   const reviewRun = runs.find(r => r.step.tool === "peer.review" && r.ok);
   const qualityRun = runs.find(r => r.step.tool === "quality.check" && r.ok);
   const securityRun = runs.find(r => r.step.tool === "security.scan" && r.ok);
+  const governanceRun = runs.find(r => r.step.tool === "governance.check" && r.ok);
   const review = reviewRun?.result ? coerceReview(reviewRun.result) : undefined;
   let quality: any = qualityRun?.result;
   const security = securityRun?.result;
+  const governance: any = governanceRun?.result;
+
+  // Governance enforcement — a hard-constraint violation on the FINAL answer
+  // text withholds delivery and replaces the answer with a refusal that
+  // names the specific policy, mirroring the instruction the governance
+  // system-prompt prefix already gives the model ("when you decline, name
+  // the specific policy you're honoring") — except this is enforced
+  // deterministically after the fact rather than hoped-for at generation
+  // time. No rescue/re-synth attempt: unlike a quality miss, a policy
+  // violation isn't something a retry fixes, since the underlying request is
+  // what's disallowed.
+  if (governance && governance.pass === false) {
+    const names = (governance.violations ?? []).map((v: any) => `"${v.rule}" (${v.policyName})`).slice(0, 3).join("; ");
+    push(`⛔ Governance policy blocked this answer: ${names}`);
+    synth.answer = `I can't deliver this answer as drafted — it conflicts with an organizational policy: ${names}. If this constraint shouldn't apply here, an admin can review it on the Governance page.`;
+    try {
+      const { logAudit } = await import("./audit-log.js");
+      logAudit({ level: "warn", actor: "governance", action: "governance.block_answer", target: "answer", detail: names.slice(0, 200), result: "failure" });
+    } catch { /* audit is best-effort */ }
+  }
 
   // SKILL-ACQUISITION RESCUE (first-tier, cheap): if quality.check failed AND
   // no matching skill exists for the detected intent, the agent draft-writes
@@ -1320,7 +1537,8 @@ export async function planAndExecute(
                 try {
                   const checkTool = findPrimitive("quality.check");
                   if (checkTool) {
-                    const rq: any = await checkTool.handler({ task, answer: rescue.answer, sources: buildEvidenceCatalog(runs) });
+                    const rescueEvidence = buildEvidenceCatalog(runs);
+                    const rq: any = await checkTool.handler({ task, answer: rescue.answer, sources: rescueEvidence, grounded: rescueEvidence.trim().length > 0 || taskWantsResearch(task) });
                     const rs = rq?.score ?? 0;
                     const os = quality?.score ?? 0;
                     if (rs > os) {
@@ -1365,7 +1583,7 @@ export async function planAndExecute(
         try {
           const checkTool = findPrimitive("quality.check");
           if (checkTool) {
-            const rescueQuality: any = await checkTool.handler({ task, answer: rescue.answer });
+            const rescueQuality: any = await checkTool.handler({ task, answer: rescue.answer, sources: buildEvidenceCatalog(runs), grounded: buildEvidenceCatalog(runs).trim().length > 0 || taskWantsResearch(task) });
             const rescueScore = rescueQuality?.score ?? 0;
             const originalScore = quality?.score ?? 0;
             if (rescueScore > originalScore) {
@@ -1521,7 +1739,7 @@ export function extractTopic(task: string): string {
     // neuroworks" as the topic, which then routed a literal web
     // search that hit Slovak-language sites matching "my".
     .replace(/^what\s+(?:my\s+(?:vault|notes?|brain|second\s+brain|knowledge|repo|repos?|files?|docs?|inbox)|the\s+(?:vault|repo|inbox)|we|i|you)\s+(?:says?|has|have|knows?|got|contain|contains|covers?|mentions?)\s+(?:about\s+|on\s+|of\s+|regarding\s+)?/i, "")
-    // Drafting verbs: "draft an AIIA Reference Letter" → "AIIA Reference
+    // Drafting verbs: "draft an Aiia Reference Letter" → "Aiia Reference
     // Letter". Without this strip, the triage vault check searches for the
     // verb-prefixed phrase ("draft aiia reference letter") and gets zero
     // hits — letting the direct-answer path hallucinate the meaning of
@@ -1765,7 +1983,7 @@ export function heuristicPlan(task: string, opts: { hasAttachments?: boolean } =
   }
 
   // Local-file lookup WITH an explicit folder hint: "check/look/find/search in
-  // my downloads for X" / "look in my desktop for X" / "open the AIIA letter
+  // my downloads for X" / "look in my desktop for X" / "open the Aiia letter
   // in my documents" — etc.
   // Routes to fs.find_in + fs.read_external so PDFs/DOCXs run through the
   // doc-extractor cleanly. Chained via $step_0 reference so a single match
@@ -1774,7 +1992,7 @@ export function heuristicPlan(task: string, opts: { hasAttachments?: boolean } =
   //
   // CRITICAL: matches BEFORE the URL/research patterns so the LLM planner
   // never sees this shape (the previous behaviour was a 3-minute web research
-  // run for "check my downloads for AIIA Reference Letter").
+  // run for "check my downloads for Aiia Reference Letter").
   // TWO shapes supported:
   //   (A) folder-first: "find in my downloads for X" / "look in my desktop X"
   //   (B) name-first:   "find X in my downloads" / "look for X in my desktop"
@@ -2050,7 +2268,7 @@ export function heuristicPlan(task: string, opts: { hasAttachments?: boolean } =
 
   // "draft / write / compose / create a [doc type] for/about X" — grounded
   // synthesis. Was previously a bare ollama.generate which let the model
-  // fabricate meanings for proper nouns / acronyms (e.g. "draft an AIIA
+  // fabricate meanings for proper nouns / acronyms (e.g. "draft an Aiia
   // Reference Letter" → hallucinated "Association of International Investors").
   // Now we preflight: vault.search (the user's second brain) AND fs.find_in
   // (Downloads + Desktop + Documents + Inbox) in parallel. The synth then
@@ -2061,8 +2279,8 @@ export function heuristicPlan(task: string, opts: { hasAttachments?: boolean } =
   if (draftMatch && draftMatch[1].length >= 3 && draftMatch[1].length <= 200) {
     const body = draftMatch[1].trim();
     // Search topic: strip generic doc-type suffix so we hunt the SUBJECT,
-    // not the type. "an AIIA Reference Letter" → search for "AIIA Reference",
-    // which finds your existing vault notes about AIIA AND any AIIA-named
+    // not the type. "an Aiia Reference Letter" → search for "Aiia Reference",
+    // which finds your existing vault notes about Aiia AND any Aiia-named
     // file in Downloads. Keep the full body for the synth so it knows the
     // deliverable shape (reference letter, memo, brief, etc.).
     const searchTopic = body
@@ -2094,7 +2312,7 @@ export function heuristicPlan(task: string, opts: { hasAttachments?: boolean } =
 
 // Pull the tightest plausible topic from a free-form task. Used to seed
 // fs.find_in's needle when the task is "look through my downloads and
-// summarize what you see about AIIA" — the raw noise-strip pipeline leaves
+// summarize what you see about Aiia" — the raw noise-strip pipeline leaves
 // too many tokens, every one of which must match a filename for fs.find_in
 // to hit. Returns the first hit from a priority ladder, or null if nothing
 // strong stands out (caller falls back to the noise-strip pipeline).
@@ -2107,13 +2325,13 @@ function extractAnchorTopic(taskHead: string): string | null {
   }
   // 2) "about / regarding / concerning / related to / on the topic of X".
   //    We stop the capture at conjunctions ("and what they do") and
-  //    punctuation so "about AIIA and what they do" gives just "AIIA".
+  //    punctuation so "about Aiia and what they do" gives just "Aiia".
   const aboutMatch = taskHead.match(
     /\b(?:about|regarding|concerning|related\s+to|on\s+the\s+(?:topic|subject)\s+of)\s+(?:an?\s+|the\s+)?([A-Za-z0-9][A-Za-z0-9 _\-]{1,60}?)(?=\s+(?:and|or|then|to|in|on|for|so|but|with|that|which|who|whose)\b|[.,;:?!]|$)/i,
   );
   if (aboutMatch) {
     let candidate = aboutMatch[1].trim().replace(/\s*[\/|]\s*/g, " ");
-    // Dedupe ("AIIA AIIA" → "AIIA") and drop pure-noise tokens.
+    // Dedupe ("Aiia Aiia" → "Aiia") and drop pure-noise tokens.
     const STOP = new Set(["a", "an", "the", "what", "they", "do", "does", "is", "are", "was", "were"]);
     const seen = new Set<string>();
     const tokens = candidate.split(/\s+/).filter(t => {
@@ -2135,7 +2353,7 @@ function extractAnchorTopic(taskHead: string): string | null {
     if (c.length >= 2) return c;
   }
   // 4) ALL-CAPS acronyms (2–6 chars). Common topic shape in this corpus
-  //    (AIIA, ZB, AFC, ADRS, POSB…). Skip generic tech acronyms.
+  //    (Aiia, ZB, AFC, ADRS, POSB…). Skip generic tech acronyms.
   const GENERIC = new Set([
     "I", "PC", "AI", "ID", "URL", "API", "PDF", "DOC", "DOCX", "OK", "TL", "DR",
     "FYI", "ASAP", "EOD", "EOM", "USA", "UK", "EU",
@@ -2152,7 +2370,7 @@ function extractAnchorTopic(taskHead: string): string | null {
   return null;
 }
 
-function defaultVaultPlan(task: string, opts: { hasAttachments?: boolean } = {}): Plan {
+export function defaultVaultPlan(task: string, opts: { hasAttachments?: boolean } = {}): Plan {
   // Attachments present → don't research.deep on a pronoun. The user
   // already pasted the source material into the task; the synth has it
   // inline as an "Attached documents" block and will produce an answer
@@ -2171,7 +2389,7 @@ function defaultVaultPlan(task: string, opts: { hasAttachments?: boolean } = {})
   // It searches the web and the vault, never the operator's Downloads /
   // Desktop / Documents. If the planner didn't reach for fs.find_in, do
   // it here so the default plan can still resolve a local file request.
-  const localFsHint = task.match(/\b(downloads?|desktop|documents?|my\s+pc|my\s+computer|on\s+disk|local\s+file|file\s+(called|named))\b/i);
+  const localFsHint = task.match(LOCAL_FS_HINT_RE);
   if (localFsHint) {
     const folderWord = (localFsHint[1] ?? "").toLowerCase();
     const folder = folderWord.startsWith("download") ? "downloads"
@@ -2186,14 +2404,22 @@ function defaultVaultPlan(task: string, opts: { hasAttachments?: boolean } = {})
     // Tightest topic first: prefer a quoted phrase, an "about/regarding X"
     // anchor, a "called/named X" anchor, or an ALL-CAPS acronym. Without this,
     // open-ended asks like "look through my downloads and summarize what you
-    // see about AIIA" leave the noise-strip pipeline below with a needle like
-    // "look through and what you see about aiia AIIA and what they do" — every
+    // see about Aiia" leave the noise-strip pipeline below with a needle like
+    // "look through and what you see about aiia Aiia and what they do" — every
     // token must appear in the filename for fs.find_in to hit, so 0 matches.
-    // Using just "AIIA" recovers the obvious match set.
+    // Using just "Aiia" recovers the obvious match set.
     const anchorTopic = extractAnchorTopic(taskHead);
     // Pull a likely filename phrase from the head. Common shapes:
     //   "find X in my downloads", "the doc called X", "search for X on my PC".
     let needle = anchorTopic ?? taskHead
+      // Drop the "and summarize/attach/send/email ... " tail FIRST, while the
+      // trigger verb is still intact. This MUST run before the generic
+      // leading-verb strip below — that strip deletes bare "summarize" /
+      // "attach" wherever they appear, which used to eat the trigger word
+      // out from under this pattern so the tail-strip silently no-op'd,
+      // corrupting the needle into "Summit Recon and it in an email to X"
+      // (the exact shape observed in the 2026-07-08 Summit Recon incident).
+      .replace(/\band\s+(summari[sz]e|read|review|analy[sz]e|tell\s+me\s+about|describe|attach|send|email)\b.*$/gi, " ")
       .replace(/\b(please\s+)?(find|search\s+for|look\s+(for|in|up)|check|read|open|summari[sz]e|locate|grab|fetch|browse|view|show)\b/gi, " ")
       // Strip "<preposition> my <folder>" — covers "in/on/from/at/inside/
       // within/under/into my downloads". Without this, "on" leaks into the
@@ -2202,7 +2428,6 @@ function defaultVaultPlan(task: string, opts: { hasAttachments?: boolean } = {})
       .replace(/\bmy\s+(downloads?|desktop|documents?|pc|computer)\b/gi, " ")
       .replace(/\b(file|doc|document|pdf|docx?|xlsx?|pptx?)\s+(called|named)\b/gi, " ")
       .replace(/\bcalled\b/gi, " ")
-      .replace(/\band\s+(summari[sz]e|read|review|analy[sz]e|tell\s+me\s+about|describe)\b.*$/gi, " ") // drop "and summarize the document" tail
       .replace(/[\"'\.\?\!\:,]/g, " ")
       .replace(/\s+/g, " ")
       .trim();
@@ -2215,6 +2440,48 @@ function defaultVaultPlan(task: string, opts: { hasAttachments?: boolean } = {})
       .replace(/\s+/g, " ")
       .trim();
     if (needle.length >= 2 && needle.length <= 120) {
+      // ATTACH-AND-SEND — "find X in my downloads and attach/send it in an
+      // email to Y". Distinct from wantsContent below: the deliverable is
+      // the REAL FILE reaching the recipient, not a text description of it.
+      // Only handled here when a literal address is present in the task —
+      // this function's return type is Plan (not nullable), and it's the
+      // LAST-resort deterministic fallback (after both heuristicPlan and the
+      // LLM planner already declined), so a NAMED recipient with no literal
+      // address ("email Godswill") degrades to the plain find(+read) plan
+      // below rather than guessing an address.
+      // Guard regression: the 2026-07-08 Summit Recon incident, where this
+      // exact shape ("find ... and attach it to an email to X") produced a
+      // corrupted fs.find_in needle (the whole tail became the "filename")
+      // AND never sent anything — fixed by the tail-strip regex above plus
+      // this branch.
+      const wantsAttachSend = /\battach(?:ment|ed|ing)?\b/i.test(task) && /\bemail\b/i.test(task);
+      const attachEmailMatch = wantsAttachSend ? task.match(/[\w.+-]+@[\w-]+\.[\w.-]+/) : null;
+      if (wantsAttachSend && attachEmailMatch) {
+        const to = attachEmailMatch[0];
+        return {
+          steps: [
+            {
+              tool: "fs.find_in",
+              args: { folder, name: needle },
+              rationale: `default fallback: task mentions ${folderWord} — search the user's PC instead of the web`,
+              label: humanStepLabel("fs.find_in", { folder, name: needle }),
+            },
+            {
+              tool: "email.send",
+              args: {
+                to,
+                subject: needle,
+                body: `Please find the ${needle} document attached.`,
+                attach_paths: "$step_0.matches.0.path",
+              },
+              rationale: "task asks to attach/send the file — send it as a real attachment, not inline content",
+              label: humanStepLabel("email.send", { to }),
+            },
+          ],
+          summary: `Find "${needle}" in ${folder} and email it to ${to} as an attachment`,
+          waves: [[0], [1]],
+        };
+      }
       const wantsContent = /\b(summari[sz]e|summary|read|open|extract|analy[sz]e|tell\s+me\s+about|what.+(says?|contains?)|review)\b/i.test(task);
       const steps: PlanStep[] = [
         {
@@ -2504,7 +2771,20 @@ async function synthesize(
           if (info.backend === "openrouter") {
             opts.push!(`Thinking with ${info.model} (~${info.tokenEstimate.toLocaleString()} tokens of context). ${info.reason ? `Reason: ${info.reason}.` : ""}`);
           } else if (synthComplexity === "high") {
-            opts.push!(`Thinking with local ${info.model} on a complex synth (~${info.tokenEstimate.toLocaleString()} tokens). OpenRouter isn't configured — set OPENROUTER_API_KEY to route this to a bigger model.`);
+            // Big synth ran locally. Be accurate about WHY — the old message
+            // always blamed "not configured", which is wrong when a key IS set
+            // but the large-tier model is unavailable on the plan (e.g. a paid
+            // model on a free key → 402) or OpenRouter is temporarily down.
+            const why = !config.openrouterEnabled
+              ? "OpenRouter isn't configured — set OPENROUTER_API_KEY to route big synths to a bigger model."
+              : openrouterBillingExhausted()
+                ? "The cloud provider's credit balance is exhausted — running locally until the account is topped up (check the provider's billing page)."
+                : openrouterDailyQuotaExhausted()
+                ? "OpenRouter's free daily quota is used up (free-models-per-day) — running locally until it resets. Add credits or your own key on OpenRouter to lift the cap."
+                : openrouterCircuitOpen()
+                  ? "OpenRouter is temporarily unavailable (circuit open after recent failures) — this ran locally."
+                  : "OpenRouter is configured but the large-tier model was unavailable (check OPENROUTER_LARGE_MODEL is a model your plan can call) — ran locally.";
+            opts.push!(`Thinking with local ${info.model} on a complex synth (~${info.tokenEstimate.toLocaleString()} tokens). ${why}`);
           }
         } : undefined,
       });
@@ -2794,7 +3074,7 @@ function fallbackSynthesis(task: string, p: Plan, runs: StepRun[], synthError?: 
 // Per-step digest used by the rescue path. Pulls the most readable part of
 // each tool's result (answer / text / title / path / snippets) — never raw
 // JSON unless every more-readable shape failed.
-function compactStepSummary(r: StepRun): string {
+export function compactStepSummary(r: StepRun): string {
   const result: any = r.result;
   if (result == null) return "_(no output)_";
   if (typeof result === "string") return result.slice(0, 800);
@@ -2803,6 +3083,19 @@ function compactStepSummary(r: StepRun): string {
   }
   if (typeof result.text === "string" && result.text.trim().length > 0) {
     return result.text.slice(0, 800);
+  }
+  // Document reads (fs.read_external / doc extraction) put the body in
+  // `content` — without this branch a read step rendered as a raw-JSON dump
+  // in rescue summaries (which then got emailed out verbatim).
+  if (typeof result.content === "string" && result.content.trim().length > 0) {
+    return result.content.slice(0, 800);
+  }
+  // File searches (fs.find_in / fs.search) return `matches` — render as a
+  // readable file list, not internal JSON with absolute paths + mtimes.
+  if (Array.isArray(result.matches) && result.matches.length > 0) {
+    return result.matches.slice(0, 5).map((h: any, idx: number) =>
+      `${idx + 1}. ${h.name ?? h.title ?? h.path ?? "(match)"}${typeof h.snippet === "string" ? ` — ${h.snippet.slice(0, 120)}` : ""}`
+    ).join("\n");
   }
   if (typeof result.path === "string") return `Wrote/read: \`${result.path}\``;
   if (Array.isArray(result.results) && result.results.length > 0) {
@@ -2887,14 +3180,30 @@ function resolveValue(v: any, runs: StepRun[]): any {
   });
 }
 
-function deepGet(obj: any, path: string): any {
+// "*" as a path segment maps over an array and resolves the REMAINING path
+// on each element, returning an array — e.g. "users.*.email" on
+// {users:[{email:"a@x"},{email:"b@y"}]} returns ["a@x","b@y"]. Planners
+// reach for this natural-looking syntax when they need every value of a
+// field across a list (e.g. broadcasting an email to users.list's result);
+// without it the reference resolves to undefined/falls through to the
+// literal unresolved "$step_N.users.*.email" string (2026-07-08 regression —
+// a broadcast-send task passed that literal string straight to email.send's
+// `to` arg, which then failed silently while the synth narrated a fake
+// "sent to all 5 users" success on top of the failure).
+export function deepGet(obj: any, path: string): any {
   const parts = path.replace(/^\./, "").split(".");
-  let cur = obj;
-  for (const part of parts) {
-    if (cur === null || cur === undefined) return undefined;
-    cur = cur[/^\d+$/.test(part) ? Number(part) : part];
+  return deepGetParts(obj, parts);
+}
+
+function deepGetParts(obj: any, parts: string[]): any {
+  if (parts.length === 0) return obj;
+  const [part, ...rest] = parts;
+  if (part === "*") {
+    if (!Array.isArray(obj)) return undefined;
+    return obj.map(item => deepGetParts(item, rest));
   }
-  return cur;
+  if (obj === null || obj === undefined) return undefined;
+  return deepGetParts(obj[/^\d+$/.test(part) ? Number(part) : part], rest);
 }
 
 function extractJson(s: string): any {

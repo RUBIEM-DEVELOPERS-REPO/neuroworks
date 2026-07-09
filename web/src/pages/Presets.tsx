@@ -60,8 +60,8 @@ export function Presets() {
       {loading ? (
         <div className="text-cream-300/60 text-sm flex items-center gap-2"><Loader2 size={16} className="animate-spin" /> Loading presets…</div>
       ) : loadErr ? (
-        <div className="rounded-xl border border-red-500/30 bg-red-500/5 p-4 text-sm text-cream-200">
-          <p className="font-medium text-red-400 mb-1">Couldn't load presets</p>
+        <div className="rounded-xl border border-red-500/30 bg-coral-500/5 p-4 text-sm text-cream-200">
+          <p className="font-medium text-coral-300 mb-1">Couldn't load presets</p>
           <p className="text-cream-300/70">{loadErr}</p>
         </div>
       ) : (

@@ -47,7 +47,7 @@ export function SkillForge() {
         <Hammer className="w-6 h-6" />
         <h1 className="text-2xl font-bold">SkillForge</h1>
       </div>
-      <p className="text-sm text-gray-500">
+      <p className="text-sm text-cream-300/60">
         Generate a skill playbook from a natural language description. The LLM writes a structured markdown skill
         with frontmatter, process, rules, and pitfalls. Review and save it to your skill library.
       </p>
@@ -56,15 +56,15 @@ export function SkillForge() {
         <div className="space-y-4">
           <div className="flex flex-col gap-1">
             <label className="text-sm font-medium">Intent label</label>
-            <input value={intent} onChange={e => setIntent(e.target.value)} placeholder="e.g. draft-email, compliance-check" className="text-sm border rounded px-3 py-2 bg-white dark:bg-gray-800" />
+            <input value={intent} onChange={e => setIntent(e.target.value)} placeholder="e.g. draft-email, compliance-check" className="text-sm border rounded px-3 py-2 bg-ink-900" />
           </div>
           <div className="flex flex-col gap-1">
             <label className="text-sm font-medium">Task sample</label>
-            <textarea value={taskSample} onChange={e => setTaskSample(e.target.value)} rows={4} placeholder="Paste a real task that this skill should handle…" className="text-sm border rounded px-3 py-2 bg-white dark:bg-gray-800" />
+            <textarea value={taskSample} onChange={e => setTaskSample(e.target.value)} rows={4} placeholder="Paste a real task that this skill should handle…" className="text-sm border rounded px-3 py-2 bg-ink-900" />
           </div>
           <div className="flex flex-col gap-1">
             <label className="text-sm font-medium">Failure reason (optional)</label>
-            <textarea value={failureReason} onChange={e => setFailureReason(e.target.value)} rows={2} placeholder="What went wrong last time? Helps the LLM draft better rules…" className="text-sm border rounded px-3 py-2 bg-white dark:bg-gray-800" />
+            <textarea value={failureReason} onChange={e => setFailureReason(e.target.value)} rows={2} placeholder="What went wrong last time? Helps the LLM draft better rules…" className="text-sm border rounded px-3 py-2 bg-ink-900" />
           </div>
           <button
             onClick={forge}
@@ -78,7 +78,7 @@ export function SkillForge() {
 
         <div className="space-y-4">
           {error && (
-            <div className="flex items-start gap-2 p-3 rounded bg-red-50 dark:bg-red-900/20 border border-red-200 text-sm text-red-700 dark:text-red-300">
+            <div className="flex items-start gap-2 p-3 rounded bg-coral-500/10 border border-coral-500/30 text-sm text-coral-300 ">
               <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
               {error}
             </div>
@@ -90,22 +90,22 @@ export function SkillForge() {
                 <Eye className="w-4 h-4" />
                 <span className="font-medium text-sm">Draft: {draft.skill.name}</span>
                 {draft.skill.applies_to?.length > 0 && (
-                  <span className="text-xs text-gray-400">applies to: {draft.skill.applies_to.join(", ")}</span>
+                  <span className="text-xs text-cream-300/50">applies to: {draft.skill.applies_to.join(", ")}</span>
                 )}
               </div>
-              <pre className="text-xs border rounded p-3 bg-gray-50 dark:bg-gray-900 overflow-auto max-h-96 whitespace-pre-wrap font-mono">
+              <pre className="text-xs border rounded p-3 bg-ink-950 overflow-auto max-h-96 whitespace-pre-wrap font-mono">
                 {draft.raw}
               </pre>
               <div className="flex items-center gap-2">
                 {saved ? (
-                  <div className="flex items-center gap-2 text-sm text-green-600">
+                  <div className="flex items-center gap-2 text-sm text-leaf-400">
                     <CheckCircle className="w-4 h-4" /> Saved to skill library
                   </div>
                 ) : (
                   <button
                     onClick={save}
                     disabled={saving}
-                    className="flex items-center gap-2 px-3 py-1.5 rounded bg-green-600 text-white hover:bg-green-700 disabled:opacity-50 text-sm"
+                    className="flex items-center gap-2 px-3 py-1.5 rounded bg-leaf-500 text-white hover:bg-leaf-600 disabled:opacity-50 text-sm"
                   >
                     {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
                     Save to Library

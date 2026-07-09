@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Card } from "../components/Card";
 import { api } from "../lib/api";
+import { setLanguage, loadSavedLanguage, availableLanguages, type Language } from "../lib/i18n";
 
 type ModelInfo = {
   name: string;
@@ -22,9 +23,11 @@ export function Settings() {
         <div className="space-y-2 text-sm">
           <div className="flex justify-between"><span className="text-cream-300/70">Name</span><span className="text-cream-100">Arthur Magaya</span></div>
           <div className="flex justify-between"><span className="text-cream-300/70">Email</span><span className="text-cream-100">admin@rubiem.com</span></div>
-          <div className="flex justify-between"><span className="text-cream-300/70">Org</span><span className="text-cream-100">RUBIEM Innovations · AIIA</span></div>
+          <div className="flex justify-between"><span className="text-cream-300/70">Org</span><span className="text-cream-100">RUBIEM Innovations · Aiia</span></div>
         </div>
       </Card>
+
+      <LanguageSection />
 
       <ModelsSection />
 
@@ -52,11 +55,74 @@ export function Settings() {
 
       <Card title="About">
         <div className="text-xs text-cream-300/70 leading-relaxed">
-          NeuroWorks is the AI workforce platform from <a className="text-violet-400 hover:text-violet-500" href="https://www.aiinstituteafrica.com" target="_blank" rel="noopener noreferrer">AIIA</a>, built and shipped by RUBIEM Innovations.
+          NeuroWorks is the intelligent-organization platform — agents and people working as one system — from <a className="text-violet-400 hover:text-violet-500" href="https://www.aiinstituteafrica.com" target="_blank" rel="noopener noreferrer">Aiia</a>, built and shipped by RUBIEM Innovations.
           This local console is the first surface — describe a task, delegate it, get results. Governance and audit are first-class.
         </div>
       </Card>
     </div>
+  );
+}
+
+// Org-wide default language for agent output (plan/direct/synth prompts —
+// see server/src/lib/language-prompts.ts). Per-agent overrides live on
+// Personas instead; this is the fallback every agent without one uses.
+function LanguageSection() {
+  const [lang, setLang] = useState<Language>(loadSavedLanguage());
+  const [busy, setBusy] = useState(false);
+  const [saved, setSaved] = useState(false);
+
+  useEffect(() => {
+    api.getOnboarding().then(r => {
+      if (r.state?.language) setLang(r.state.language as Language);
+    }).catch(() => {});
+  }, []);
+
+  async function choose(code: Language) {
+    if (code === lang || busy) return;
+    setBusy(true); setSaved(false);
+    try {
+      // completed:true is required by the route's own contract, not a
+      // re-run of onboarding — everything else (sector, orgName) is left
+      // untouched since this is a true partial patch.
+      await api.setOnboarding({ completed: true, language: code });
+      setLanguage(code);
+      setLang(code);
+      setSaved(true);
+      // i18n.ts is a module-level var, not a React context — nothing else
+      // mounted right now re-renders on its own when it changes. A reload
+      // is the simplest way to make every already-mounted page (Dashboard's
+      // Zimbabwe Context card, etc.) actually reflect the new language,
+      // and matches how Onboarding.tsx's own language step takes effect
+      // (via the navigate-to-dashboard remount right after).
+      setTimeout(() => window.location.reload(), 500);
+    } catch { /* keep the previous selection on failure */ }
+    finally { setBusy(false); }
+  }
+
+  return (
+    <Card title="Language">
+      <div className="text-xs text-cream-300/70 mb-3">
+        Default language for agent output — plans, replies, and generated documents. Agents with their own language set (Team page) use that instead.
+      </div>
+      {saved && <div className="text-xs text-leaf-400 bg-leaf-500/10 border border-leaf-500/30 rounded-md px-3 py-2 mb-3">Saved — reloading…</div>}
+      <div className="grid grid-cols-3 gap-2">
+        {availableLanguages().map(l => (
+          <button
+            key={l.code}
+            type="button"
+            onClick={() => choose(l.code)}
+            disabled={busy}
+            className={`p-3 rounded-lg border text-center transition-colors disabled:opacity-50 ${
+              lang === l.code
+                ? "bg-violet-500/10 border-violet-500/50 ring-1 ring-violet-500/30 text-cream-50"
+                : "bg-ink-950 border-ink-800 text-cream-300 hover:border-violet-500/30"
+            }`}
+          >
+            <div className="text-sm font-medium">{l.name}</div>
+          </button>
+        ))}
+      </div>
+    </Card>
   );
 }
 

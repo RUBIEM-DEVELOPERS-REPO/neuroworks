@@ -34,3 +34,7 @@ server/_*.json
 server/_desk/
 # Stray experimental static export (not the web/ app). Un-ignore to track it.
 server/neuroworks_site/
+
+# env backups (may contain secrets)
+.env.bak*
+.env.*.bak

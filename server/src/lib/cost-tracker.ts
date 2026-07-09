@@ -5,7 +5,7 @@ import { config } from "../config.js";
 export type CostRecord = {
   jobId: string;
   model: string;
-  backend: "ollama" | "openrouter" | "minimax";
+  backend: "ollama" | "openrouter" | "minimax" | "anthropic";
   profile: string;
   inputTokens: number;
   outputTokens: number;
@@ -30,9 +30,15 @@ const AGGREGATE_REL = "_neuroworks/cost-summary.json";
 // Ollama local is free but we track ~$0 to distinguish from paid.
 const COST_PER_1K_INPUT: Record<string, number> = {
   ollama: 0,
-  "openrouter/small": 0.00015,   // gpt-4o-mini, claude-haiku tier
-  "openrouter/medium": 0.003,    // gpt-4o, claude-sonnet tier
-  "openrouter/large": 0.015,     // claude-opus, gpt-4.5 tier
+  "openrouter/small": 0.00015,   // gpt-4o-mini tier
+  "openrouter/medium": 0.003,    // gpt-4o tier
+  "openrouter/large": 0.015,     // gpt-4.5 tier
+  // Anthropic direct — official per-MTok pricing ÷ 1000 (fable $10/$50,
+  // opus 4.x $5/$25, sonnet $3/$15, haiku 4.5 $1/$5).
+  "anthropic/fable": 0.010,
+  "anthropic/opus": 0.005,
+  "anthropic/sonnet": 0.003,
+  "anthropic/haiku": 0.001,
   minimax: 0.0002,
 };
 const COST_PER_1K_OUTPUT: Record<string, number> = {
@@ -40,11 +46,20 @@ const COST_PER_1K_OUTPUT: Record<string, number> = {
   "openrouter/small": 0.0006,
   "openrouter/medium": 0.015,
   "openrouter/large": 0.075,
+  "anthropic/fable": 0.050,
+  "anthropic/opus": 0.025,
+  "anthropic/sonnet": 0.015,
+  "anthropic/haiku": 0.005,
   minimax: 0.0002,
 };
 
 function costTier(model: string): string {
   if (model.startsWith("minimax") || model.startsWith("MiniMax")) return "minimax";
+  // Native Claude model ids (Anthropic BYO provider) — priced by family.
+  if (/^claude-fable|^claude-mythos/i.test(model)) return "anthropic/fable";
+  if (/^claude-opus/i.test(model)) return "anthropic/opus";
+  if (/^claude-sonnet/i.test(model)) return "anthropic/sonnet";
+  if (/^claude-haiku/i.test(model)) return "anthropic/haiku";
   if (/opus|gpt-4\.5|gpt-4-?turbo|claude-3-5-sonnet|claude-opus/i.test(model)) return "openrouter/large";
   if (/gpt-4o(?!-mini)|claude-sonnet|claude-3-haiku|llama-3-70b|mixtral/i.test(model)) return "openrouter/medium";
   return "openrouter/small";
@@ -52,6 +67,8 @@ function costTier(model: string): string {
 
 function estimateCost(model: string, backend: string, inputTokens: number, outputTokens: number): number {
   if (backend === "ollama") return 0;
+  // OpenRouter ":free" models cost nothing — don't misreport them as paid.
+  if (/:free\b/i.test(model)) return 0;
   const tier = backend === "minimax" ? "minimax" : costTier(model);
   const inputRate = COST_PER_1K_INPUT[tier] ?? COST_PER_1K_INPUT["openrouter/small"];
   const outputRate = COST_PER_1K_OUTPUT[tier] ?? COST_PER_1K_OUTPUT["openrouter/small"];
@@ -72,6 +89,50 @@ export function recordCost(record: CostRecord): void {
   appendFileSync(full, JSON.stringify(record) + "\n", "utf8");
 }
 
+// Cheap, best-effort recorder wired into the central LLM dispatch so EVERY
+// model call is counted. Only appends a JSONL line (the summary aggregates on
+// read), so it's safe on the hot path. Was previously dead: trackLlmCall
+// existed but nothing called it, so the Cost page always showed zero.
+export function recordLlmCost(model: string, outputText: string, inputText: string, systemText?: string, profile = "none", jobId = "adhoc"): void {
+  try {
+    const inputTokens = Math.ceil(((inputText?.length ?? 0) + (systemText?.length ?? 0)) / 4);
+    const outputTokens = Math.ceil((outputText?.length ?? 0) / 4);
+    const lc = (model ?? "").toLowerCase();
+    // Native Claude ids ("claude-fable-5") have NO slash — without this branch
+    // they were misfiled as "ollama" and recorded at $0 (the bug that hid all
+    // Fable spend from the Cost page).
+    const backend: CostRecord["backend"] = /^minimax[-/]/i.test(lc) ? "minimax"
+      : /^claude-/i.test(lc) ? "anthropic"
+      : lc.includes("/") ? "openrouter" : "ollama";
+    const costUsd = estimateCost(model, backend, inputTokens, outputTokens);
+    recordCost({ jobId, model, backend, profile, inputTokens, outputTokens, costUsd, ts: new Date().toISOString() });
+  } catch { /* cost tracking is best-effort — never break a real LLM call */ }
+}
+
+function aggregate(records: CostRecord[]): CostSummary {
+  const totalCostUsd = records.reduce((s, r) => s + r.costUsd, 0);
+  const totalInputTokens = records.reduce((s, r) => s + r.inputTokens, 0);
+  const totalOutputTokens = records.reduce((s, r) => s + r.outputTokens, 0);
+  const byModelMap = new Map<string, { costUsd: number; calls: number }>();
+  const byDayMap = new Map<string, { costUsd: number; calls: number }>();
+  for (const r of records) {
+    const m = byModelMap.get(r.model) ?? { costUsd: 0, calls: 0 };
+    m.costUsd += r.costUsd; m.calls++; byModelMap.set(r.model, m);
+    const day = r.ts.slice(0, 10);
+    const d = byDayMap.get(day) ?? { costUsd: 0, calls: 0 };
+    d.costUsd += r.costUsd; d.calls++; byDayMap.set(day, d);
+  }
+  return {
+    totalCostUsd, totalInputTokens, totalOutputTokens, callCount: records.length,
+    byModel: [...byModelMap.entries()].map(([model, v]) => ({ model, costUsd: v.costUsd, calls: v.calls })).sort((a, b) => b.costUsd - a.costUsd),
+    byDay: [...byDayMap.entries()].map(([date, v]) => ({ date, costUsd: v.costUsd, calls: v.calls })).sort((a, b) => a.date.localeCompare(b.date)),
+    recentCalls: records.slice(-50).reverse(),
+  };
+}
+
+// Legacy: writes the aggregate snapshot to disk. Kept for compatibility, but
+// getCostSummary now aggregates from raw records so the Cost page is always
+// live even without this being called.
 function rebuildAggregate(): void {
   const full = costPath();
   if (!existsSync(full)) return;
@@ -111,13 +172,9 @@ function rebuildAggregate(): void {
 }
 
 export function getCostSummary(): CostSummary {
-  const full = aggregatePath();
-  if (!existsSync(full)) return { totalCostUsd: 0, totalInputTokens: 0, totalOutputTokens: 0, callCount: 0, byModel: [], byDay: [], recentCalls: [] };
-  try {
-    return JSON.parse(readFileSync(full, "utf8"));
-  } catch {
-    return { totalCostUsd: 0, totalInputTokens: 0, totalOutputTokens: 0, callCount: 0, byModel: [], byDay: [], recentCalls: [] };
-  }
+  // Aggregate live from the raw records so the Cost page reflects every call
+  // (the old path read a snapshot that nothing rebuilt → always zero).
+  return aggregate(getCostRecords());
 }
 
 export function getCostRecords(since?: string): CostRecord[] {
@@ -149,7 +206,11 @@ export async function trackLlmCall<T extends { text: string; model: string }>(
   const result = await call();
   const outputTokens = Math.ceil(result.text.length / 4);
   const lcModel = result.model.toLowerCase();
-  const detectedBackend = /^minimax[-/]/i.test(lcModel) ? "minimax" : lcModel.includes("/") ? "openrouter" : "ollama";
+  // Same native-Claude-id rule as recordLlmCost — "claude-fable-5" has no
+  // slash and was misfiled as free local ollama here too.
+  const detectedBackend = /^minimax[-/]/i.test(lcModel) ? "minimax"
+    : /^claude-/i.test(lcModel) ? "anthropic"
+    : lcModel.includes("/") ? "openrouter" : "ollama";
   const costUsd = estimateCost(result.model, detectedBackend, inputTokens, outputTokens);
   const record: CostRecord = {
     jobId,

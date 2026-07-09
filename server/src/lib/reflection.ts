@@ -419,6 +419,11 @@ export async function runReflection(opts: { windowHours?: number; force?: boolea
   const windowEndMs = Date.now();
   const windowStartMs = windowEndMs - windowHours * 3600_000;
   inFlight = (async () => {
+    // Capture the true start so the registered Job carries a real duration.
+    // newJob() stamps startedAt at CREATION time — but the reflection job is
+    // registered AFTER the work finishes, so startedAt≈finishedAt and every
+    // reflection:daily showed ~0s ("timing blind spot" in the 07-03 report).
+    const runStartedAtIso = new Date().toISOString();
     // Peer fan-out makes collectJobsInWindow async; resolve inside the
     // promise so concurrent runReflection() callers share the same
     // peer-fetch wave rather than each issuing their own.
@@ -448,6 +453,35 @@ export async function runReflection(opts: { windowHours?: number; force?: boolea
     } catch (e: any) {
       console.warn(`[reflection] lessons sync failed: ${e?.message ?? e}`);
     }
+    // Reflection → Intellinexus. Feed the day's per-template performance rows
+    // through the same pipeline company data goes through (normalize → hash →
+    // score → golden record → publish). The published dataset surfaces as a
+    // knowledge pack, so agents can RAG their own operational history
+    // ("general-task runs ~112s and fails on X") and the operator gets a
+    // versioned, hashed record of every day's performance.
+    try {
+      const { publishFromRows } = await import("./adrs.js");
+      const rows = Object.entries(stats.byTemplate).map(([template, t]) => ({
+        date: stats.date,
+        template,
+        total: t.total,
+        succeeded: t.ok,
+        failed: t.failed,
+        success_rate: t.total > 0 ? Math.round((t.ok / t.total) * 100) / 100 : 0,
+        avg_duration_sec: t.avgDurationSec,
+        top_failure: stats.topFailures.find(f => f.templates.includes(template))?.error?.slice(0, 200) ?? "",
+      }));
+      if (rows.length > 0) {
+        const pub = publishFromRows(`reflections-${stats.date}`, rows, {
+          sector: "operations",
+          source: "Intellinexus daily reflection",
+          keyField: "template",
+        });
+        console.log(`[reflection] published through Intellinexus: ${rows.length} rows → dataset ${(pub as any)?.dataset?.id ?? "?"}`);
+      }
+    } catch (e: any) {
+      console.warn(`[reflection] Intellinexus publish failed (non-fatal): ${e?.message ?? e}`);
+    }
     const result: ReflectionResult = { date: stats.date, path, stats, reflection: text, generatedAt, modelUsed };
     lastResult = result;
     // Surface the reflection on the Calendar by registering a Job record.
@@ -461,6 +495,7 @@ export async function runReflection(opts: { windowHours?: number; force?: boolea
       const j = newJob(`reflection:daily`);
       j.title = `Daily reflection — ${stats.date} (${stats.totalTasks} tasks, ${Math.round(stats.successRate * 100)}% success)`;
       j.status = "succeeded";
+      j.startedAt = runStartedAtIso;
       j.finishedAt = generatedAt;
       j.result = {
         answer: text,
@@ -504,10 +539,25 @@ export function startReflectionScheduler(): void {
     // lost this way). Now any tick after the reflection hour runs it, once per
     // day, with the on-disk note as the restart-proof guard.
     try {
-      const { existsSync } = await import("node:fs");
+      const { existsSync, readdirSync, statSync } = await import("node:fs");
       const { join } = await import("node:path");
       const { config } = await import("../config.js");
-      if (existsSync(join(config.vaultPath, REFLECTION_DIR, `${today}.md`))) { lastRunDate = today; return; }
+      const dir = join(config.vaultPath, REFLECTION_DIR);
+      // Restart-proof guard: skip if ANY reflection file was WRITTEN today.
+      // The old check looked for `${today}.md`, but reflections are NAMED by
+      // the window's stats.date (usually yesterday) — so the file never
+      // matched and every tsx-watch restart after the reflection hour fired
+      // another run (5 duplicates on 2026-07-04). mtime is the honest
+      // "did we already reflect today" signal and also respects a manual
+      // "Reflect now" earlier in the day.
+      if (existsSync(dir)) {
+        const midnight = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+        const ranToday = readdirSync(dir).some(f => {
+          if (!f.endsWith(".md")) return false;
+          try { return statSync(join(dir, f)).mtimeMs >= midnight; } catch { return false; }
+        });
+        if (ranToday) { lastRunDate = today; return; }
+      }
     } catch { /* vault unreachable — fall through; runReflection will surface it */ }
     lastRunDate = today;
     console.log(`[reflection] firing daily reflection (hour>=${REFLECTION_HOUR}, catch-up)`);

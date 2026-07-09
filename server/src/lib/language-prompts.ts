@@ -87,3 +87,33 @@ export function injectLanguagePrompt(basePrompt: string, context: "plan" | "dire
   if (!langPrompt) return basePrompt;
   return basePrompt + "\n\n" + langPrompt;
 }
+
+// Per-agent language override — a persona/department agent can be pinned to
+// a language regardless of the org-wide onboarding default that
+// injectLanguagePrompt above applies. This is appended by
+// personaSystemSuffix() in personas.ts, which runs AFTER injectLanguagePrompt
+// at every call site (agent.ts concatenates
+// `injectLanguagePrompt(...) + "\n\n" + personaSystemSuffix`) — so it lands
+// LAST in the prompt and takes precedence rather than just stacking a second,
+// possibly contradictory, language instruction next to the org default.
+//
+// Deliberately ONE block reused across plan/direct/synth (unlike
+// LANGUAGE_PROMPTS' three phase-specific variants) — personaSystemSuffix has
+// no notion of which phase it's being concatenated into, and a single clear
+// instruction is correct in all three.
+export function personaLanguageDirective(language: string): string {
+  if (language === "sn") {
+    return `--- This agent's language (overrides any other language instruction above) ---\n${LANGUAGE_PROMPTS.sn.direct}`;
+  }
+  if (language === "nd") {
+    return `--- This agent's language (overrides any other language instruction above) ---\n${LANGUAGE_PROMPTS.nd.direct}`;
+  }
+  if (language === "en") {
+    // Explicit English pin — needed because LANGUAGE_PROMPTS.en's phase
+    // strings are empty ("no special instruction" is how the org-wide
+    // default expresses English), which would silently fail to override an
+    // org default of Shona/Ndebele for this one agent.
+    return `--- This agent's language (overrides any other language instruction above) ---\nRespond in English, even if an organization-wide default language instruction above says otherwise. This agent always communicates in English.`;
+  }
+  return "";
+}

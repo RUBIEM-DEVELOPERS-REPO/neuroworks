@@ -14,6 +14,9 @@ import {
   isTriviallyDirectAnswer,
   extractTopic,
   heuristicPlan,
+  compactStepSummary,
+  defaultVaultPlan,
+  deepGet,
 } from "../src/lib/agent.js";
 
 describe("parseUserRequestFromTask", () => {
@@ -24,6 +27,51 @@ describe("parseUserRequestFromTask", () => {
 
   it("passes plain user text through", () => {
     expect(parseUserRequestFromTask("hi")).toBe("hi");
+  });
+
+  // The chat route appends planner directives AFTER the user's text. These
+  // must never leak into customer-facing task echoes (a rescue-summary email
+  // once opened with "…email to X **Alignment check — required before…**").
+  it("strips the trailing Alignment-check directive", () => {
+    const enriched =
+      `Look for Summit Recon in my downloads and summarize it in an email to arthur@example.com\n\n` +
+      `**Alignment check — required before responding.** Before producing the final answer, scan the user's request for CONCRETE elements…`;
+    expect(parseUserRequestFromTask(enriched)).toBe(
+      "Look for Summit Recon in my downloads and summarize it in an email to arthur@example.com",
+    );
+  });
+
+  it("strips the trailing Source-of-truth notice", () => {
+    const enriched = `Summarize the attached BRS.\n\n**Source-of-truth notice.** Attached documents follow this block…`;
+    expect(parseUserRequestFromTask(enriched)).toBe("Summarize the attached BRS.");
+  });
+
+  it("stops a Topic: capture at the Alignment-check block", () => {
+    const enriched = `Write a memo.\n\nTopic: Q3 hiring freeze\n\n**Alignment check — required before responding.** …`;
+    expect(parseUserRequestFromTask(enriched)).toBe("Q3 hiring freeze");
+  });
+});
+
+// Rescue summaries get shown (and sometimes emailed) to customers — the step
+// digests must render READABLE text, never internal JSON with absolute paths.
+describe("compactStepSummary", () => {
+  const run = (result: any) =>
+    compactStepSummary({ step: { tool: "x", args: {} }, ok: true, result, durationMs: 1 });
+
+  it("renders fs search matches[] as a file list, not raw JSON", () => {
+    const out = run({ folder: "downloads", count: 2, matches: [
+      { path: "C:\\Users\\A\\Downloads\\Summit Recon.xlsx", name: "Summit Recon.xlsx", ext: ".xlsx", size: 17822 },
+      { path: "C:\\Users\\A\\Downloads\\Report.docx", name: "Report.docx", ext: ".docx", size: 900 },
+    ] });
+    expect(out).toContain("1. Summit Recon.xlsx");
+    expect(out).toContain("2. Report.docx");
+    expect(out).not.toContain("{");
+  });
+
+  it("renders a doc read's content field, not the raw result object", () => {
+    const out = run({ content: "## Sheet: Sheet1\nsummit Costs, 1200", kind: "xlsx", size: 17822 });
+    expect(out).toContain("summit Costs");
+    expect(out).not.toContain("\"kind\"");
   });
 });
 
@@ -178,5 +226,92 @@ describe("heuristicPlan", () => {
     const importStep = p!.steps[p!.steps.length - 1];
     expect(importStep.tool).toBe("fs.import_to_vault");
     expect((importStep.args as any).removeOriginal).toBe(true);
+  });
+});
+
+// defaultVaultPlan is the LAST-resort deterministic fallback (used when both
+// heuristicPlan and the LLM planner declined) — its local-fs branch is what
+// actually ran for the 2026-07-08 Summit Recon incident: "find X in my
+// downloads and attach it to an email to Y" produced a corrupted fs.find_in
+// needle (the whole tail became the "filename") and never sent anything.
+describe("defaultVaultPlan — attach-and-send", () => {
+  it("finds the file and chains a real email.send with attach_paths, given a literal address", () => {
+    const p = defaultVaultPlan(
+      "Find Summit Recon in my downloads and attach it to an email to arthurmagaya2@gmail.com with a one-line note that it's the finance sheet",
+    );
+    expect(p.steps.length).toBe(2);
+    expect(p.steps[0].tool).toBe("fs.find_in");
+    // The needle must be the clean filename, NOT the whole trailing clause —
+    // this is the exact corruption the tail-strip regex fix prevents.
+    expect((p.steps[0].args as any).name).toBe("Summit Recon");
+    expect(p.steps[1].tool).toBe("email.send");
+    expect((p.steps[1].args as any).to).toBe("arthurmagaya2@gmail.com");
+    expect((p.steps[1].args as any).attach_paths).toBe("$step_0.matches.0.path");
+  });
+
+  it("degrades to a plain find (no email.send) when the recipient is named, not a literal address", () => {
+    const p = defaultVaultPlan("find Summit Recon in my downloads and attach it to an email for Godswill");
+    expect(p.steps.some(s => s.tool === "email.send")).toBe(false);
+    expect(p.steps[0].tool).toBe("fs.find_in");
+  });
+
+  it("does not misfire attach-and-send on a plain summarize-in-email ask (no 'attach')", () => {
+    const p = defaultVaultPlan(
+      "look for Summit Recon in my downloads and summarize it in an email to arthur@example.com",
+    );
+    expect(p.steps.some(s => s.tool === "email.send")).toBe(false);
+    expect((p.steps[0].args as any).name).toBe("Summit Recon");
+  });
+
+  // 2026-07-08 regression: "the doc called X" phrasing didn't match ANY of
+  // the three (duplicated) local-fs detector regexes — they only recognised
+  // "file called/named X", not "doc"/"document" — so a task phrased this way
+  // skipped local search entirely and fell through to a useless research.deep
+  // web search on the literal sentence. Fixed by broadening the shared
+  // LOCAL_FS_HINT_RE to the same (file|doc|document|pdf|docx?|xlsx?|pptx?)
+  // synonym set the needle-stripper already used downstream.
+  it("recognises 'the doc called X' as a local-file reference, not a web-research task", () => {
+    const p = defaultVaultPlan("Send an attachment doc called Summit Recon CONSO to all the users emails on Neuroworks");
+    expect(p.steps[0].tool).toBe("fs.find_in");
+    expect(p.steps[0].tool).not.toBe("research.deep");
+    // No downloads/desktop/documents mentioned — falls back to folder='all'.
+    expect((p.steps[0].args as any).folder).toBe("all");
+    // No literal email address in "all the users" — can't safely guess one,
+    // so this degrades to plain find (better than nothing found at all).
+    expect(p.steps.some(s => s.tool === "email.send")).toBe(false);
+  });
+
+  it("recognises 'the document called X' the same way", () => {
+    const p = defaultVaultPlan("find the document called Q3 budget and read it");
+    expect(p.steps[0].tool).toBe("fs.find_in");
+    expect((p.steps[0].args as any).name).toBe("Q3 budget");
+  });
+});
+
+// 2026-07-08 regression, part 2: even after the "doc called X" detection fix
+// let the planner build a proper broadcast plan (fs.find_in -> users.list ->
+// email.send), the LLM planner referenced "$step_1.users.*.email" — a
+// wildcard array-extraction the resolver didn't support — so `to` resolved
+// to the literal unresolved string, email.send failed (ok:false), and the
+// synth narrated a fake "sent to all 5 users" success on top of the silent
+// failure. deepGet's "*" path segment fixes the resolution; email.ts's
+// normalizeRecipients (tested separately) fixes email.send to actually
+// accept the resulting array.
+describe("deepGet — wildcard array extraction", () => {
+  const users = { users: [
+    { name: "Arthur", email: "admin@rubiem.com" },
+    { name: "Godswill", email: "godswill@aiinstituteafrica.com" },
+  ] };
+
+  it("maps a field across an array with '*'", () => {
+    expect(deepGet(users, "users.*.email")).toEqual(["admin@rubiem.com", "godswill@aiinstituteafrica.com"]);
+  });
+
+  it("still resolves a plain non-wildcard path", () => {
+    expect(deepGet(users, "users.0.email")).toBe("admin@rubiem.com");
+  });
+
+  it("returns undefined for '*' on a non-array", () => {
+    expect(deepGet({ users: "not-an-array" }, "users.*.email")).toBeUndefined();
   });
 });

@@ -2,9 +2,13 @@
 #
 # Based on the official Playwright image because the server's doc/OCR/browser
 # pipeline (playwright, canvas, tesseract) needs the system libs + a real
-# Chromium — the slim node image can't run those. Both the API (tsx) and the
-# web SPA (Vite dev, which proxies /api → the API) run straight from source via
-# the repo's `pnpm dev` — the exact stack the operator runs locally.
+# Chromium — the slim node image can't run those.
+#
+# PRODUCTION SHAPE (single port): the web SPA is BUILT once (vite build →
+# web/dist) and the API server serves those minified, fingerprinted assets
+# itself. No Vite dev server runs in production. Everything is on ONE port
+# (7471), bound to 0.0.0.0 so the published port is reachable. The API runs via
+# tsx (no watch) — the same runtime the operator uses locally, minus the churn.
 #
 # STORAGE: all mutable state lives under two paths that docker-compose mounts as
 # named volumes, so nothing the agent writes is trapped in the container layer:
@@ -17,7 +21,8 @@ ENV NODE_ENV=production \
     PNPM_HOME=/usr/local/share/pnpm \
     PATH=/usr/local/share/pnpm:$PATH \
     NEUROWORKS_PORT=7471 \
-    WEB_PORT=7470 \
+    NEUROWORKS_BIND_HOST=0.0.0.0 \
+    SERVE_WEB=1 \
     VAULT_PATH=/data/vault
 
 # pnpm via corepack (pinned in the lockfile's packageManager field if present).
@@ -31,16 +36,23 @@ COPY server/package.json ./server/
 COPY web/package.json ./web/
 RUN pnpm install --frozen-lockfile || pnpm install
 
-# App source. (Both API and web run from source via tsx / vite — no build step.)
+# App source.
 COPY . .
+
+# Build the web SPA to web/dist (minified, fingerprinted). The API serves it.
+RUN pnpm -F clawbot-web build
 
 # State + vault mount points. Declared as volumes so an operator gets durable,
 # separately-managed storage by default even without compose.
 RUN mkdir -p /app/.neuroworks /data/vault
 VOLUME ["/app/.neuroworks", "/data/vault"]
 
-EXPOSE 7470 7471
+EXPOSE 7471
 
-# concurrently boots both the API (7471, loopback) and the web dev server
-# (7470, bound to 0.0.0.0 so it's reachable on the published port).
-CMD ["pnpm", "run", "dev:docker"]
+# Container-level liveness/readiness: hit /api/health (exempt from auth) and
+# fail the check on a non-2xx so the orchestrator can restart a wedged process.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
+  CMD node -e "require('http').get('http://127.0.0.1:'+(process.env.NEUROWORKS_PORT||7471)+'/api/health',r=>process.exit(r.statusCode<400?0:1)).on('error',()=>process.exit(1))"
+
+# Single production process: the API server, which also serves the built SPA.
+CMD ["pnpm", "-F", "clawbot-server", "start"]

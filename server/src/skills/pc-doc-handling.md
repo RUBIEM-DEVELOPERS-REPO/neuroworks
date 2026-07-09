@@ -99,7 +99,7 @@ When you read AND file:
 These all route here:
 
 - "what's in this doc Q3 forecast" — read-only
-- "summarise the AIIA Reference Letter" — read-only
+- "summarise the Aiia Reference Letter" — read-only
 - "read resume.pdf" — read-only
 - "save this PDF to my vault" — file (with default folder)
 - "move the offer letter into neuroworks" — file (move with delete? — depends on follow-up phrasing)

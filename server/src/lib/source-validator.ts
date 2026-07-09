@@ -6,7 +6,7 @@
 // junk evidence drove the answer:
 //   - "who is Dario Amodei" → DDG returned a Denmark hotel page; synth
 //     refused the well-known entity because evidence "didn't cover it"
-//   - "tell me about AIIA" → login page got scored as evidence
+//   - "tell me about Aiia" → login page got scored as evidence
 //   - "what's new with Mistral" → 404 page extracted to "Page not found"
 //     and ranked as a top source
 //

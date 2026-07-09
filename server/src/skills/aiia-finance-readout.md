@@ -1,24 +1,24 @@
 ---
 name: aiia-finance-readout
-description: Pull LIVE financials from the company's AIIA system via the AIIA Finance connector (GET /api/agent, GET /api/agent/dashboard?year=YYYY) and explain them in sourced, cash-first terms.
+description: Pull LIVE financials from the company's Aiia system via the Aiia Finance connector (GET /api/agent, GET /api/agent/dashboard?year=YYYY) and explain them in sourced, cash-first terms.
 applies_to: [analyze, summarize]
 ---
 
-# Skill: AIIA financial read-out
+# Skill: Aiia financial read-out
 
 ## When to use this
 
 The user asks about the company's actual finances — "the dashboard", "this
-year's numbers", "AIIA", "revenue/expenses so far", "how are we doing
-financially". The answer must come from LIVE data in the AIIA system, not an
-estimate. This is the AIIA Finance Officer's (Aria's) craft.
+year's numbers", "Aiia", "revenue/expenses so far", "how are we doing
+financially". The answer must come from LIVE data in the Aiia system, not an
+estimate. This is the Aiia Finance Officer's (Aria's) craft.
 
 ## Process
 
-1. **Find the connector.** `connector.list` → confirm the **AIIA Finance**
+1. **Find the connector.** `connector.list` → confirm the **Aiia Finance**
    connector exists. If it doesn't, stop and tell the user to add it on the
    Connectors page — do not estimate.
-2. **Recall the contract.** `connector.describe` the AIIA Finance connector to
+2. **Recall the contract.** `connector.describe` the Aiia Finance connector to
    see its endpoints before calling.
 3. **Resolve the period.** Default the year to the current year. Map "this year"
    / "last year" to the actual 4-digit year.
@@ -33,14 +33,14 @@ estimate. This is the AIIA Finance Officer's (Aria's) craft.
 
 ## Rules
 
-- **Ground every number in what AIIA returned.** Never invent, round-guess, or
-  fill a gap AIIA could have answered. If a field is missing, say it's missing.
+- **Ground every number in what Aiia returned.** Never invent, round-guess, or
+  fill a gap Aiia could have answered. If a field is missing, say it's missing.
 - **Fail honest.** If `connector.call` returns `{ ok: false, ... }` or an empty
-  body, report that the AIIA system was unreachable / returned no data and stop.
-  A fabricated dashboard is worse than "I couldn't reach AIIA".
+  body, report that the Aiia system was unreachable / returned no data and stop.
+  A fabricated dashboard is worse than "I couldn't reach Aiia".
 - **Cash-first, decision-anchored.** The headline number leads. Strip vibes.
 - **Stay in lane.** This skill reports REAL data. Forecasts, scenario models, and
-  unit-economics modelling beyond AIIA's data belong to Fiona (Financial Analyst).
+  unit-economics modelling beyond Aiia's data belong to Fiona (Financial Analyst).
 
 ## Pitfalls
 

@@ -34,21 +34,81 @@ Local-only browser app. Bind: `127.0.0.1:7470` (web) and `127.0.0.1:7471` (serve
 - **Activity** — recent jobs with live status.
 - **Results** — outcome card for any completed job (duration + top-source previews).
 - **Approvals** — gate for templates marked `requiresApproval`.
-- **Knowledge** — Obsidian vault browser at `D:\Main brain` with markdown rendering and full-text search.
+- **Knowledge** — Obsidian vault browser (path set by `VAULT_PATH`) with markdown rendering and full-text search.
+- **Data Pipeline** — the Intellinexus data pipeline. Publishes datasets that agents learn from (see below).
+- **Knowledge Packs** — curated sector packs + published Intellinexus datasets, all indexed for agent retrieval.
+- **Models** — pull/remove local Ollama models from a curated catalog (streamed progress), set the default, and plug in cloud model APIs you already use (OpenAI/OpenRouter/Groq/Together/custom). Keys encrypted at rest, applied with no restart.
 - **Personas** — manage AI employees (role, tone, responsibilities, system prompt overrides).
 - **Settings** — model selection, OpenRouter pins, persona-template defaults.
 - **Admin** — vault stats, peer registry, worker status, security gates.
 
-### First run
+### Data Pipeline (Intellinexus)
+
+The **AI Data Readiness System** is NeuroWorks' main data pipeline. Raw inputs
+(a connected data source, an upload, or inline JSON) flow through:
+Normalization → Cryptographic Hashing (SHA-256 + Merkle batch root) → Confidence
+Scoring → HITL gate → Entity Resolution (golden record) → Publish. Each dataset
+publishes four machine-ready artifacts into the vault under `_datasets/<id>/`:
+ML-ready CSV, knowledge-graph JSONL, RAG chunks, and a knowledge-pack card.
+
+Because the artifacts live in the vault they're indexed automatically, so
+**agents learn from every published dataset** via retrieval, and the dataset
+shows up as a knowledge pack. Agents can also run the pipeline themselves with
+the `data.publish` / `data.list_datasets` primitives. REST: `GET/POST /api/datasets`.
+
+**Omnisignal — the acquisition front-end.** A base research system that gathers
+raw signal from many source kinds (web search, web pages, connected databases,
+local files, the vault), normalizes each into a provenance-tagged record stream,
+and feeds it straight into Intellinexus. One call (`omnisignal.publish` /
+`POST /api/omnisignal/publish`) turns live multi-source research into a hashed,
+deduplicated, readied dataset. Read-only acquisition is `omnisignal.acquire` /
+`POST /api/omnisignal/acquire`. Saved sources live in a registry
+(`GET/POST/DELETE /api/omnisignal/sources`).
+
+### External agent dispatch (orchestration layer)
+
+Other systems dispatch agents into NeuroWorks over an authenticated API:
 
 ```sh
-cp .env.example .env       # fill in GITHUB_TOKEN at minimum
+curl -X POST http://127.0.0.1:7471/api/v1/dispatch \
+  -H "Authorization: Bearer nw_..." -H "Content-Type: application/json" \
+  -d '{"task":"...", "callbackUrl":"https://your-app/webhook"}'
+# -> { "jobId": "...", "status": "accepted" }
+```
+
+- **Machine identity** — API keys (`nw_…`), stored as SHA-256 hashes, scoped
+  (`dispatch:write` / `dispatch:read`). Mint via `POST /api/dispatch-keys`.
+- **Async** — poll `GET /api/v1/dispatch/:jobId` or receive an HMAC-signed
+  webhook (`NW_WEBHOOK_SIGNING_SECRET`). Supports `Idempotency-Key`; each key
+  reads only its own jobs (tenancy). The `/api/v1/` surface is exempt from the
+  origin guard because it authenticates by key, not by Host/Origin.
+- **Four client modes** — REST + webhook, an **SDK** ([sdk/](sdk/) — `new NeuroWorks({baseUrl,apiKey}).run(task)`), a **CLI** ([tools/nw.mjs](tools/nw.mjs) — `nw dispatch "…" --wait`), and an **MCP server** ([server/mcp/neuroworks-dispatch-mcp.mjs](server/mcp/neuroworks-dispatch-mcp.mjs)) exposing `dispatch_task` to any MCP host. All are thin clients over the same REST keystone.
+
+### First run
+
+Fastest path — the installer (checks Node, sets up pnpm, installs deps,
+scaffolds `.env`). See [QUICKSTART.md](QUICKSTART.md) for the full guide.
+
+```sh
+# Windows (PowerShell)
+powershell -ExecutionPolicy Bypass -File tools\install.ps1
+
+# macOS / Linux
+sh tools/install.sh
+```
+
+Or manually:
+
+```sh
+cp .env.example .env       # boots on the free local core; fill in keys to unlock cloud/vault
 pnpm install               # installs root + server + web workspaces
-ollama serve &             # start Ollama if not already running
+ollama serve &             # start Ollama if not already running (free local model)
 pnpm dev                   # starts server + web concurrently
 ```
 
-Open http://127.0.0.1:7470.
+Open http://127.0.0.1:7470. NeuroWorks runs on a **free local core** — no
+personal keys are required to start; cloud models, a synced vault, email, and
+payments are optional add-ons configured in `.env`.
 
 ### Configuration
 
@@ -105,7 +165,7 @@ The Knowledge page lists committed summaries; click "Refresh summary" to regener
 
 ## Persistence + reflection
 
-- Job history persists as append-only JSONL at `.neuroworks/jobs/<YYYY-MM-DD>.jsonl` (gitignored). Survives restarts and the in-memory `RECENT=50` cap.
+- Job history persists as append-only JSONL at `.neuroworks/jobs/<YYYY-MM-DD>.jsonl` (gitignored). Survives restarts and the in-memory `RECENT=200` cap.
 - Daily reflection at 2 AM local (configurable via `CLAWBOT_REFLECTION_HOUR`) aggregates the last 24h across the local store, in-memory state, and every peer's `/api/peers/jobs` endpoint — so delegations to the secondary are visible.
 - Output lands at `<vault>/_neuroworks/reflections/<YYYY-MM-DD>.md` with sections "What went well / What went wrong / What I notice / What to try next" plus a raw stats snapshot.
 

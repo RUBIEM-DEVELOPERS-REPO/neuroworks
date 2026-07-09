@@ -274,7 +274,9 @@ async function runExcelQuery(source: DataSource, raw: string, limit: number): Pr
   if (!existsSync(source.connection)) {
     throw new Error(`Excel file not found: ${source.connection}`);
   }
-  const wb = XLSX.readFile(source.connection, { type: "file", codepage: undefined });
+  // Buffer read — the xlsx ESM build has no fs wired, so XLSX.readFile throws
+  // "Cannot access file" even on files that exist. Same fix in doc-extractor.
+  const wb = XLSX.read(readFileSync(source.connection), { type: "buffer" });
   const sheetName = q.sheet ?? wb.SheetNames[0];
   if (!sheetName || !wb.Sheets[sheetName]) {
     throw new Error(`Sheet "${sheetName}" not found. Available: ${wb.SheetNames.join(", ")}`);
@@ -325,8 +327,9 @@ async function runCsvQuery(source: DataSource, raw: string, limit: number): Prom
   if (!existsSync(source.connection)) {
     throw new Error(`CSV file not found: ${source.connection}`);
   }
-  // SheetJS reads CSV natively — same code path as Excel.
-  const wb = XLSX.readFile(source.connection, { type: "file", raw: true });
+  // SheetJS reads CSV natively — same code path as Excel (buffer read: the
+  // ESM build has no fs, XLSX.readFile would throw "Cannot access file").
+  const wb = XLSX.read(readFileSync(source.connection), { type: "buffer", raw: true });
   const sheetName = wb.SheetNames[0];
   const sheet = wb.Sheets[sheetName];
   const json = XLSX.utils.sheet_to_json(sheet, { defval: null });
@@ -460,7 +463,7 @@ export async function describeSource(source: DataSource): Promise<{ tables: { na
       if (!existsSync(source.connection)) {
         throw new Error(`Excel file not found: ${source.connection}`);
       }
-      const wb = XLSX.readFile(source.connection, { type: "file" });
+      const wb = XLSX.read(readFileSync(source.connection), { type: "buffer" });
       const tables: { name: string; columns: { name: string; type: string }[] }[] = [];
       for (const sheetName of wb.SheetNames) {
         const sheet = wb.Sheets[sheetName];
@@ -479,7 +482,7 @@ export async function describeSource(source: DataSource): Promise<{ tables: { na
       if (!existsSync(source.connection)) {
         throw new Error(`CSV file not found: ${source.connection}`);
       }
-      const wb = XLSX.readFile(source.connection, { type: "file", raw: true });
+      const wb = XLSX.read(readFileSync(source.connection), { type: "buffer", raw: true });
       const sheetName = wb.SheetNames[0];
       const sheet = wb.Sheets[sheetName];
       const json = XLSX.utils.sheet_to_json(sheet, { defval: null });

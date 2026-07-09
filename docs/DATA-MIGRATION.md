@@ -86,7 +86,7 @@ flowchart TB
   subgraph PORT["✅ Carry these"]
     NW[".neuroworks/ (repo root)<br/>users · sessions · connectors · integrations<br/>data-sources · schedules · personas<br/>custom-templates · executor.json · login-events"]:::ok
     JOBS["server/.neuroworks/jobs/<br/>(job journal — note: cwd-relative path)"]:::ok
-    ENVF[".env (GitHub/LLM/Stripe/AIIA keys, config)"]:::ok
+    ENVF[".env (GitHub/LLM/Stripe/Aiia keys, config)"]:::ok
     VLT["Obsidian vault — or just re-clone the main-brain repo"]:::ok
   end
 

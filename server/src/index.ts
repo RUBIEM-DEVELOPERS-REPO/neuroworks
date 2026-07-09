@@ -1,5 +1,7 @@
 import express from "express";
-import { config } from "./config.js";
+import { existsSync } from "node:fs";
+import { resolve } from "node:path";
+import { config, validateConfig } from "./config.js";
 import { statusRouter } from "./routes/status.js";
 import { reposRouter } from "./routes/repos.js";
 import { brainRouter } from "./routes/brain.js";
@@ -50,24 +52,50 @@ import { authRouter } from "./routes/auth.js";
 import { onboardingRouter } from "./routes/onboarding.js";
 import { departmentsRouter } from "./routes/departments.js";
 import { knowledgePacksRouter } from "./routes/knowledge-packs.js";
+import { datasetsRouter } from "./routes/datasets.js";
+import { dispatchRouter, dispatchKeysRouter } from "./routes/dispatch.js";
+import { omnisignalRouter } from "./routes/omnisignal.js";
+import { publicFinanceRouter } from "./routes/public-finance.js";
 import { qualityRouter } from "./routes/quality.js";
 import { costRouter } from "./routes/cost.js";
 import { auditRouter } from "./routes/audit.js";
 import { skillForgeRouter } from "./routes/skill-forge.js";
 import { orchestratorRouter } from "./routes/orchestrator.js";
+import { requireLayer } from "./lib/access.js";
 import { startEmailBridge, stopEmailBridge } from "./lib/email.js";
 import { originGuard } from "./lib/origin-guard.js";
+
+// Fail-fast: refuse to boot on a fatal misconfiguration (bad port, SERVE_WEB
+// without a build, missing required env in production). No-op warnings locally.
+validateConfig();
 
 const app = express();
 // Stripe webhook needs the RAW request body to verify the signature — mount a
 // raw parser for that ONE path BEFORE the JSON parser (body-parser sets
 // req._body once read, so the JSON parser below then skips it).
 app.use("/api/payments/webhook", express.raw({ type: "*/*", limit: "2mb" }));
+// Paynow posts its result webhook as application/x-www-form-urlencoded — the
+// JSON parser leaves req.body empty there, which made the SHA-512 hash check
+// reject EVERY legitimate status update. Mount a urlencoded parser for that
+// one path (found in the security/bug sweep, 2026-07-04).
+app.use("/api/payments/paynow/result", express.urlencoded({ extended: false, limit: "64kb" }));
 // JSON body, but also accept text/plain (navigator.sendBeacon defaults to
 // it when given a plain JSON Blob) so the chat unmount-save reaches us.
 // 25 MB limit accommodates base64-encoded document uploads (a 15 MB PDF
 // base64-encodes to ~20 MB). Most uploads are <2 MB; the cap exists to
 // stop accidental DOS via giant payloads, not to be aspirationally generous.
+// Machine-to-machine endpoints (external dispatch + Finance System ingest) take
+// small JSON only — reject oversized bodies BEFORE the 25MB parser buffers them.
+// The 25MB limit exists for base64 document uploads on the browser API, not here.
+const MACHINE_BODY_LIMIT = Number(process.env.NW_MACHINE_BODY_LIMIT_BYTES ?? "262144") || 262144; // 256KB
+app.use((req, res, next) => {
+  if (!req.path.startsWith("/api/v1/") && !req.path.startsWith("/api/public/")) return next();
+  const len = Number(req.headers["content-length"] ?? "0");
+  if (Number.isFinite(len) && len > MACHINE_BODY_LIMIT) {
+    return res.status(413).json({ error: "payload_too_large", message: `Body exceeds ${MACHINE_BODY_LIMIT} bytes for this endpoint.` });
+  }
+  next();
+});
 app.use(express.json({ limit: "25mb", type: ["application/json", "text/plain"] }));
 app.use((_req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "http://127.0.0.1:7470");
@@ -110,7 +138,7 @@ app.use("/api/templates", templatesRouter);
 app.use("/api/chat", chatRouter);
 app.use("/api/personas", personasRouter);
 app.use("/api/peers", peersRouter);
-app.use("/api/models", modelsRouter);
+app.use("/api/models", requireLayer("superadmin"), modelsRouter); // provider API keys
 app.use("/api/reflection", reflectionRouter);
 app.use("/api/skills", skillsRouter);
 app.use("/api/uploads", uploadsRouter);
@@ -119,31 +147,73 @@ app.use("/api/teams", teamsRouter);
 app.use("/api/handoff", handoffRouter);
 app.use("/api/workforce", workforceRouter);
 app.use("/api/schedules", schedulesRouter);
-app.use("/api/governance", governanceRouter);
+app.use("/api/governance", requireLayer("superadmin"), governanceRouter);
 app.use("/api/email", emailRouter);
 app.use("/api/external-agents", externalAgentsRouter);
 app.use("/api/feedback", feedbackRouter);
 app.use("/api/exports", exportsRouter);
 app.use("/api/calendar", calendarRouter);
 app.use("/api/data-sources", dataSourcesRouter);
-app.use("/api/terminal", terminalRouter);
+app.use("/api/terminal", requireLayer("superadmin"), terminalRouter); // shell access
 app.use("/api/stt", sttRouter);
-app.use("/api/integrations", integrationsRouter);
+app.use("/api/integrations", requireLayer("superadmin"), integrationsRouter); // service secrets
 app.use("/api/presets", presetsRouter);
-app.use("/api/connectors", connectorsRouter);
+app.use("/api/connectors", requireLayer("superadmin"), connectorsRouter); // connector credentials
 app.use("/api/payments", paymentsRouter);
 app.use("/api/executor", executorRouter);
 app.use("/api/primitives", primitivesRouter);
-app.use("/api/users", usersRouter);
+app.use("/api/users", requireLayer("admin"), usersRouter); // directory admin (salary redaction inside)
 app.use("/api/auth", authRouter);
 app.use("/api/onboarding", onboardingRouter);
 app.use("/api/departments", departmentsRouter);
 app.use("/api/knowledge-packs", knowledgePacksRouter);
+app.use("/api/datasets", datasetsRouter);
+app.use("/api/omnisignal", omnisignalRouter);
+// External agent-dispatch surface (API-key auth; originGuard exempts /api/v1/).
+app.use("/api/v1/dispatch", dispatchRouter);
+// Operator-only API-key management (stays behind originGuard).
+app.use("/api/dispatch-keys", dispatchKeysRouter);
+// Public Finance System ingest/read surface (server-to-server; origin-guard
+// exempts /api/public/, writes optionally gated by FINANCE_SYNC_TOKEN).
+app.use("/api/public", publicFinanceRouter);
 app.use("/api/quality", qualityRouter);
-app.use("/api/cost", costRouter);
+app.use("/api/cost", requireLayer("superadmin"), costRouter); // money
 app.use("/api/audit", auditRouter);
 app.use("/api/skill-forge", skillForgeRouter);
 app.use("/api/orchestrate", orchestratorRouter);
+
+// ── Production SPA serving ─────────────────────────────────────────────
+// When SERVE_WEB=1 (the container), THIS server serves the built, minified
+// web/dist directly — no Vite dev server in production. Mounted AFTER every
+// /api route so it can never shadow an API path. Static assets are served with
+// long-lived immutable caching (Vite fingerprints filenames); index.html is
+// always revalidated so a new deploy is picked up. Unknown non-/api GETs fall
+// through to index.html for client-side routing (history fallback). An
+// unmatched /api path still 404s as JSON rather than returning the SPA shell.
+if (config.serveWeb && existsSync(config.webDistPath)) {
+  const indexHtml = resolve(config.webDistPath, "index.html");
+  app.use(express.static(config.webDistPath, {
+    index: false,
+    setHeaders: (res, filePath) => {
+      if (filePath.endsWith("index.html")) res.setHeader("Cache-Control", "no-cache");
+      else if (/[.-][a-f0-9]{8,}\.\w+$/i.test(filePath)) res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+    },
+  }));
+  app.get("*", (req, res, next) => {
+    if (req.path.startsWith("/api/")) return next(); // let the API 404 handler own it
+    if (req.method !== "GET") return next();
+    res.setHeader("Cache-Control", "no-cache");
+    res.sendFile(indexHtml);
+  });
+  console.log(`  ⓘ serving built web SPA from ${config.webDistPath}`);
+}
+
+// Unmatched /api/* → stable JSON 404 (not Express's default HTML page) so API
+// and dispatch clients always get a parseable body. Mounted after every router
+// and the SPA fallback, so it only catches genuinely unknown API paths.
+app.use("/api", (req, res) => {
+  res.status(404).json({ error: "not_found", message: `No API route for ${req.method} ${req.originalUrl ?? req.url}`, path: req.originalUrl ?? req.url });
+});
 
 // Global error handler — every route mounts before this so any throw bubbles
 // up here. We log the request method+url for debugability and return a
@@ -172,8 +242,8 @@ process.on("uncaughtException", (err: any) => {
   console.error(`[uncaught-exception] ${err?.stack ?? err}`);
 });
 
-app.listen(config.port, "127.0.0.1", () => {
-  console.log(`\n  ▶ neuroworks server: http://127.0.0.1:${config.port}`);
+const server = app.listen(config.port, config.bindHost, () => {
+  console.log(`\n  ▶ neuroworks server: http://${config.bindHost}:${config.port}`);
   console.log(`    web ui will open at: http://127.0.0.1:7470`);
   console.log(`    vault:  ${config.vaultPath}`);
     console.log(`    ollama: ${config.ollamaHost} (${config.ollamaModel})\n`);
@@ -182,6 +252,10 @@ app.listen(config.port, "127.0.0.1", () => {
   // without manual setup. Idempotent — skips if already seeded.
   try { const s = seedAiiAWebsiteConnector(); if (s) console.log(`  ✓ seeded connector "${s.label}" (${s.endpoints?.length ?? 0} endpoints)`); }
   catch (e: any) { console.warn(`  ⚠ connector seeding failed: ${e?.message ?? e}`); }
+
+  // Re-apply a UI-added active model provider (BYO API key) to the runtime
+  // router so it survives restarts without editing .env.
+  import("./lib/model-providers.js").then(m => { try { m.loadAndApplyActiveProvider(); } catch { /* tolerate */ } }).catch(() => {});
 
   // Pre-warm the default model so the first user task doesn't pay model-load
   // tax (5-8s on cold cache). Fire-and-forget — server is already accepting
@@ -322,7 +396,18 @@ let shuttingDown = false;
 async function gracefulExit(signal: string) {
   if (shuttingDown) return;
   shuttingDown = true;
-  console.log(`\n  ⏻ received ${signal} — flushing pending vault writes…`);
+  console.log(`\n  ⏻ received ${signal} — draining connections + flushing pending vault writes…`);
+  // Hard-exit safety net: if any teardown step wedges (a hung socket, a stuck
+  // flush), don't hang the container forever — force exit after a bounded grace
+  // period so the orchestrator's SIGKILL never has to.
+  const graceMs = Number(process.env.NEUROWORKS_SHUTDOWN_GRACE_MS ?? "12000") || 12000;
+  const hardKill = setTimeout(() => {
+    console.warn(`  ⚠ shutdown grace (${graceMs}ms) elapsed — forcing exit`);
+    process.exit(1);
+  }, graceMs);
+  hardKill.unref();
+  // Stop accepting new connections immediately so nothing new starts mid-drain.
+  try { server.close(); } catch { /* server may not be listening yet */ }
   // Mark every in-flight job as failed BEFORE we let the process exit.
   // Without this, a tsx-watch reload (very common in dev) would leave
   // pending/running jobs in indeterminate state — the in-memory map dies

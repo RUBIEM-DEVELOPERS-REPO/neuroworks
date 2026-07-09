@@ -5,6 +5,7 @@ import { Card, Button } from "../components/Card";
 type Persona = {
   id: string; name: string; role: string; description: string; jobDescription: string;
   tone?: string; responsibilities: string[]; createdAt: string;
+  language?: "en" | "sn" | "nd";
 };
 
 export function Personas() {
@@ -20,6 +21,7 @@ export function Personas() {
   const [name, setName] = useState("");
   const [jd, setJd] = useState("");
   const [tone, setTone] = useState("");
+  const [workMode, setWorkMode] = useState<"agent" | "hybrid" | "human">("agent");
   const [preview, setPreview] = useState<{ role: string; description: string; tone: string; responsibilities: string[] } | null>(null);
   const [previewBusy, setPreviewBusy] = useState(false);
   const previewTimer = useRef<any>(null);
@@ -73,7 +75,7 @@ export function Personas() {
     if (!name.trim() || !jd.trim()) { setErr("name and job description are required"); return; }
     setCreating(true); setErr("");
     try {
-      await api.createPersona({ name: name.trim(), jobDescription: jd, tone: tone || preview?.tone, role: preview?.role, description: preview?.description, responsibilities: preview?.responsibilities });
+      await api.createPersona({ name: name.trim(), jobDescription: jd, tone: tone || preview?.tone, role: preview?.role, description: preview?.description, responsibilities: preview?.responsibilities, workMode } as any);
       setName(""); setJd(""); setTone(""); setPreview(null);
       await load();
     } catch (e: any) { setErr(e.message); }
@@ -115,6 +117,22 @@ export function Personas() {
           <div>
             <label className="block text-xs text-cream-300 mb-1.5 uppercase tracking-wider">Tone (optional)</label>
             <input value={tone} onChange={e => setTone(e.target.value)} placeholder="e.g. concise · warm · formal" className="w-full bg-ink-800 border border-ink-700 rounded-md px-3 py-2 text-sm focus:outline-none focus:border-violet-500" />
+          </div>
+          <div>
+            <label className="block text-xs text-cream-300 mb-1.5 uppercase tracking-wider">Work mode — who does this role's work?</label>
+            <div className="grid grid-cols-3 gap-2">
+              {([
+                { v: "agent", t: "Full agent", d: "Runs autonomously end to end" },
+                { v: "hybrid", t: "Agent + human", d: "Agent works, pauses to ask you for the human parts" },
+                { v: "human", t: "Human worker", d: "A person does the work; the system tracks it" },
+              ] as const).map(o => (
+                <button key={o.v} type="button" onClick={() => setWorkMode(o.v)}
+                  className={`rounded-md border px-3 py-2 text-left ${workMode === o.v ? "border-violet-500/70 bg-violet-500/10" : "border-ink-700 bg-ink-800 hover:border-ink-600"}`}>
+                  <div className="text-xs text-cream-100 font-medium">{o.t}</div>
+                  <div className="text-[10px] text-cream-300/60 mt-0.5">{o.d}</div>
+                </button>
+              ))}
+            </div>
           </div>
 
           {previewBusy && <div className="text-xs text-cream-300/60">Extracting role / tone / responsibilities…</div>}
@@ -161,6 +179,33 @@ export function Personas() {
               </div>
               {p.description && <div className="text-xs text-cream-300/80 mt-2">{p.description}</div>}
               {p.tone && <div className="text-[10px] text-cream-300/50 mt-1">tone: {p.tone}</div>}
+              <div className="flex items-center gap-2 mt-2">
+                <span className="text-[10px] text-cream-300/50 uppercase tracking-wider">work mode</span>
+                <select
+                  value={(p as any).workMode ?? "agent"}
+                  onChange={async e => { try { await api.updatePersona(p.id, { workMode: e.target.value as any }); await load(); } catch (er: any) { setErr(er.message); } }}
+                  className="bg-ink-800 border border-ink-700 text-[11px] text-cream-200 rounded px-1.5 py-0.5"
+                  title="agent = fully autonomous · hybrid = agent + pauses for your input · human = person does the work, system tracks it"
+                >
+                  <option value="agent">agent</option>
+                  <option value="hybrid">hybrid</option>
+                  <option value="human">human</option>
+                </select>
+              </div>
+              <div className="flex items-center gap-2 mt-2">
+                <span className="text-[10px] text-cream-300/50 uppercase tracking-wider">language</span>
+                <select
+                  value={p.language ?? ""}
+                  onChange={async e => { try { await api.updatePersona(p.id, { language: (e.target.value || undefined) as any }); await load(); } catch (er: any) { setErr(er.message); } }}
+                  className="bg-ink-800 border border-ink-700 text-[11px] text-cream-200 rounded px-1.5 py-0.5"
+                  title="Pin this agent's output language, overriding the org-wide default set in Settings"
+                >
+                  <option value="">org default</option>
+                  <option value="en">English</option>
+                  <option value="sn">chiShona</option>
+                  <option value="nd">isiNdebele</option>
+                </select>
+              </div>
               {p.responsibilities.length > 0 && (
                 <details className="mt-2">
                   <summary className="text-[11px] text-cream-300 cursor-pointer hover:text-cream-100">Responsibilities ({p.responsibilities.length})</summary>

@@ -70,6 +70,24 @@ export type KnowledgePack = {
   name: string;
   installed: boolean;
   files: { path: string; title: string; wordCount: number }[];
+  kind?: "sector" | "dataset";
+  meta?: { recordCount?: number; avgConfidence?: number; rootHash?: string; source?: string; createdAt?: string };
+};
+export type DatasetStage = { stage: string; in: number; out: number; note: string };
+export type Dataset = {
+  id: string;
+  name: string;
+  sector?: string;
+  source: string;
+  createdAt: string;
+  rawCount: number;
+  recordCount: number;
+  reviewQueue: number;
+  avgConfidence: number;
+  rootHash: string;
+  fields: string[];
+  stages: DatasetStage[];
+  outputs: { csv: string; jsonl: string; rag: string; card: string };
 };
 export type QualitySummary = {
   totalFlags: number;
@@ -91,6 +109,9 @@ export type QualityFlag = {
   rating: "up" | "down";
   note?: string;
   category?: string;
+  language?: "en" | "sn" | "nd";
+  persona?: string;
+  template?: string;
   ts: string;
 };
 
@@ -103,6 +124,39 @@ export const api = {
   runTemplate: (id: string, inputs: Record<string, any>) => req<{ jobId: string; requiresApproval: boolean; status: string }>(`/api/templates/run/${id}`, { method: "POST", body: JSON.stringify(inputs) }),
   getJob: (id: string) => req<any>(`/api/templates/jobs/${id}`),
   listJobs: () => req<{ jobs: any[] }>("/api/templates/jobs"),
+  // Historical median durations per task type (+ global fallback) so a running
+  // task can show an ETA. See server jobs.etaStats().
+  taskEtaStats: () => req<{ byType: Record<string, { medianMs: number; count: number }>; globalMedianMs: number; count: number }>("/api/tasks/eta"),
+  // Hybrid workforce — tasks waiting on the human, resume-with-input, and the
+  // where-does-time-go decomposition (agent runtime vs waiting-on-human vs
+  // logged human work).
+  tasksWaiting: () => req<{ waiting: WaitingTask[] }>("/api/tasks/waiting"),
+  submitHumanInput: (id: string, responses: { prompt: string; response: string }[], note?: string) =>
+    req<{ jobId: string; continuesJobId: string }>(`/api/tasks/jobs/${encodeURIComponent(id)}/human-input`, { method: "POST", body: JSON.stringify({ responses, note }) }),
+  timeAnalysis: (days = 30) => req<TimeAnalysis>(`/api/tasks/time-analysis?days=${days}`),
+  workforceCost: (days = 30) => req<WorkforceCost>(`/api/cost/workforce?days=${days}`),
+  addHumanWork: (body: { rows?: { email: string; date: string; hours: number; description?: string }[]; csv?: string; source?: "upload" | "connector" | "manual" }) =>
+    req<{ added: number; errors: { row: number; error: string }[] }>("/api/cost/human-work", { method: "POST", body: JSON.stringify(body) }),
+  updatePersona: (id: string, patch: { workMode?: WorkMode; tone?: string; description?: string; role?: string; language?: "en" | "sn" | "nd" }) =>
+    req<{ persona: any }>(`/api/personas/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(patch) }),
+  // Paynow (Zimbabwe) gateway — sits alongside Stripe.
+  paynowStatus: () => req<{ enabled: boolean; provider: "paynow"; integrationId?: string; detail?: string }>("/api/payments/paynow/status"),
+  createPaynowLink: (body: { amount: number; description: string; reference?: string; email?: string }) =>
+    req<{ payment: { reference: string; amount: number; browserUrl: string; pollUrl: string; status: string } }>("/api/payments/paynow/links", { method: "POST", body: JSON.stringify(body) }),
+  // Self-signup + admin approval + org management (Admin page).
+  signup: (body: { name: string; email: string; password: string; department?: string; title?: string }) =>
+    req<{ ok: true; user: User; message: string }>("/api/auth/signup", { method: "POST", body: JSON.stringify(body) }),
+  listPendingUsers: () => req<{ pending: User[] }>("/api/users/pending"),
+  approveUser: (id: string, body: { role?: UserRole; department?: string; workMode?: WorkMode; title?: string } = {}) =>
+    req<{ user: User }>(`/api/users/${encodeURIComponent(id)}/approve`, { method: "POST", body: JSON.stringify(body) }),
+  rejectUser: (id: string) => req<{ ok: true }>(`/api/users/${encodeURIComponent(id)}/reject`, { method: "POST" }),
+  listSessions: () => req<{ sessions: { id: string; userId: string; name?: string; email?: string; role?: UserRole; createdAt: string; lastSeenAt: string }[] }>("/api/users/sessions"),
+  revokeSession: (id: string) => req<{ ok: true }>("/api/users/sessions/revoke", { method: "POST", body: JSON.stringify({ id }) }),
+  orgOverview: () => req<{ total: number; pending: number; disabled: number; byDepartment: { department: string; count: number }[]; byLayer: Record<AccessLayer, number>; byWorkMode: Record<"agent" | "hybrid" | "human" | "unset", number> }>("/api/users/overview"),
+  // Layer bundles — what each access level sees (Add-user modal preview).
+  accessLayers: () => req<{ layers: Record<AccessLayer, { label: string; sees: string[]; hidden: string[] }> }>("/api/auth/layers"),
+  paynowPoll: (pollUrl: string) =>
+    req<{ status: { reference?: string; paynowReference?: string; amount?: number; status: string; paid: boolean; hashValid: boolean } }>("/api/payments/paynow/poll", { method: "POST", body: JSON.stringify({ pollUrl }) }),
   approveJob: (id: string) => req<{ jobId: string; status: string }>(`/api/templates/jobs/${id}/approve`, { method: "POST" }),
   rejectJob: (id: string) => req<{ jobId: string; status: string }>(`/api/templates/jobs/${id}/reject`, { method: "POST" }),
   retryJob: (id: string) => req<{ jobId: string; retryOf: string }>(`/api/templates/jobs/${id}/retry`, { method: "POST" }),
@@ -222,7 +276,7 @@ export const api = {
   brainEnsureSidecar: (path: string, force = false) => req<{ ok: true; sidecarPath: string; sourcePath: string; regenerated: boolean; reason?: string; bytes?: number }>("/api/brain/ensure-sidecar", { method: "POST", body: JSON.stringify({ path, force }) }),
   // Onboarding.
   getOnboarding: () => req<OnboardingData>("/api/onboarding"),
-  setOnboarding: (body: { completed: boolean; sector?: string; language?: string; orgName?: string }) =>
+  setOnboarding: (body: { completed: boolean; sector?: string; customSectorName?: string; language?: string; orgName?: string }) =>
     req<{ state: OnboardingState }>("/api/onboarding", { method: "PUT", body: JSON.stringify(body) }),
   getOnboardingContext: (sector?: string) =>
     req<{ sector: string; context: string }>(`/api/onboarding/context${sector ? `?sector=${encodeURIComponent(sector)}` : ""}`),
@@ -259,6 +313,18 @@ export const api = {
     profiles: Record<string, Record<string, number>>;
   }>("/api/models"),
   setDefaultModel: (name: string) => req<{ default: string; previous: string; ephemeral: boolean; hint: string }>("/api/models/default", { method: "POST", body: JSON.stringify({ name }) }),
+  modelCatalog: () => req<{ catalog: { name: string; size: string; blurb: string; installed: boolean }[] }>("/api/models/catalog"),
+  deleteModel: (name: string) => req<{ ok: true; removed: string }>(`/api/models/installed/${encodeURIComponent(name)}`, { method: "DELETE" }),
+  // Bring-your-own model providers (cloud APIs the user already uses).
+  listModelProviders: () => req<{
+    providers: { id: string; label: string; kind: string; baseUrl: string; model: string; active: boolean; keyPrefix: string; createdAt: string }[];
+    kinds: Record<string, { label: string; baseUrl: string; modelHint: string }>;
+    active: { model: string; baseUrl: string } | null;
+  }>("/api/models/providers"),
+  addModelProvider: (body: { kind: string; model: string; apiKey: string; label?: string; baseUrl?: string; active?: boolean }) =>
+    req<{ provider: any }>("/api/models/providers", { method: "POST", body: JSON.stringify(body) }),
+  activateModelProvider: (id: string) => req<{ provider: any }>(`/api/models/providers/${encodeURIComponent(id)}/activate`, { method: "POST" }),
+  removeModelProvider: (id: string) => req<{ ok: true }>(`/api/models/providers/${encodeURIComponent(id)}`, { method: "DELETE" }),
   // Open a live event stream for a running job. Returns the
   // EventSource so the caller can attach onmessage / onclose handlers
   // and close() when the consumer unmounts. Use this for streaming
@@ -363,9 +429,9 @@ export const api = {
   session: () => req<{ user: User | null }>("/api/auth/session"),
   loginEvents: (limit = 50) => req<{ events: LoginEvent[] }>(`/api/auth/login-events?limit=${limit}`),
   listUsers: () => req<{ users: User[] }>("/api/users"),
-  addUser: (body: { name: string; email: string; role?: UserRole; title?: string; department?: string; password?: string }) =>
+  addUser: (body: { name: string; email: string; role?: UserRole; title?: string; department?: string; password?: string; workMode?: WorkMode; salaryMonthly?: number }) =>
     req<{ user: User }>("/api/users", { method: "POST", body: JSON.stringify(body) }),
-  updateUser: (id: string, patch: Partial<{ name: string; email: string; role: UserRole; title: string; department: string; status: UserStatus }>) =>
+  updateUser: (id: string, patch: Partial<{ name: string; email: string; role: UserRole; title: string; department: string; status: UserStatus; workMode: WorkMode | null; salaryMonthly: number | null }>) =>
     req<{ user: User }>(`/api/users/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(patch) }),
   setUserPassword: (id: string, password: string) =>
     req<{ ok: true }>(`/api/users/${encodeURIComponent(id)}/password`, { method: "POST", body: JSON.stringify({ password }) }),
@@ -374,7 +440,25 @@ export const api = {
   listKnowledgePacks: () => req<{ packs: KnowledgePack[] }>("/api/knowledge-packs"),
   installKnowledgePack: (sectorId: string) =>
     req<{ ok: boolean; files: string[] }>(`/api/knowledge-packs/${encodeURIComponent(sectorId)}/install`, { method: "POST" }),
+  // ADRS data pipeline — published datasets.
+  listDatasets: () => req<{ datasets: Dataset[] }>("/api/datasets"),
+  getDataset: (id: string) => req<{ dataset: Dataset }>(`/api/datasets/${encodeURIComponent(id)}`),
+  publishDataset: (body: { name: string; sector?: string; keyField?: string; confidenceThreshold?: number; records?: any[]; sourceLabel?: string; query?: string }) =>
+    req<{ ok: true; dataset: Dataset }>("/api/datasets/publish", { method: "POST", body: JSON.stringify(body) }),
+  deleteDataset: (id: string) => req<{ ok: true }>(`/api/datasets/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  // Omnisignal — multi-source acquisition feeding ADRS.
+  omniKinds: () => req<{ kinds: { kind: string; needs: string; description: string }[] }>("/api/omnisignal/kinds"),
+  omniAcquire: (sources: any[]) =>
+    req<{ records: any[]; report: { source: string; kind: string; category: string; count: number; error?: string }[]; total: number }>(
+      "/api/omnisignal/acquire", { method: "POST", body: JSON.stringify({ sources }) }),
+  omniPublish: (body: { name: string; sources: any[]; sector?: string; keyField?: string }) =>
+    req<{ acquisition: { report: any[]; total: number }; published?: { manifest: Dataset }; note?: string }>(
+      "/api/omnisignal/publish", { method: "POST", body: JSON.stringify(body) }),
+  datasetOutputUrl: (id: string, kind: "csv" | "jsonl" | "rag" | "card") =>
+    `/api/datasets/${encodeURIComponent(id)}/output/${kind}`,
   // Quality dashboard.
+  submitQualityFlag: (body: { jobId: string; rating: "up" | "down"; note?: string; category?: string; language?: "en" | "sn" | "nd"; persona?: string; template?: string; score?: number }) =>
+    req<{ ok: true; flag: QualityFlag }>("/api/quality/flag", { method: "POST", body: JSON.stringify(body) }),
   getQualitySummary: () => req<QualitySummary>("/api/quality/summary"),
   getQualityFlags: (since?: string) =>
     req<{ flags: QualityFlag[] }>(`/api/quality/flags${since ? `?since=${encodeURIComponent(since)}` : ""}`),
@@ -409,8 +493,14 @@ export const api = {
   getOrchestration: (id: string) => req<{ run: any }>(`/api/orchestrate/runs/${encodeURIComponent(id)}`),
 };
 
-export type UserRole = "admin" | "member" | "viewer";
-export type UserStatus = "active" | "invited" | "disabled";
+// Access layers: superadmin (money + secrets), admin (people + work), staff
+// (own department's workbench). member/viewer are legacy aliases of staff.
+export type UserRole = "superadmin" | "admin" | "staff" | "member" | "viewer";
+export type AccessLayer = "superadmin" | "admin" | "staff";
+export const layerOfRole = (role?: UserRole): AccessLayer =>
+  role === "superadmin" ? "superadmin" : role === "admin" ? "admin" : "staff";
+export type UserStatus = "active" | "invited" | "disabled" | "pending";
+export type WorkMode = "agent" | "hybrid" | "human";
 export type User = {
   id: string;
   name: string;
@@ -419,10 +509,50 @@ export type User = {
   title?: string;
   department?: string;
   status: UserStatus;
+  // Hybrid workforce: how much of this person's role the system performs.
+  workMode?: WorkMode;
+  // Monthly salary (ZAR) — feeds the Cost page's human-cost side. Admin-only UI.
+  salaryMonthly?: number;
   hasPassword: boolean;
   createdAt: string;
   lastLoginAt?: string;
   loginCount: number;
+};
+
+// A task parked in waiting_on_human — the structured ask the operator answers.
+export type WaitingItem = { type: "answer" | "upload" | "approval" | "action"; prompt: string };
+export type WaitingTask = {
+  id: string;
+  title: string;
+  persona?: string;
+  startedAt: string;
+  waitingSince: string;
+  items: WaitingItem[];
+  reason?: string;
+  task?: string;
+};
+
+export type TimeAnalysis = {
+  days: number;
+  totals: { agentMs: number; humanWaitMs: number; openWaitMs: number; humanWorkMs: number; totalMs: number; pct: { agent: number; humanWait: number; humanWork: number } };
+  verdict: string;
+  slowestAgentTypes: { type: string; ms: number }[];
+  longestWaits: { title: string; waitMs: number; open: boolean }[];
+  humanWorkHours: number;
+  jobCount: number;
+};
+
+export type WorkforceCost = {
+  days: number;
+  agent: { costUsd: number; calls: number };
+  human: {
+    totalHours: number;
+    costZar: number;
+    unpricedHours: number;
+    workHoursPerMonth: number;
+    byUser: { email: string; name?: string; workMode?: WorkMode; hours: number; entries: number; hourlyRateZar?: number; costZar?: number; salarySet: boolean }[];
+    byDay: { date: string; hours: number }[];
+  };
 };
 export type LoginEvent = { at: string; userId?: string; email: string; name?: string; ok: boolean; reason?: string; ip?: string; userAgent?: string };
 
@@ -553,12 +683,16 @@ export type WorkforceAgent = {
 };
 export type WorkforcePerson = {
   kind: "human";
+  id: string;
   name: string;
   email: string;
   role: string;
   title?: string;
   department: string;
   status: string;
+  workMode?: WorkMode;
+  // Superadmin-only (server redacts for everyone else).
+  salaryMonthly?: number;
 };
 export type WorkforceDepartment = { department: string; agents: WorkforceAgent[]; people: WorkforcePerson[] };
 
@@ -613,10 +747,13 @@ export type SectorInfo = {
   nameNdebele?: string;
   description: string;
   icon: string;
+  suggestedDepartments?: string[];
+  suggestedIntegrations?: string[];
 };
 export type OnboardingState = {
   completed: boolean;
   sector?: string;
+  customSectorName?: string;
   language: string;
   orgName?: string;
   completedAt?: string;

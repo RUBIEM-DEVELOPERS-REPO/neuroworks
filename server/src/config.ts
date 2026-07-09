@@ -1,4 +1,5 @@
 import { config as loadEnv } from "dotenv";
+import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { dirname } from "node:path";
@@ -80,6 +81,13 @@ const minimaxMusicModel = pick("MINIMAX_MUSIC_MODEL", "music-2.6");
 // outputs to a group. Chat works without it.
 const minimaxGroupId = pick("MINIMAX_GROUP_ID", "");
 
+// HeyGen — hosted AI avatar/spokesperson VIDEO generation (talking-head videos
+// from a script + an avatar + a voice). Distinct from MiniMax's scene video:
+// HeyGen is presenter/explainer style. Gated on HEYGEN_API_KEY; absent = the
+// avatar-video capability simply isn't offered. Async API (create → poll).
+const heygenApiKey = pick("HEYGEN_API_KEY", "");
+const heygenBaseUrl = pick("HEYGEN_BASE_URL", "https://api.heygen.com");
+
 // Payments — Stripe gateway for outbound billing (agents create payment links
 // to bill clients) AND platform subscriptions (checkout sessions + billing
 // portal). Implemented over the Stripe REST API via fetch — no SDK dependency.
@@ -93,6 +101,16 @@ const paymentsCurrency = pick("PAYMENTS_CURRENCY", "zar").toLowerCase();
 // Where Stripe-hosted checkout returns the payer after success/cancel.
 const paymentsSuccessUrl = pick("PAYMENTS_SUCCESS_URL", "https://neuroworks.local/paid");
 const paymentsCancelUrl = pick("PAYMENTS_CANCEL_URL", "https://neuroworks.local/cancelled");
+
+// Paynow (Zimbabwe) gateway — local-market payments (EcoCash, OneMoney, cards,
+// bank). Gated on both credentials being present; sits alongside Stripe, not
+// instead of it. resulturl is where Paynow POSTs status updates (must be
+// publicly reachable in production); returnurl is where the payer lands after.
+const paynowIntegrationId = pick("PAYNOW_INTEGRATION_ID", "");
+const paynowIntegrationKey = pick("PAYNOW_INTEGRATION_KEY", "");
+const paynowMerchantEmail = pick("PAYNOW_MERCHANT_EMAIL", "arthur@rubiem.com");
+const paynowResultUrl = pick("PAYNOW_RESULT_URL", "https://neuroworks.local/api/payments/paynow/result");
+const paynowReturnUrl = pick("PAYNOW_RETURN_URL", "https://neuroworks.local/paid");
 
 // Hermes executor — when the primary executor is switched to Hermes (runtime
 // toggle, see executor-mode.ts), tasks run through the Hermes CLI instead of
@@ -116,6 +134,24 @@ const name = pick("CLAWBOT_NAME", "primary");
 // to delegate persona-shifted work (away from "primary" toward "persona-shifter").
 // Free-form, but recommended values are: primary | persona-shifter | general | reviewer.
 const role = pick("CLAWBOT_ROLE", "primary");
+
+// ── Production web serving + network bind ──────────────────────────────
+// Locally, `pnpm dev` runs two processes: the Vite dev server (7470, proxies
+// /api) and this API (loopback 7471). In the production container we instead
+// build the SPA once and let THIS server serve the minified assets, so there's
+// a single hardened process and no dev server exposed. All three toggles
+// default to the local two-port behaviour so nothing changes for `pnpm dev`.
+//   SERVE_WEB=1            → serve web/dist (built SPA) with a history fallback
+//   NEUROWORKS_BIND_HOST   → 0.0.0.0 in a container so the port is reachable
+//   NODE_ENV=production    → flips fail-fast validation on (see validateConfig)
+const bindHost = pick("NEUROWORKS_BIND_HOST", "127.0.0.1");
+const serveWeb = ["1", "true", "yes"].includes(pick("SERVE_WEB", "").toLowerCase());
+// web/dist sits at clawbot/web/dist; __dirname is server/src (tsx) so ../../web/dist.
+const webDistPath = resolve(__dirname, "../../web/dist");
+const nodeEnv = (process.env.NODE_ENV ?? "development").trim().toLowerCase();
+const isProduction = nodeEnv === "production";
+// Strict env validation: on in production, or forced with NEUROWORKS_STRICT_ENV=1.
+const strictEnv = isProduction || ["1", "true", "yes"].includes((process.env.NEUROWORKS_STRICT_ENV ?? "").toLowerCase());
 
 export const config = {
   githubToken,
@@ -144,6 +180,9 @@ export const config = {
   minimaxMusicModel,
   minimaxGroupId,
   minimaxEnabled: minimaxApiKey.length > 0,
+  heygenApiKey,
+  heygenBaseUrl,
+  heygenEnabled: heygenApiKey.length > 0,
   stripeSecretKey,
   stripePublishableKey,
   stripeWebhookSecret,
@@ -152,12 +191,24 @@ export const config = {
   paymentsCancelUrl,
   paymentsEnabled: stripeSecretKey.length > 0,
   paymentsProvider: "stripe" as const,
+  paynowIntegrationId,
+  paynowIntegrationKey,
+  paynowMerchantEmail,
+  paynowResultUrl,
+  paynowReturnUrl,
+  paynowEnabled: paynowIntegrationId.length > 0 && paynowIntegrationKey.length > 0,
   hermesModel,
   hermesProvider,
   port,
   peers,
   name,
   role,
+  bindHost,
+  serveWeb,
+  webDistPath,
+  nodeEnv,
+  isProduction,
+  strictEnv,
   ready: missing.length === 0,
   missing: [...missing],
 };
@@ -165,4 +216,49 @@ export const config = {
 if (missing.length > 0) {
   console.warn(`\n⚠  NeuroWorks server starting with degraded mode — missing: ${missing.join(", ")}`);
   console.warn(`   Copy .env.example -> .env and fill in to unlock GitHub/vault features.\n`);
+}
+
+// ── Fail-fast validation ───────────────────────────────────────────────
+// Call once at boot BEFORE wiring routes. In strict mode (production, or
+// NEUROWORKS_STRICT_ENV=1) any fatal misconfiguration exits with a clear,
+// actionable message instead of surfacing as a confusing failure deep in a
+// request. In non-strict/local mode these become warnings so `pnpm dev` still
+// boots in degraded mode. Returns nothing; calls process.exit(1) on fatal.
+export function validateConfig(): void {
+  const fatal: string[] = [];
+  const warn: string[] = [];
+
+  // Port must be a real listenable number.
+  if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+    fatal.push(`NEUROWORKS_PORT="${process.env.NEUROWORKS_PORT ?? ""}" is not a valid TCP port (1-65535).`);
+  }
+
+  // Serving the built SPA requires the build to exist — otherwise every page
+  // load 404s with no hint. Check for the entry file, not just the dir.
+  if (serveWeb) {
+    const indexHtml = resolve(webDistPath, "index.html");
+    if (!existsSync(indexHtml)) {
+      fatal.push(`SERVE_WEB is on but no built SPA found at ${webDistPath} — run "pnpm -F clawbot-web build" first.`);
+    }
+  }
+
+  // Exposing the server beyond loopback without the origin guard is a DNS-
+  // rebinding hole. Allow it only when explicitly overridden.
+  if (bindHost !== "127.0.0.1" && bindHost !== "localhost" && process.env.CLAWBOT_ORIGIN_GUARD === "0") {
+    warn.push(`bound to ${bindHost} with CLAWBOT_ORIGIN_GUARD=0 — the API is reachable off-host with no Host/Origin defense. Put it behind a trusted reverse proxy only.`);
+  }
+
+  // In strict mode the required env (GITHUB_TOKEN etc.) must actually be set.
+  if (strictEnv && missing.length > 0) {
+    fatal.push(`missing required env in production: ${missing.join(", ")}. Set these in .env or the container environment.`);
+  }
+
+  for (const w of warn) console.warn(`⚠  [config] ${w}`);
+
+  if (fatal.length > 0) {
+    console.error(`\n✖  NeuroWorks refused to start — fatal configuration ${fatal.length === 1 ? "error" : "errors"}:`);
+    for (const f of fatal) console.error(`   • ${f}`);
+    console.error(`\n   (strict validation is ${strictEnv ? "ON" : "OFF"}; set NEUROWORKS_STRICT_ENV=0 to downgrade to warnings for local dev.)\n`);
+    process.exit(1);
+  }
 }

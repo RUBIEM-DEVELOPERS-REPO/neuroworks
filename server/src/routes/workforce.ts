@@ -12,7 +12,8 @@
 
 import { Router } from "express";
 import { loadPersonas, BUILTIN_PERSONAS } from "../lib/personas.js";
-import { directory, addUser, getUserByEmail } from "../lib/users.js";
+import { addUser, getUserByEmail, listUsers } from "../lib/users.js";
+import { callerLayer } from "../lib/access.js";
 import { ingestContacts } from "../lib/doc-ingest.js";
 
 export const workforceRouter = Router();
@@ -67,7 +68,7 @@ const DEPT_RULES: { dept: string; re: RegExp }[] = [
   { dept: "AI & Strategy", re: /\b(\bai\b|head of ai|machine learning|strategy|polymath)\b/i },
 ];
 
-function personaDepartment(role: string, id: string): string {
+export function personaDepartment(role: string, id: string): string {
   const hay = `${role} ${id}`;
   for (const r of DEPT_RULES) if (r.re.test(hay)) return r.dept;
   return "General";
@@ -88,15 +89,26 @@ type AgentEntry = {
 
 type PersonEntry = {
   kind: "human";
+  // User id so the superadmin can MANAGE the person from this page (work
+  // mode, salary, department, disable, remove) via the /api/users endpoints.
+  id: string;
   name: string;
   email: string;
   role: string;
   title?: string;
   department: string;
   status: string;
+  workMode?: string;
+  // Present only for superadmin/machine callers — money stays layer-gated.
+  salaryMonthly?: number;
 };
 
-workforceRouter.get("/", (_req, res) => {
+workforceRouter.get("/", (req, res) => {
+  // Layer-aware view: superadmin/machine callers get management fields
+  // (salary + disabled/pending people so they can be re-enabled from here);
+  // everyone else gets the plain active-people contact book.
+  const layer = callerLayer(req);
+  const isSuper = layer === null || layer === "superadmin";
   let agents: AgentEntry[] = [];
   try {
     const builtinIds = new Set(BUILTIN_PERSONAS.map(p => p.id));
@@ -115,15 +127,20 @@ workforceRouter.get("/", (_req, res) => {
 
   let people: PersonEntry[] = [];
   try {
-    people = directory().map(u => ({
-      kind: "human" as const,
-      name: u.name,
-      email: u.email,
-      role: u.role,
-      title: u.title,
-      department: u.department?.trim() || "Unassigned",
-      status: u.status,
-    }));
+    people = listUsers()
+      .filter(u => isSuper || u.status === "active" || u.status === "invited")
+      .map(u => ({
+        kind: "human" as const,
+        id: u.id,
+        name: u.name,
+        email: u.email,
+        role: u.role,
+        title: u.title,
+        department: u.department?.trim() || "Unassigned",
+        status: u.status,
+        workMode: u.workMode,
+        ...(isSuper && u.salaryMonthly ? { salaryMonthly: u.salaryMonthly } : {}),
+      }));
   } catch { people = []; }
 
   // Group both populations by department.

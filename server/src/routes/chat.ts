@@ -11,6 +11,7 @@ import { localInflightCount, pickLightestIdlePeer, pickPeerByRole, pickExecutor,
 import { curatePeerOutput } from "../lib/curation.js";
 import { ensureWorker, ensureExtraWorker } from "../lib/worker-manager.js";
 import { isHermesPrimary, getHermesModelOverride } from "../lib/executor-mode.js";
+import { detectsShonaOrNdebele, shonaLanguageDirective } from "../lib/shona-glossary.js";
 
 // Below this answer length (chars), a Hermes result is treated as "couldn't do
 // it" and offloaded to clawbot. Catches empty / no-final-response / stub replies.
@@ -29,10 +30,18 @@ const HERMES_QUALITY_TIMEOUT_MS = Number(process.env.CLAWBOT_HERMES_QUALITY_TIME
 async function scoreHermesAnswer(task: string, answer: string, personaContext?: string): Promise<{ pass: boolean; score: number } | null> {
   try {
     const { findPrimitive } = await import("../lib/primitives.js");
+    const { taskWantsResearch } = await import("../lib/deliverable.js");
     const prim = findPrimitive("quality.check");
     if (!prim) return null;
+    // Hermes answers from its own knowledge (no retrieval), so unless the task
+    // explicitly asks for grounding (sources / current / company data), grade
+    // it as an ungrounded conversational answer — otherwise the research rubric
+    // inflates factuality_risk on every uncited claim and a correct answer
+    // fails the gate. If the task DOES want grounding, keep the strict rubric:
+    // Hermes can't ground it, so failing → offload to clawbot is the right call.
+    const grounded = taskWantsResearch(task);
     const res: any = await Promise.race([
-      prim.handler({ task, answer, ...(personaContext ? { context: personaContext } : {}) }),
+      prim.handler({ task, answer, grounded, ...(personaContext ? { context: personaContext } : {}) }),
       new Promise((_, rej) => setTimeout(() => rej(new Error("quality-gate timeout")), HERMES_QUALITY_TIMEOUT_MS)),
     ]);
     if (!res || typeof res !== "object") return null;
@@ -892,7 +901,23 @@ async function handleChat(req: any, res: any) {
       // too-thin answer — we OFFLOAD to clawbot's full pipeline below. Each
       // agent does what it's best at; clawbot catches the rest.
       let offloadedFromHermes = false;
+      // If OpenRouter's circuit is open (a recent outage), Hermes — which runs
+      // on an OpenRouter model — would just burn its full 220s timeout before
+      // failing and offloading anyway. Skip it and go straight to clawbot, which
+      // can plan/synth on the local model. This alone avoids ~220s of dead wait
+      // per task during an OpenRouter outage.
+      let skipHermesForOutage = false;
       if (isHermesPrimary()) {
+        try {
+          const { openrouterCircuitOpen } = await import("../lib/openrouter.js");
+          if (openrouterCircuitOpen()) {
+            skipHermesForOutage = true;
+            offloadedFromHermes = true;
+            push("OpenRouter is unavailable right now — skipping the Hermes attempt and running on the local pipeline.");
+          }
+        } catch { /* probe optional */ }
+      }
+      if (isHermesPrimary() && !skipHermesForOutage) {
         const { runHermesAgent } = await import("../lib/hermes.js");
         let governance = "";
         try { const { loadGovernancePrefix } = await import("../lib/governance.js"); governance = loadGovernancePrefix(); } catch { /* optional */ }
@@ -1502,6 +1527,14 @@ function buildEnrichedTask(
     parts.push(`(You are operating as ${persona.name}, the ${persona.role}. Bias tool choices, output shape, and depth toward this role's conventions.)`);
   }
 
+  // ─── Zimbabwean-language support ───
+  // Detected on the CURRENT message text so it fires even on a first-turn
+  // greeting ("Mhoro") before any thread context exists. See shona-
+  // glossary.ts for provenance (adapted from ZimVoice's static vocabulary).
+  if (detectsShonaOrNdebele(text)) {
+    parts.push(shonaLanguageDirective());
+  }
+
   // ─── Retry path ───
   // If the customer said "try again differently" (or similar) AND we have a
   // prior assistant turn, build a retry-shaped task that gives the planner
@@ -1788,7 +1821,7 @@ chatRouter.post("/team", async (req, res) => {
           : content + attachmentBlock;
         const personaSuffix = personaSystemSuffix(persona);
         if (persona) push(`Working as ${persona.name} — ${persona.role}.`);
-        const r = await planAndExecute(enriched, push, (patch) => progress(patch as Record<string, unknown>), { personaSystemSuffix: personaSuffix });
+        const r = await planAndExecute(enriched, push, (patch) => progress(patch as Record<string, unknown>), { personaSystemSuffix: personaSuffix, workMode: persona?.workMode });
         if (r.hadWrites) {
           push("Wrote to second brain — committing.");
           try {

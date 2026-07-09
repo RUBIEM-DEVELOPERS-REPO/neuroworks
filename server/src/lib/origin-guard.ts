@@ -39,6 +39,15 @@ const ALLOWED_HOSTS = new Set<string>([
   `localhost:${PORT}`,
 ]);
 
+// Extra hosts for single-port production (SERVE_WEB), where the SPA and API
+// share one origin on the operator's real hostname/domain. Comma-separated,
+// e.g. CLAWBOT_ALLOWED_HOSTS=neuroworks.example.com,neuroworks.example.com:7471
+// Without this the Host allow-list would 403 every /api call from the deployed
+// SPA. Static asset GETs are exempt below, so only the SPA's XHRs need this.
+for (const h of (process.env.CLAWBOT_ALLOWED_HOSTS ?? "").split(",").map(s => s.trim().toLowerCase()).filter(Boolean)) {
+  ALLOWED_HOSTS.add(h);
+}
+
 // Web UI origin. Vite dev binds 7470; if you change that, set
 // CLAWBOT_WEB_ORIGIN to the new value (comma-separated for multiple).
 const WEB_ORIGIN_ENV = process.env.CLAWBOT_WEB_ORIGIN?.trim();
@@ -60,6 +69,9 @@ const EXEMPT_PATHS = new Set<string>([
   // Origin). Authenticity is enforced by the signature check in the handler,
   // which is strictly stronger than a Host/Origin allow-list here.
   "/api/payments/webhook",
+  // Paynow posts result updates server-to-server; authenticity is the SHA-512
+  // hash over the integration key, not the request origin.
+  "/api/payments/paynow/result",
 ]);
 
 const DISABLED = process.env.CLAWBOT_ORIGIN_GUARD === "0";
@@ -71,8 +83,23 @@ export function originGuard(req: Request, res: Response, next: NextFunction): vo
   if (DISABLED) return next();
   // CORS preflight — let the CORS middleware handle it.
   if (req.method === "OPTIONS") return next();
+  // Static SPA assets (SERVE_WEB single-port prod): any non-/api GET just
+  // returns a bundled file or the SPA shell — no secrets, no side effects — so
+  // it needn't match the Host allow-list. This lets the SPA load over the
+  // operator's real hostname while every /api endpoint below stays guarded.
+  if (req.method === "GET" && !req.path.startsWith("/api/")) return next();
   // Exempt read-only / handshake endpoints.
   if (EXEMPT_PATHS.has(req.path)) return next();
+  // External machine-dispatch surface. These endpoints authenticate with an
+  // API-key bearer token (see routes/dispatch.ts), which is strictly stronger
+  // than a Host/Origin allow-list — they're server-to-server, not browser
+  // requests. Key management stays under the guarded /api/dispatch-keys path.
+  if (req.path.startsWith("/api/v1/")) return next();
+  // Public Finance System ingest/read surface — server-to-server pushes from
+  // the company Finance System (no cross-origin browser model). Writes are
+  // gated by FINANCE_SYNC_TOKEN inside the handler, which is stronger than a
+  // Host/Origin allow-list. See routes/public-finance.ts.
+  if (req.path.startsWith("/api/public/")) return next();
 
   const host = String(req.headers.host ?? "").toLowerCase();
   if (!ALLOWED_HOSTS.has(host)) {
@@ -94,6 +121,14 @@ export function originGuard(req: Request, res: Response, next: NextFunction): vo
   const originHeader = req.headers.origin;
   if (typeof originHeader === "string" && originHeader.length > 0) {
     const origin = originHeader.toLowerCase();
+    // Same-origin request: the Origin's host matches the request Host, which we
+    // JUST validated against ALLOWED_HOSTS above. In single-port production
+    // (SERVE_WEB) the SPA is served from this same origin, so its POSTs are
+    // same-origin and safe. DNS rebinding is still blocked at the Host layer —
+    // an attacker domain never reaches here because Host wouldn't be allow-listed.
+    let originHost = "";
+    try { originHost = new URL(originHeader).host.toLowerCase(); } catch { /* malformed origin */ }
+    if (originHost && originHost === host) return next();
     if (!ALLOWED_ORIGINS.has(origin)) {
       res.status(403).json({
         error: "origin_not_allowed",

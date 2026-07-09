@@ -3,6 +3,7 @@ import {
   gatewayStatus, createPaymentLink, listPrices, createCheckoutSession,
   createBillingPortalSession, listPayments, verifyStripeSignature,
 } from "../lib/payments.js";
+import { createPaynowPayment, pollPaynowStatus, paynowGatewayStatus, parsePaynowStatusFields } from "../lib/paynow.js";
 import { newJob } from "../lib/jobs.js";
 import { persistJobRecord } from "../lib/job-store.js";
 
@@ -62,6 +63,73 @@ paymentsRouter.get("/payments", async (req, res) => {
     res.json({ payments: await listPayments(limit) });
   } catch (e: any) {
     res.status(500).json({ error: String(e?.message ?? e) });
+  }
+});
+
+// ── Paynow (Zimbabwe) — EcoCash / OneMoney / cards / bank ─────────────────
+
+paymentsRouter.get("/paynow/status", (_req, res) => {
+  res.json(paynowGatewayStatus());
+});
+
+// Create a Paynow payment. body: { amount, description, reference?, email?, returnUrl? }
+// Returns { browserUrl (send the payer here), pollUrl (poll for the outcome), reference }.
+paymentsRouter.post("/paynow/links", async (req, res) => {
+  try {
+    const b = req.body ?? {};
+    const p = await createPaynowPayment({
+      amount: Number(b.amount),
+      description: String(b.description ?? ""),
+      reference: b.reference,
+      email: b.email,
+      returnUrl: b.returnUrl,
+    });
+    res.json({ payment: p });
+  } catch (e: any) {
+    res.status(400).json({ error: String(e?.message ?? e) });
+  }
+});
+
+// Check a payment's state. body: { pollUrl }
+paymentsRouter.post("/paynow/poll", async (req, res) => {
+  try {
+    res.json({ status: await pollPaynowStatus(String(req.body?.pollUrl ?? "")) });
+  } catch (e: any) {
+    res.status(400).json({ error: String(e?.message ?? e) });
+  }
+});
+
+// Paynow result webhook — Paynow POSTs form-encoded status updates here.
+// Authenticity is the SHA-512 hash (integration key), not the origin; the
+// path is exempted from the origin guard like the Stripe webhook. Journaled
+// so payments surface on Reports + the nightly reflection.
+paymentsRouter.post("/paynow/result", (req, res) => {
+  try {
+    const fields: Record<string, string> = {};
+    const src = req.body ?? {};
+    if (Buffer.isBuffer(src) || typeof src === "string") {
+      for (const [k, v] of new URLSearchParams(String(src))) fields[k] = v;
+    } else {
+      for (const [k, v] of Object.entries(src)) fields[k] = String(v);
+    }
+    const st = parsePaynowStatusFields(fields);
+    if (!st.hashValid) {
+      console.warn(`[payments] rejected Paynow result: bad hash (ref ${st.reference ?? "?"})`);
+      return res.status(400).send("bad hash");
+    }
+    const j = newJob(`payments:paynow.${st.status.toLowerCase().replace(/\s+/g, "_")}`);
+    j.template = "payments-webhook";
+    j.title = `Paynow — ${st.status}${st.reference ? ` (${st.reference})` : ""}`;
+    j.personaName = "Payments";
+    j.status = /cancelled|failed/i.test(st.status) ? "failed" : "succeeded";
+    j.finishedAt = new Date().toISOString();
+    j.log.push(`[${j.finishedAt}] Paynow ${st.status}${st.amount !== undefined ? ` — ${st.amount}` : ""}${st.paynowReference ? ` · paynow ref ${st.paynowReference}` : ""}`);
+    j.result = { provider: "paynow", ...st };
+    try { persistJobRecord(j); } catch { /* tolerate */ }
+    res.send("ok");
+  } catch (e: any) {
+    console.warn(`[payments] Paynow result processing failed: ${e?.message ?? e}`);
+    res.status(500).send("error");
   }
 });
 

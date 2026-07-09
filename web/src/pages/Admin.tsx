@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { api } from "../lib/api";
-import { Card, StatusDot } from "../components/Card";
+import { api, type User, type UserRole, type WorkMode } from "../lib/api";
+import { Card, StatusDot, Button, showToast } from "../components/Card";
 
 export function Admin() {
   const [status, setStatus] = useState<any>(null);
@@ -30,6 +30,9 @@ export function Admin() {
         <h1 className="font-display text-3xl text-cream-50">Admin</h1>
         <p className="text-sm text-cream-300/70 mt-1">Workforce health, agents, and integrations.</p>
       </div>
+
+      {/* Organization management — sign-up approvals, live sessions, headcount. */}
+      <OrgManagement />
 
       {!status ? <Card><div className="text-sm text-cream-300/60">Loading…</div></Card> : (
         <>
@@ -438,3 +441,146 @@ function ExternalAgentRow({ agent }: { agent: any }) {
     </div>
   );
 }
+
+// ── Organization management ────────────────────────────────────────────────
+// The org-admin half of the Admin page: approve/reject self-signups (setting
+// the access layer + department at approval time), see who's signed in and
+// revoke sessions, and the headline headcount numbers. All backed by the
+// admin-gated /api/users/* org-management endpoints.
+
+function OrgManagement() {
+  const [pending, setPending] = useState<User[]>([]);
+  const [sessions, setSessions] = useState<{ id: string; name?: string; email?: string; role?: UserRole; createdAt: string; lastSeenAt: string }[]>([]);
+  const [overview, setOverview] = useState<any>(null);
+  const [denied, setDenied] = useState(false);
+
+  async function refresh() {
+    try {
+      const [p, se, ov] = await Promise.all([api.listPendingUsers(), api.listSessions(), api.orgOverview()]);
+      setPending(p.pending); setSessions(se.sessions); setOverview(ov);
+    } catch (e: any) {
+      if (e?.status === 403) setDenied(true);
+    }
+  }
+  useEffect(() => { refresh(); const i = setInterval(refresh, 8000); return () => clearInterval(i); }, []);
+
+  if (denied) return null; // staff who somehow reach /admin see nothing here
+
+  return (
+    <div className="space-y-4">
+      {overview && (
+        <Card title="Organization">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-3">
+            <OrgStat label="People" value={overview.total} />
+            <OrgStat label="Pending approval" value={overview.pending} tone={overview.pending > 0 ? "warn" : "default"} />
+            <OrgStat label="Signed in now" value={sessions.length} />
+            <OrgStat label="Disabled" value={overview.disabled} />
+          </div>
+          <div className="flex flex-wrap gap-x-5 gap-y-1 text-[11px] text-cream-300/60">
+            <span>Layers: <span className="text-cream-200">{overview.byLayer.superadmin} super · {overview.byLayer.admin} admin · {overview.byLayer.staff} staff</span></span>
+            <span>Work modes: <span className="text-cream-200">{overview.byWorkMode.agent} agent · {overview.byWorkMode.hybrid} hybrid · {overview.byWorkMode.human + overview.byWorkMode.unset} human</span></span>
+            <span>Departments: <span className="text-cream-200">{overview.byDepartment.slice(0, 5).map((d: any) => `${d.department} (${d.count})`).join(" · ")}</span></span>
+          </div>
+        </Card>
+      )}
+
+      {pending.length > 0 && (
+        <Card title={`Pending sign-ups (${pending.length})`}>
+          <div className="space-y-2">
+            {pending.map(u => <PendingRow key={u.id} u={u} onDone={refresh} />)}
+          </div>
+        </Card>
+      )}
+
+      <Card title={`Active sessions (${sessions.length})`}>
+        {sessions.length === 0 ? (
+          <div className="text-sm text-cream-300/60">Nobody is signed in right now.</div>
+        ) : (
+          <div className="space-y-1.5">
+            {sessions.map(se => (
+              <div key={se.id} className="flex items-center gap-3 py-1.5 px-2 rounded-lg bg-ink-950/50 border border-ink-800 text-[12px]">
+                <span className="w-1.5 h-1.5 rounded-full bg-leaf-500 shrink-0" />
+                <div className="flex-1 min-w-0">
+                  <span className="text-cream-100">{se.name ?? se.email ?? se.id}</span>
+                  <span className="text-cream-300/40 ml-2">{se.role ?? ""}</span>
+                </div>
+                <span className="text-cream-300/40 shrink-0">active {relAgo(se.lastSeenAt)}</span>
+                <button type="button" onClick={async () => { try { await api.revokeSession(se.id); showToast("Session revoked", "success"); refresh(); } catch (e: any) { showToast(e?.message ?? String(e), "error"); } }}
+                  className="text-[11px] text-cream-300/50 hover:text-coral-400 shrink-0">Revoke</button>
+              </div>
+            ))}
+          </div>
+        )}
+      </Card>
+    </div>
+  );
+}
+
+function relAgo(iso: string): string {
+  const s = Math.max(1, Math.round((Date.now() - new Date(iso).getTime()) / 1000));
+  if (s < 60) return `${s}s ago`;
+  const m = Math.round(s / 60); if (m < 60) return `${m}m ago`;
+  const h = Math.round(m / 60); if (h < 24) return `${h}h ago`;
+  return `${Math.round(h / 24)}d ago`;
+}
+
+function OrgStat({ label, value, tone = "default" }: { label: string; value: any; tone?: "default" | "warn" }) {
+  return (
+    <div className={`rounded-lg border px-3 py-2 ${tone === "warn" ? "border-amber-400/30 bg-amber-400/10" : "border-ink-800 bg-ink-950/50"}`}>
+      <div className="text-[10px] uppercase tracking-wider text-cream-300/50">{label}</div>
+      <div className={`text-lg font-semibold ${tone === "warn" ? "text-amber-300" : "text-cream-100"}`}>{value}</div>
+    </div>
+  );
+}
+
+// One pending sign-up: the approver sets the access layer, department, and
+// work mode right on the card, then Approve activates in one click.
+function PendingRow({ u, onDone }: { u: User; onDone: () => void }) {
+  const [role, setRole] = useState<UserRole>("staff");
+  const [department, setDepartment] = useState(u.department ?? "");
+  const [workMode, setWorkMode] = useState<WorkMode>("human");
+  const [busy, setBusy] = useState<"approve" | "reject" | null>(null);
+
+  async function approve() {
+    setBusy("approve");
+    try {
+      await api.approveUser(u.id, { role, department: department.trim() || undefined, workMode });
+      showToast(`${u.name} approved as ${role}`, "success");
+      onDone();
+    } catch (e: any) { showToast(e?.message ?? String(e), "error"); }
+    finally { setBusy(null); }
+  }
+  async function reject() {
+    if (!confirm(`Reject and delete the sign-up from ${u.name} (${u.email})?`)) return;
+    setBusy("reject");
+    try { await api.rejectUser(u.id); showToast("Sign-up rejected", "success"); onDone(); }
+    catch (e: any) { showToast(e?.message ?? String(e), "error"); }
+    finally { setBusy(null); }
+  }
+
+  const SEL = "bg-ink-950 border border-ink-800 text-[11px] text-cream-200 rounded px-1.5 py-1";
+  return (
+    <div className="rounded-lg border border-amber-400/25 bg-amber-400/[0.06] px-3 py-2.5">
+      <div className="flex items-center gap-3 flex-wrap">
+        <div className="flex-1 min-w-[180px]">
+          <div className="text-sm text-cream-100">{u.name}</div>
+          <div className="text-[11px] text-cream-300/50">{u.email} · requested {relAgo(u.createdAt)}</div>
+        </div>
+        <select value={role} onChange={e => setRole(e.target.value as UserRole)} className={SEL} title="Access layer">
+          <option value="staff">staff</option>
+          <option value="admin">admin</option>
+          <option value="superadmin">super admin</option>
+        </select>
+        <input value={department} onChange={e => setDepartment(e.target.value)} placeholder="Department" className={`${SEL} w-32`} />
+        <select value={workMode} onChange={e => setWorkMode(e.target.value as WorkMode)} className={SEL} title="Work mode">
+          <option value="human">human</option>
+          <option value="hybrid">hybrid</option>
+          <option value="agent">agent</option>
+        </select>
+        <Button onClick={approve} disabled={busy !== null}>{busy === "approve" ? "Approving…" : "Approve"}</Button>
+        <button type="button" onClick={reject} disabled={busy !== null} className="text-[11px] text-cream-300/50 hover:text-coral-400">Reject</button>
+      </div>
+    </div>
+  );
+}
+

@@ -3,13 +3,13 @@ import { primitives, findPrimitive, type Primitive } from "../lib/primitives.js"
 
 // Primitives bridge — exposes a CURATED subset of clawbot's agent primitives
 // over HTTP so an external agent (Hermes, via the MCP bridge in mcp/clawbot-
-// mcp.mjs) can call clawbot's real tools: vault grounding, connectors (→ AIIA),
+// mcp.mjs) can call clawbot's real tools: vault grounding, connectors (→ Aiia),
 // integrations, web reads, and read-only payment status. Execution happens here
 // in the LIVE server, so the real vault path + encrypted connector secrets are
 // used. NOT exposed: money-moving (payment.link) or destructive writes
 // (vault.edit/write/append, web.interact) — see ALLOWLIST.
 //
-// Scope is "grounding + connectors + AIIA". Override with CLAWBOT_MCP_TOOLS
+// Scope is "grounding + connectors + Aiia". Override with CLAWBOT_MCP_TOOLS
 // (comma-separated primitive names) if you need a different set.
 
 export const primitivesRouter = Router();
@@ -17,8 +17,8 @@ export const primitivesRouter = Router();
 const DEFAULT_ALLOWLIST = [
   // Vault grounding (read-only)
   "vault.search", "vault.read", "vault.scan_docs", "vault.list", "vault.find_by_tag",
-  // Connectors → company systems incl. AIIA. connector.call still respects each
-  // connector's own writeEnabled gate (AIIA is read-only), so this can't write
+  // Connectors → company systems incl. Aiia. connector.call still respects each
+  // connector's own writeEnabled gate (Aiia is read-only), so this can't write
   // unless the operator explicitly enabled writes on that connector.
   "connector.list", "connector.describe", "connector.call",
   // Integrations directory (read-only — never returns secrets)
@@ -34,6 +34,11 @@ const DEFAULT_ALLOWLIST = [
   "calendar.read_today", "calendar.activity", "calendar.plan_day",
   // Company database connections + department-specific data (read-only)
   "db.list_sources", "db.schema", "db.query", "company.department_data",
+  // ADRS data pipeline — discover published datasets (read-only) and publish
+  // new ones (agents learn from the golden records they publish).
+  "data.list_datasets", "data.publish",
+  // Omnisignal — base research acquisition (read-only) + acquire→ADRS publish.
+  "omnisignal.acquire", "omnisignal.publish",
   // Email — agents send through OUR bridge (Mailjet/SMTP), never an external
   // mail CLI (Himalaya/sendmail). This is the only sanctioned send path.
   "email.send",
@@ -41,8 +46,11 @@ const DEFAULT_ALLOWLIST = [
   "web.search", "web.fetch", "web.scrape", "web.firecrawl",
   // Document text extraction (read-only)
   "doc.ocr",
-  // Payments — status/reporting only (NOT payment.link which charges)
-  "payment.status", "payment.list",
+  // Payments — status/reporting, plus Paynow REQUESTS. paynow_link is safe to
+  // expose: since 2026-07-04 it never moves money itself — it queues an
+  // awaiting-approval job the operator must confirm on the Approvals page.
+  // (payment.link — Stripe — still charges directly, so it stays excluded.)
+  "payment.status", "payment.list", "payment.paynow_link", "payment.paynow_poll",
 ];
 
 function allowlist(): Set<string> {

@@ -80,6 +80,8 @@ export function Payments() {
         )}
       </Card>
 
+      <PaynowSection />
+
       <CardBrands />
 
       {status?.enabled && (
@@ -124,12 +126,111 @@ export function Payments() {
 
 const FIELD = "w-full bg-ink-950 border border-ink-800 text-sm text-cream-100 rounded-lg px-3 py-2 focus:outline-none focus:border-violet-500/60 placeholder:text-cream-300/30";
 
+// Paynow (Zimbabwe) — the local-market gateway beside Stripe: EcoCash,
+// OneMoney, cards, bank. Create a payment (browserUrl the client pays on),
+// then poll its status right here. Agents use payment.paynow_link /
+// payment.paynow_poll for the same flow.
+function PaynowSection() {
+  const [status, setStatus] = useState<{ enabled: boolean; integrationId?: string; detail?: string } | null>(null);
+  const [amount, setAmount] = useState("");
+  const [description, setDescription] = useState("");
+  const [email, setEmail] = useState("");
+  const [creating, setCreating] = useState(false);
+  const [payment, setPayment] = useState<{ reference: string; browserUrl: string; pollUrl: string } | null>(null);
+  const [pollResult, setPollResult] = useState<string | null>(null);
+  const [polling, setPolling] = useState(false);
+
+  useEffect(() => { api.paynowStatus().then(setStatus).catch(() => {}); }, []);
+
+  async function create() {
+    const amt = Number(amount);
+    if (!Number.isFinite(amt) || amt <= 0) { showToast("Enter a positive amount", "error"); return; }
+    if (!description.trim()) { showToast("Add a description", "error"); return; }
+    setCreating(true); setPayment(null); setPollResult(null);
+    try {
+      const { payment } = await api.createPaynowLink({ amount: amt, description: description.trim(), email: email.trim() || undefined });
+      setPayment(payment);
+      showToast("Paynow payment created ✓", "success");
+    } catch (e: any) { showToast(e?.message ?? String(e), "error"); }
+    finally { setCreating(false); }
+  }
+
+  async function poll() {
+    if (!payment) return;
+    setPolling(true);
+    try {
+      const { status: st } = await api.paynowPoll(payment.pollUrl);
+      setPollResult(`${st.status}${st.paid ? " — PAID ✓" : ""}${st.paynowReference ? ` · Paynow ref ${st.paynowReference}` : ""}`);
+    } catch (e: any) { showToast(e?.message ?? String(e), "error"); }
+    finally { setPolling(false); }
+  }
+
+  return (
+    <Card title="Paynow — Zimbabwe (EcoCash · OneMoney · cards)">
+      {!status ? (
+        <div className="text-sm text-cream-300/60">Checking…</div>
+      ) : !status.enabled ? (
+        <div className="text-sm text-amber-300/90 flex items-start gap-2">
+          <AlertTriangle size={16} className="mt-0.5 shrink-0" />
+          <div>
+            Paynow isn’t configured. Set <span className="font-mono text-cream-200">PAYNOW_INTEGRATION_ID</span> and{" "}
+            <span className="font-mono text-cream-200">PAYNOW_INTEGRATION_KEY</span> in <span className="font-mono">.env</span> and restart.
+          </div>
+        </div>
+      ) : (
+        <div className="space-y-3">
+          <div className="flex items-center gap-3 text-sm">
+            <span className="inline-flex items-center gap-1.5 text-leaf-400"><span className="w-2 h-2 rounded-full bg-leaf-500" /> Connected</span>
+            <span className="text-cream-300/60">·</span>
+            <span className="text-cream-200">paynow</span>
+            <span className="text-cream-300/60">·</span>
+            <span className="font-mono text-[12px] text-cream-300/50">integration {status.integrationId}</span>
+            <span className="text-[11px] text-cream-300/50">Agents: <span className="font-mono">payment.paynow_link</span></span>
+          </div>
+          <div className="flex flex-col sm:flex-row gap-2">
+            <div className="sm:w-36">
+              <label className="block text-[11px] text-cream-300/70 mb-1">Amount</label>
+              <input value={amount} onChange={e => setAmount(e.target.value)} inputMode="decimal" placeholder="150.00" className={`${FIELD} font-mono`} />
+            </div>
+            <div className="flex-1">
+              <label className="block text-[11px] text-cream-300/70 mb-1">Description</label>
+              <input value={description} onChange={e => setDescription(e.target.value)} placeholder="Cognify course purchase" className={FIELD} />
+            </div>
+            <div className="sm:w-64">
+              <label className="block text-[11px] text-cream-300/70 mb-1">Payer email (test mode: merchant email)</label>
+              <input value={email} onChange={e => setEmail(e.target.value)} placeholder="payer@company.com" className={`${FIELD} font-mono`} />
+            </div>
+            <div className="flex items-end">
+              <Button onClick={create} disabled={creating}>{creating ? <Loader2 size={14} className="animate-spin" /> : <Link2 size={14} />} Create payment</Button>
+            </div>
+          </div>
+          {payment && (
+            <div className="rounded-lg border border-leaf-500/30 bg-leaf-500/5 px-3 py-2 space-y-1.5">
+              <div className="flex items-center gap-2">
+                <Link2 size={14} className="text-leaf-400 shrink-0" />
+                <a href={payment.browserUrl} target="_blank" rel="noopener noreferrer" className="flex-1 min-w-0 text-[12px] text-violet-300 hover:text-violet-200 font-mono truncate">{payment.browserUrl}</a>
+                <button type="button" onClick={() => { navigator.clipboard.writeText(payment.browserUrl); showToast("Copied", "success"); }} className="text-cream-300/60 hover:text-cream-100 p-1" title="Copy"><Copy size={14} /></button>
+                <a href={payment.browserUrl} target="_blank" rel="noopener noreferrer" className="text-cream-300/60 hover:text-cream-100 p-1" title="Open"><ExternalLink size={14} /></a>
+              </div>
+              <div className="flex items-center gap-2 text-[11px] text-cream-300/60">
+                <span className="font-mono">ref {payment.reference}</span>
+                <Button variant="subtle" onClick={poll} disabled={polling}>{polling ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />} Check status</Button>
+                {pollResult && <span className="text-cream-200">{pollResult}</span>}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </Card>
+  );
+}
+
 // Accepted card brands. Stripe already settles Visa/Mastercard, so these are
 // surfaced as a roadmap signal ("coming soon") for direct card acceptance.
 function CardBrands() {
   const brands = [
-    { name: "Visa", className: "text-[#1a1f71] bg-white", soon: true },
-    { name: "Mastercard", className: "text-[#eb001b] bg-white", soon: true },
+    { name: "Visa", className: "text-[#1a1f71] bg-ink-900", soon: true },
+    { name: "Mastercard", className: "text-[#eb001b] bg-ink-900", soon: true },
   ];
   return (
     <Card title="Card brands">

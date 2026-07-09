@@ -109,14 +109,37 @@ export function runHermesAgent(
         const elapsedMs = Date.now() - t0;
         const out = String(stdout ?? "").trim();
         const noFinal = /no final response was produced/i.test(out + String(stderr ?? ""));
-        if (noFinal || (!out && err)) {
-          const reason = noFinal
-            ? `Hermes ran but produced no final response (its model "${model}" may be unavailable on the configured key).`
-            : `Hermes failed: ${String(err?.message ?? "unknown error").slice(0, 160)}`;
+        // Hermes's CLI sometimes exits 0 but prints its OWN error as the "answer"
+        // (e.g. "API call failed after 3 retries: HTTP 429: Provider returned
+        // error" when the free model is rate-limited upstream). That string is
+        // NOT a deliverable — if we returned it as ok:true it would leak straight
+        // into the task result and skip the clawbot offload. Detect the CLI's
+        // error shapes and treat them as a hard failure so chat.ts offloads to
+        // clawbot (whose LLM path falls back to local on a transient 429).
+        // Definitive CLI error markers — these never appear in a legit
+        // deliverable, so match them ANYWHERE regardless of length.
+        const hardErrMarker =
+          /API call failed after \d+ retr/i.test(out) ||
+          /\bHTTP\s+(?:429|5\d\d)\b[\s\S]{0,60}\b(?:provider returned error|rate.?limit|temporarily)\b/i.test(out) ||
+          /\bfree-models-per-day\b/i.test(out);
+        // Softer heuristics only when the whole output is short (an error, not a
+        // long answer that happens to mention one of these words).
+        const softErrMarker = out.length < 600 && (
+          /^\s*(?:error|fatal|request failed|api error|exception)[:\s]/i.test(out) ||
+          /^\s*\{?\s*"?error"?\s*[:=]/i.test(out) ||
+          /\b(?:provider returned error|rate limit exceeded)\b/i.test(out)
+        );
+        const looksLikeCliError = hardErrMarker || softErrMarker;
+        if (noFinal || (!out && err) || looksLikeCliError) {
+          const reason = looksLikeCliError
+            ? `Hermes's model call failed (${out.replace(/\s+/g, " ").slice(0, 140)}).`
+            : noFinal
+              ? `Hermes ran but produced no final response (its model "${model}" may be unavailable on the configured key).`
+              : `Hermes failed: ${String(err?.message ?? "unknown error").slice(0, 160)}`;
           push(`Hermes returned no usable answer after ${(elapsedMs / 1000).toFixed(1)}s.`);
           return resolve({
             answer: reason, plan: { steps: [] }, runs: [], hermes: true, model, elapsedMs, ok: false,
-            personaIdUsed: opts.personaId ?? null, error: noFinal ? "no final response" : "execution error",
+            personaIdUsed: opts.personaId ?? null, error: looksLikeCliError ? "model call failed" : noFinal ? "no final response" : "execution error",
           });
         }
         push(`Hermes responded in ${(elapsedMs / 1000).toFixed(1)}s (${out.length} chars).`);

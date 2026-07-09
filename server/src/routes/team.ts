@@ -189,6 +189,7 @@ teamRouter.post("/", async (req, res) => {
           : `Running team-task on primary (no persona).`);
         return planAndExecute(enrichedTask, push, (patch) => progress(patch as Record<string, unknown>), {
           personaSystemSuffix: pinnedSuffix,
+          workMode: persona?.workMode,
         });
       });
     }

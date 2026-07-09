@@ -36,9 +36,13 @@ export type Provider = {
 
 export const PROVIDERS: Provider[] = [
   // Messaging — agents reach you on your channels (token/webhook, no OAuth).
-  { id: "slack", name: "Slack", category: "messaging", auth: "webhook", testable: true,
-    fields: [{ name: "webhookUrl", label: "Incoming Webhook URL", type: "url", secret: true, required: true, placeholder: "https://hooks.slack.com/services/..." }],
-    docsUrl: "https://api.slack.com/messaging/webhooks" },
+  { id: "slack", name: "Slack", category: "messaging", auth: "token", testable: true,
+    fields: [
+      { name: "botToken", label: "Bot Token (xoxb-…)", type: "password", secret: true, required: false, placeholder: "xoxb-..." },
+      { name: "defaultChannel", label: "Default channel (for bot token)", type: "text", secret: false, required: false, placeholder: "#general or C0123ABCD" },
+      { name: "webhookUrl", label: "Incoming Webhook URL (alternative to bot token)", type: "url", secret: true, required: false, placeholder: "https://hooks.slack.com/services/..." },
+    ],
+    docsUrl: "https://api.slack.com/web" },
   { id: "telegram", name: "Telegram", category: "messaging", auth: "token", testable: true,
     fields: [
       { name: "botToken", label: "Bot Token", type: "password", secret: true, required: true, placeholder: "123456:ABC-DEF..." },
@@ -292,8 +296,19 @@ async function runConnectionTest(id: string): Promise<{ ok: boolean; detail: str
         return { ok: true, detail: `webhook "${j?.name ?? "ok"}"` };
       }
       case "slack": {
-        const r = await fetch(secrets.webhookUrl, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text: "✅ Neuro connected to this channel." }) });
-        return r.ok ? { ok: true, detail: "test message sent" } : { ok: false, detail: `HTTP ${r.status}: ${(await r.text()).slice(0, 120)}` };
+        // Prefer the Web API bot token (auth.test) — non-destructive and works
+        // for chat.postMessage. Fall back to the Incoming Webhook if that's all
+        // that's configured (a webhook can't be tested without posting).
+        if (secrets.botToken) {
+          const r = await fetch("https://slack.com/api/auth.test", { method: "POST", headers: { authorization: `Bearer ${secrets.botToken}` } });
+          const j: any = await r.json().catch(() => ({}));
+          return j?.ok ? { ok: true, detail: `bot @${j.user ?? "?"} in ${j.team ?? "workspace"}` } : { ok: false, detail: j?.error ?? `HTTP ${r.status}` };
+        }
+        if (secrets.webhookUrl) {
+          const r = await fetch(secrets.webhookUrl, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text: "✅ Neuro connected to this channel." }) });
+          return r.ok ? { ok: true, detail: "test message sent" } : { ok: false, detail: `HTTP ${r.status}: ${(await r.text()).slice(0, 120)}` };
+        }
+        return { ok: false, detail: "no bot token or webhook configured" };
       }
       case "msteams": {
         const r = await fetch(secrets.webhookUrl, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text: "✅ Neuro connected to this Teams channel." }) });

@@ -270,3 +270,97 @@ added two non-breaking fields:
 - `kind: "team-task"` on the new `/api/team` response
 
 Both are additive; existing clients work without modification.
+
+## Data pipeline (Intellinexus)
+
+The AI Data Readiness System publishes hashed, scored, golden-record datasets
+into the vault as ML CSV + knowledge-graph JSONL + RAG chunks. Published
+datasets are indexed for agent retrieval and appear as knowledge packs.
+
+| Method | Path | Body / Returns |
+|---|---|---|
+| GET | `/api/datasets` | `{ datasets: [...] }` — manifests (records, confidence, root hash, stages, outputs) |
+| GET | `/api/datasets/:id` | `{ dataset }` |
+| GET | `/api/datasets/:id/output/:kind` | raw artifact (`csv` \| `jsonl` \| `rag` \| `card`) |
+| POST | `/api/datasets/publish` | `{ name, sector?, keyField?, records[] }` **or** `{ name, sourceLabel, query }` → `{ ok, dataset }` |
+| DELETE | `/api/datasets/:id` | `{ ok }` (drops the manifest; vault artifacts remain) |
+
+Agent primitives: `data.publish`, `data.list_datasets` (both in the MCP allowlist).
+
+## External agent dispatch (orchestration layer)
+
+Other systems dispatch agents into NeuroWorks. These endpoints authenticate
+with an API key (not the origin guard) — `/api/v1/` is exempt from the
+Host/Origin allow-list because key auth is strictly stronger.
+
+| Method | Path | Auth | Body / Returns |
+|---|---|---|---|
+| POST | `/api/v1/dispatch` | `Authorization: Bearer nw_…` (`dispatch:write`) | `{ task, callbackUrl?, idempotencyKey?, metadata? }` → `202 { jobId, status, poll }` |
+| GET | `/api/v1/dispatch/:jobId` | Bearer (`dispatch:read`) | `{ jobId, status, answer, error?, startedAt, finishedAt }` (own jobs only) |
+| GET | `/api/dispatch-keys` | origin guard (operator) | `{ keys: [...] }` (no secrets) |
+| POST | `/api/dispatch-keys` | origin guard | `{ label, scopes? }` → `{ key, token }` (token shown once) |
+| DELETE | `/api/dispatch-keys/:id` | origin guard | `{ ok }` (revoke) |
+
+- **Idempotency**: send `Idempotency-Key` (header or body). A repeat from the
+  same key returns the original `jobId`.
+- **Webhooks**: when `callbackUrl` is set, NeuroWorks POSTs the result on
+  completion with `X-NeuroWorks-Signature: sha256=<hmac>` (set
+  `NW_WEBHOOK_SIGNING_SECRET`). Callback targets are SSRF-guarded — private /
+  loopback addresses are blocked unless `NW_WEBHOOK_ALLOW_PRIVATE=1`.
+
+## Omnisignal (data acquisition for Intellinexus)
+
+Omnisignal gathers raw signal from many source kinds and feeds it into the Intellinexus
+pipeline. Source spec shape: `{kind, ...}` where kind is `web_search` (query),
+`web_page` (urls[]), `db` (sourceLabel+query), `local_file` (path), or `vault`
+(query).
+
+| Method | Path | Body / Returns |
+|---|---|---|
+| GET | `/api/omnisignal/kinds` | `{ kinds: [{ kind, needs, description }] }` |
+| GET | `/api/omnisignal/sources` | `{ sources: [...] }` — saved source registry |
+| POST | `/api/omnisignal/sources` | `{ name, kind, category?, query?, urls?, sourceLabel?, path? }` → `{ source }` |
+| DELETE | `/api/omnisignal/sources/:id` | `{ ok }` |
+| POST | `/api/omnisignal/acquire` | `{ sources: [spec…] }` → `{ records, report, total }` (read; no publish) |
+| POST | `/api/omnisignal/publish` | `{ name, sources: [spec…], sector?, keyField? }` → `{ acquisition, published }` (acquire → Intellinexus) |
+
+Each acquired record is tagged with provenance (`_source`, `_category`,
+`_acquiredAt`) that survives the pipeline into the published dataset.
+
+Agent primitives: `omnisignal.acquire` (read), `omnisignal.publish` (acquire →
+publish) — both in the MCP allowlist.
+
+## Models — local pull + bring-your-own APIs
+
+Manage local Ollama models and plug in cloud model APIs you already use.
+
+| Method | Path | Body / Returns |
+|---|---|---|
+| GET | `/api/models` | installed models + per-profile recommendations |
+| POST | `/api/models/default` | `{ name }` — set runtime default |
+| GET | `/api/models/catalog` | curated pullable models + `installed` flags |
+| POST | `/api/models/pull` | `{ name }` → SSE progress (`progress`/`done`/`error`) |
+| DELETE | `/api/models/installed/:name` | remove a local model |
+| GET | `/api/models/providers` | BYO providers (keys redacted) + kinds |
+| POST | `/api/models/providers` | `{ kind, model, apiKey, label?, baseUrl? }` → activates it |
+| POST | `/api/models/providers/:id/activate` | switch active provider |
+| DELETE | `/api/models/providers/:id` | remove (reverts to env config) |
+
+Provider keys are encrypted at rest (`.neuroworks/model-providers.json`) and
+applied to the runtime LLM router immediately (OpenAI-compatible chat API), so
+no restart or `.env` edit is needed. `openai` / `openrouter` / `groq` /
+`together` / `custom` (any OpenAI-compatible base URL) are supported.
+
+## Client integration modes (dispatch)
+
+Four ways for other systems to dispatch agents in, all over `/api/v1/dispatch`:
+
+| Mode | Where | Use |
+|---|---|---|
+| REST + webhook | `/api/v1/dispatch` | Any language; poll or receive an HMAC-signed callback. |
+| SDK | `sdk/neuroworks.mjs` (+ `.d.ts`) | Node/browser: `new NeuroWorks({baseUrl,apiKey}).run(task)`. |
+| CLI | `tools/nw.mjs` | `nw dispatch "…" --wait`, `nw result <id>`, `nw keys:create`. |
+| MCP server | `server/mcp/neuroworks-dispatch-mcp.mjs` | Tools `dispatch_task` / `get_dispatch_result` / `wait_for_result` for any MCP host (Claude Desktop, etc.). Env: `NEUROWORKS_API_KEY`, `NEUROWORKS_BASE`. |
+
+All authenticate with an API key (`nw_…`); the MCP/CLI/SDK are thin clients over
+the REST surface, so tenancy, idempotency, and webhooks apply uniformly.

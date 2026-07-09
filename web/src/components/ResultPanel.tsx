@@ -54,7 +54,10 @@ function MetaRow({ job }: { job: any }) {
       {job.result?.pushed === false && <><span>·</span><span className="text-flame-400" title={String(job.result?.error ?? "")}>local-only (push failed)</span></>}
       <FeedbackThumbs job={job} />
       {job.status === "succeeded" && typeof job.result?.answer === "string" && job.result.answer.trim().length > 0 && (
-        <DownloadAnswerMenu job={job} />
+        <>
+          <QualityFlagControl job={job} />
+          <DownloadAnswerMenu job={job} />
+        </>
       )}
       {isGeneralOrCustom && job.status === "succeeded" && (
         <Link to={`/results/${job.id}`} className="text-violet-400 hover:text-violet-500 underline">Open polished report →</Link>
@@ -202,6 +205,83 @@ function FeedbackThumbs({ job }: { job: any }) {
         >↻ {retrying ? "Retrying…" : "Retry with this feedback"}</button>
       )}
       {retryErr && <span className="ml-1 text-coral-400" title={retryErr}>retry failed</span>}
+    </span>
+  );
+}
+
+// QA/review-facing flag — distinct from FeedbackThumbs above (which is the
+// task-level "this specific run was wrong, retry with a note" loop).
+// Quality flags feed the Quality Dashboard's trend/category rollups and
+// (with `language` set) the native-speaker review process for Shona/Ndebele
+// output: /api/quality/flag writes to _neuroworks/quality.jsonl, previously
+// dead code with no caller anywhere in the web app.
+const QUALITY_CATEGORIES = ["accuracy", "relevance", "tone", "completeness", "formatting", "localization", "other"] as const;
+function QualityFlagControl({ job }: { job: any }) {
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [sent, setSent] = useState(false);
+  const [rating, setRating] = useState<"up" | "down">("down");
+  const [category, setCategory] = useState<(typeof QUALITY_CATEGORIES)[number]>("localization");
+  const [language, setLanguage] = useState<"" | "en" | "sn" | "nd">("");
+  const [note, setNote] = useState("");
+
+  async function submit() {
+    if (busy) return;
+    setBusy(true);
+    try {
+      await api.submitQualityFlag({
+        jobId: job.id,
+        rating,
+        category,
+        language: language || undefined,
+        note: note.trim() || undefined,
+        persona: job.personaName,
+        template: job.template,
+        score: job.result?.quality?.score,
+      });
+      setSent(true);
+      setOpen(false);
+    } catch { /* swallow — operator can retry */ }
+    finally { setBusy(false); }
+  }
+
+  if (sent) return <span className="text-[11px] text-cream-300/50 inline-flex items-center gap-1">✓ flagged for review</span>;
+
+  return (
+    <span className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen(o => !o)}
+        className="text-[11px] text-cream-300/70 hover:text-cream-100 px-1.5 py-0.5 rounded hover:bg-ink-800"
+        title="Flag this output for QA review — e.g. local-language quality that needs a native-speaker pass"
+      >🚩 Flag for review</button>
+      {open && (
+        <span className="absolute right-0 top-full mt-1 bg-ink-900 border border-ink-700 rounded shadow-lg z-20 min-w-[220px] p-2.5 flex flex-col gap-1.5 text-[11px]">
+          <span className="flex items-center gap-1.5">
+            <button type="button" onClick={() => setRating("down")} className={`flex-1 px-2 py-1 rounded ${rating === "down" ? "bg-coral-500/20 text-coral-300" : "bg-ink-800 text-cream-300/70"}`}>needs work</button>
+            <button type="button" onClick={() => setRating("up")} className={`flex-1 px-2 py-1 rounded ${rating === "up" ? "bg-leaf-500/20 text-leaf-300" : "bg-ink-800 text-cream-300/70"}`}>good example</button>
+          </span>
+          <select value={category} onChange={e => setCategory(e.target.value as any)} title="Flag category" className="bg-ink-950 border border-ink-800 rounded px-1.5 py-1 text-cream-100">
+            {QUALITY_CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
+          </select>
+          <select value={language} onChange={e => setLanguage(e.target.value as any)} title="Language observed in this output" className="bg-ink-950 border border-ink-800 rounded px-1.5 py-1 text-cream-100">
+            <option value="">language observed (optional)</option>
+            <option value="en">English</option>
+            <option value="sn">chiShona</option>
+            <option value="nd">isiNdebele</option>
+          </select>
+          <input
+            value={note}
+            onChange={e => setNote(e.target.value)}
+            placeholder="what's wrong / worth noting? (optional)"
+            className="bg-ink-950 border border-ink-800 rounded px-1.5 py-1 text-cream-100 placeholder:text-cream-300/40"
+            onKeyDown={e => { if (e.key === "Enter") submit(); if (e.key === "Escape") setOpen(false); }}
+          />
+          <button type="button" onClick={submit} disabled={busy} className="px-2 py-1 rounded bg-violet-500/20 text-violet-300 hover:bg-violet-500/30 disabled:opacity-50">
+            {busy ? "Submitting…" : "Submit flag"}
+          </button>
+        </span>
+      )}
     </span>
   );
 }

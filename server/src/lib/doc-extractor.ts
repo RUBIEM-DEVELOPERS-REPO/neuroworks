@@ -191,7 +191,11 @@ async function extractXlsx(path: string, meta: { ext: string; name: string; byte
   try {
     const mod: any = await import("xlsx");
     const XLSX = mod.default ?? mod;
-    const wb = XLSX.readFile(path, { cellDates: true, cellText: false });
+    // Read the bytes ourselves — SheetJS's ESM build ships without fs wired
+    // (XLSX.readFile throws "Cannot access file <path>" on a file that exists
+    // unless set_fs() was called). Passing a buffer sidesteps fs entirely.
+    const buf = readFileSync(path);
+    const wb = XLSX.read(buf, { type: "buffer", cellDates: true, cellText: false });
     const sheetNames: string[] = wb.SheetNames ?? [];
     const sections: string[] = [];
     for (const name of sheetNames.slice(0, 12)) {

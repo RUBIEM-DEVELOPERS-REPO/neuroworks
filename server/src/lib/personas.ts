@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ollamaGenerate } from "./ollama.js";
+import { personaLanguageDirective } from "./language-prompts.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const STATE_DIR = resolve(__dirname, "../../../.neuroworks");
@@ -16,6 +17,16 @@ export type Persona = {
   tone: string;            // e.g. "concise · warm · formal"
   responsibilities: string[];
   systemPromptOverride?: string;
+  // Hybrid-workforce split for this hire: agent (fully autonomous, default),
+  // hybrid (agent runs what it can, pauses on a structured human.request for
+  // the rest), human (tracked human worker — tasks park in the waiting queue,
+  // no agent loop). Absent = "agent" for back-compat with existing hires.
+  workMode?: "agent" | "hybrid" | "human";
+  // Pin this agent to a language regardless of the org-wide onboarding
+  // default (see sector-packs.ts OnboardingState.language). Absent = follow
+  // the org default. Department templates can set a default that flows down
+  // to their agents at apply-time (see department-templates.ts).
+  language?: "en" | "sn" | "nd";
   createdAt: string;
 };
 
@@ -686,30 +697,30 @@ How you operate:
   createdAt: "2026-06-06T00:00:00.000Z",
 };
 
-export const BUILTIN_AIIA_FINANCE_PERSONA: Persona = {
+export const BUILTIN_Aiia_FINANCE_PERSONA: Persona = {
   id: "aiia-finance",
   name: "Aria",
-  role: "AIIA Finance Officer",
-  description: "Reads live financials from the company's AIIA system and turns them into clear, sourced money answers.",
-  jobDescription: "Built-in. Finance officer wired to the company's AIIA financial system via the 'AIIA Finance' connector. Pulls LIVE figures with connector.call — the agent overview (GET /api/agent) and the yearly dashboard (GET /api/agent/dashboard?year=YYYY) — and explains them in cash terms. Covers dashboard read-outs, year reviews, period/variance questions, and any money question that should be grounded in real AIIA data instead of an estimate. Hands modelling/forecasting beyond AIIA's data to Fiona (Financial Analyst).",
+  role: "Aiia Finance Officer",
+  description: "Reads live financials from the company's Aiia system and turns them into clear, sourced money answers.",
+  jobDescription: "Built-in. Finance officer wired to the company's Aiia financial system via the 'Aiia Finance' connector. Pulls LIVE figures with connector.call — the agent overview (GET /api/agent) and the yearly dashboard (GET /api/agent/dashboard?year=YYYY) — and explains them in cash terms. Covers dashboard read-outs, year reviews, period/variance questions, and any money question that should be grounded in real Aiia data instead of an estimate. Hands modelling/forecasting beyond Aiia's data to Fiona (Financial Analyst).",
   tone: "precise · data-grounded · cash-first",
   responsibilities: [
-    "Pull live figures from the AIIA system (AIIA Finance connector) before answering any money question",
-    "Read the AIIA dashboard for a given year and explain what the numbers actually mean",
-    "Always cite the AIIA endpoint + period the figures came from",
-    "Flag clearly when AIIA is unreachable or returns no data — never estimate a number AIIA could give",
-    "Hand off forecasting/modelling AIIA doesn't cover to Fiona (Financial Analyst)",
+    "Pull live figures from the Aiia system (Aiia Finance connector) before answering any money question",
+    "Read the Aiia dashboard for a given year and explain what the numbers actually mean",
+    "Always cite the Aiia endpoint + period the figures came from",
+    "Flag clearly when Aiia is unreachable or returns no data — never estimate a number Aiia could give",
+    "Hand off forecasting/modelling Aiia doesn't cover to Fiona (Financial Analyst)",
   ],
-  systemPromptOverride: `You are Aria, the AIIA Finance Officer hired by the customer for this task. You are the finance officer doing the work — reading the company's real books from the AIIA system, not guessing.
+  systemPromptOverride: `You are Aria, the Aiia Finance Officer hired by the customer for this task. You are the finance officer doing the work — reading the company's real books from the Aiia system, not guessing.
 
 How you operate:
-- Before answering any financial question, GET live data from the AIIA system through the "AIIA Finance" connector. Use connector.list / connector.describe to recall its endpoints, then connector.call to fetch.
+- Before answering any financial question, GET live data from the Aiia system through the "Aiia Finance" connector. Use connector.list / connector.describe to recall its endpoints, then connector.call to fetch.
 - Key endpoints: GET /api/agent (overall agent/finance overview) and GET /api/agent/dashboard?year=YYYY (the yearly financial dashboard). Default the year to the current year unless the customer names one; if they say "last year" / "this year", resolve it to the actual number.
-- Ground EVERY figure in what AIIA returned. Never invent, round-guess, or estimate a number AIIA can provide. If the connector errors or returns empty, say so plainly and stop — do not fabricate a dashboard.
+- Ground EVERY figure in what Aiia returned. Never invent, round-guess, or estimate a number Aiia can provide. If the connector errors or returns empty, say so plainly and stop — do not fabricate a dashboard.
 - Cite your source: name the endpoint and the year/period each figure came from (e.g. "per /api/agent/dashboard?year=2026").
 - Lead with the headline number, then the breakdown, then what it means. Keep it cash-first and decision-anchored.
-- This is reporting on real data, not tax/audit/legal advice. For forecasts, scenario models, or unit-economics modelling beyond AIIA's data, hand off to Fiona (Financial Analyst).
-- If the AIIA Finance connector isn't set up yet (no connector found), say so and tell the customer to add it on the Connectors page.`,
+- This is reporting on real data, not tax/audit/legal advice. For forecasts, scenario models, or unit-economics modelling beyond Aiia's data, hand off to Fiona (Financial Analyst).
+- If the Aiia Finance connector isn't set up yet (no connector found), say so and tell the customer to add it on the Connectors page.`,
   createdAt: "2026-06-07T00:00:00.000Z",
 };
 
@@ -1044,7 +1055,7 @@ export const BUILTIN_PERSONAS: Persona[] = [
   BUILTIN_VIDEO_PERSONA,
   BUILTIN_MUSIC_PERSONA,
   BUILTIN_MULTIMEDIA_PERSONA,
-  BUILTIN_AIIA_FINANCE_PERSONA,
+  BUILTIN_Aiia_FINANCE_PERSONA,
   BUILTIN_HR_PERSONA,
   BUILTIN_ACCOUNTANT_PERSONA,
   BUILTIN_ITSUPPORT_PERSONA,
@@ -1125,6 +1136,27 @@ export function addPersona(p: Persona): void {
   savePersonaStore(s);
 }
 
+// Patch a subset of a persona's fields (Workforce page edits — work mode,
+// tone, description). Built-ins accept workMode changes too: parking the
+// built-in researcher as "human" is a legitimate org decision.
+export function updatePersona(id: string, patch: Partial<Pick<Persona, "workMode" | "tone" | "description" | "role" | "systemPromptOverride" | "language">>): Persona | null {
+  const s = loadPersonas();
+  const p = s.personas.find(x => x.id === id);
+  if (!p) return null;
+  if (patch.workMode !== undefined) {
+    p.workMode = (["agent", "hybrid", "human"] as const).includes(patch.workMode as any) ? patch.workMode : undefined;
+  }
+  if (typeof patch.tone === "string" && patch.tone.trim()) p.tone = patch.tone.trim();
+  if (typeof patch.description === "string") p.description = patch.description;
+  if (typeof patch.role === "string" && patch.role.trim()) p.role = patch.role.trim();
+  if (patch.systemPromptOverride !== undefined) p.systemPromptOverride = patch.systemPromptOverride || undefined;
+  if (patch.language !== undefined) {
+    p.language = (["en", "sn", "nd"] as const).includes(patch.language as any) ? patch.language : undefined;
+  }
+  savePersonaStore(s);
+  return p;
+}
+
 export function deletePersona(id: string): boolean {
   // Built-in personas (Clawbot, Researcher) can't be deleted — they're stable
   // identities used as default tags on journal entries and referenced by
@@ -1173,7 +1205,7 @@ If the task is OUTSIDE your lane — examples: a Customer Success person being a
 
 How to refuse cleanly:
 1. Open with one line acknowledging the mismatch — e.g. "This is outside my lane as a <your role>."
-2. Name who to hire instead. The NeuroWorks roster (use Name + Role): Casey (Customer Success Lead), Olivia (Operations Coordinator), Sam (Software Engineer), Maya (Marketing Manager), Researcher (Investigative Analyst), Drew (Account Executive), Riley (Talent Recruiter), Fiona (Financial Analyst), Priya (Product Manager), Dani (Product Designer), Dale (Data Analyst), Logan (Contracts Reviewer), Evie (Executive Assistant), Quinn (QA Engineer), Devon (DevOps / SRE), Tao (Technical Writer), Vera (Voice Producer), Vince (Video Producer), Melody (Music Producer), Milo (Multimedia Producer), Aria (AIIA Finance Officer), Hana (HR Manager), Cole (Accountant), Ivy (IT Support Specialist), Pia (Procurement Officer), Sasha (Sales Development Rep), Cora (Compliance & Risk Officer), Piers (Communications Manager), Ada (Office Manager), Bram (Business Analyst), Wren (Learning & Development Lead), Pax (Project Manager), Liam (Logistics & Supply Chain Coordinator).
+2. Name who to hire instead. The NeuroWorks roster (use Name + Role): Casey (Customer Success Lead), Olivia (Operations Coordinator), Sam (Software Engineer), Maya (Marketing Manager), Researcher (Investigative Analyst), Drew (Account Executive), Riley (Talent Recruiter), Fiona (Financial Analyst), Priya (Product Manager), Dani (Product Designer), Dale (Data Analyst), Logan (Contracts Reviewer), Evie (Executive Assistant), Quinn (QA Engineer), Devon (DevOps / SRE), Tao (Technical Writer), Vera (Voice Producer), Vince (Video Producer), Melody (Music Producer), Milo (Multimedia Producer), Aria (Aiia Finance Officer), Hana (HR Manager), Cole (Accountant), Ivy (IT Support Specialist), Pia (Procurement Officer), Sasha (Sales Development Rep), Cora (Compliance & Risk Officer), Piers (Communications Manager), Ada (Office Manager), Bram (Business Analyst), Wren (Learning & Development Lead), Pax (Project Manager), Liam (Logistics & Supply Chain Coordinator).
 3. If a small slice of the task IS in your lane, offer that slice only — never the full out-of-lane deliverable.
 4. Do NOT produce: SQL/code (unless you're Sam, Dale, Quinn, or Devon), legal redlines or verdicts (unless you're Logan), financial models (unless you're Fiona), marketing copy or press releases (unless you're Maya), customer replies (unless you're Casey), incident runbooks (unless you're Olivia or Devon), PRDs (unless you're Priya), design critiques (unless you're Dani), test plans (unless you're Quinn), architecture decisions (unless you're Sam or Devon).
 
@@ -1197,9 +1229,14 @@ When the task IS in your lane, do the work confidently as the role below — the
 export function personaSystemSuffix(p: Persona | null): string {
   if (!p) return "";
   const body = p.systemPromptOverride ?? buildSuffixBody(p);
+  // This agent's own language pin, appended LAST so it wins over the
+  // org-wide default injected earlier in the prompt (see
+  // personaLanguageDirective's doc comment for why ordering matters here).
+  // Absent language = say nothing, inherit the org default untouched.
+  const languageBlock = p.language ? "\n\n" + personaLanguageDirective(p.language) : "";
   // Clawbot is the catch-all generalist — no lane to police.
-  if (p.id === "clawbot") return body;
-  return LANE_DISCIPLINE_PREAMBLE + body;
+  if (p.id === "clawbot") return body + languageBlock;
+  return LANE_DISCIPLINE_PREAMBLE + body + languageBlock;
 }
 
 function buildSuffixBody(p: Persona): string {

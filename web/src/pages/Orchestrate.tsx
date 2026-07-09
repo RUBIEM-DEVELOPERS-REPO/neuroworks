@@ -38,10 +38,10 @@ export function Orchestrate() {
 
   const statusIcon = (status: string) => {
     switch (status) {
-      case "done": return <CheckCircle className="w-4 h-4 text-green-500" />;
-      case "failed": return <XCircle className="w-4 h-4 text-red-500" />;
-      case "running": return <Loader2 className="w-4 h-4 animate-spin text-blue-500" />;
-      default: return <Clock className="w-4 h-4 text-gray-400" />;
+      case "done": return <CheckCircle className="w-4 h-4 text-leaf-400" />;
+      case "failed": return <XCircle className="w-4 h-4 text-coral-400" />;
+      case "running": return <Loader2 className="w-4 h-4 animate-spin text-violet-400" />;
+      default: return <Clock className="w-4 h-4 text-cream-300/50" />;
     }
   };
 
@@ -51,19 +51,19 @@ export function Orchestrate() {
         <GitBranch className="w-6 h-6" />
         <h1 className="text-2xl font-bold">Multi-Agent Orchestrator</h1>
       </div>
-      <p className="text-sm text-gray-500">
+      <p className="text-sm text-cream-300/60">
         Decompose complex objectives into parallel sub-tasks executed by independent agents, then synthesize the results into a coherent answer.
       </p>
 
       {/* New run form */}
-      <div className="bg-white dark:bg-gray-800 rounded-lg border p-4">
+      <div className="bg-ink-900 rounded-lg border p-4">
         <label className="text-sm font-medium mb-2 block">Objective</label>
         <textarea
           value={objective}
           onChange={e => setObjective(e.target.value)}
           rows={3}
           placeholder="e.g. Research the Zimbabwe FinTech landscape and produce a market entry brief covering competitors, regulations, and customer segments."
-          className="w-full text-sm border rounded px-3 py-2 bg-white dark:bg-gray-800"
+          className="w-full text-sm border rounded px-3 py-2 bg-ink-900"
         />
         <button
           onClick={startRun}
@@ -77,42 +77,42 @@ export function Orchestrate() {
 
       {/* Result from latest run */}
       {result && result.id && (
-        <div className="bg-green-50 dark:bg-green-900/20 rounded-lg border border-green-200 p-4">
-          <div className="flex items-center gap-2 text-sm font-medium text-green-700 dark:text-green-300 mb-2">
+        <div className="bg-leaf-500/10 rounded-lg border border-leaf-500/30 p-4">
+          <div className="flex items-center gap-2 text-sm font-medium text-leaf-300  mb-2">
             <Sparkles className="w-4 h-4" />
             Orchestration complete: {result.label}
           </div>
-          <div className="flex gap-4 text-xs text-gray-500 mb-3">
+          <div className="flex gap-4 text-xs text-cream-300/60 mb-3">
             <span>Status: {result.status}</span>
             <span>Sub-tasks: {result.subTasks?.length ?? 0}</span>
           </div>
-          <button onClick={() => loadRun(result.id)} className="text-sm text-blue-600 hover:underline">
+          <button onClick={() => loadRun(result.id)} className="text-sm text-violet-400 hover:underline">
             View details →
           </button>
         </div>
       )}
 
       {result?.error && (
-        <div className="bg-red-50 dark:bg-red-900/20 rounded-lg border border-red-200 p-4 text-sm text-red-600">
+        <div className="bg-coral-500/10 rounded-lg border border-coral-500/30 p-4 text-sm text-coral-400">
           {result.error}
         </div>
       )}
 
       {/* Selected run detail */}
       {selectedRun && (
-        <div className="bg-white dark:bg-gray-800 rounded-lg border p-4 space-y-4">
+        <div className="bg-ink-900 rounded-lg border p-4 space-y-4">
           <div className="flex items-center justify-between">
             <h2 className="font-semibold flex items-center gap-2">
               <Layers className="w-5 h-5" />
               {selectedRun.label}
             </h2>
-            <span className={`text-xs px-2 py-0.5 rounded ${selectedRun.status === "completed" ? "bg-green-100 text-green-700" : selectedRun.status === "failed" ? "bg-red-100 text-red-700" : "bg-blue-100 text-blue-700"}`}>
+            <span className={`text-xs px-2 py-0.5 rounded ${selectedRun.status === "completed" ? "bg-leaf-500/15 text-leaf-300" : selectedRun.status === "failed" ? "bg-coral-500/15 text-coral-300" : "bg-violet-500/15 text-violet-300"}`}>
               {selectedRun.status}
             </span>
           </div>
 
           {selectedRun.decomposition && (
-            <div className="text-sm text-gray-600 dark:text-gray-400 bg-gray-50 dark:bg-gray-900 rounded p-3">
+            <div className="text-sm text-cream-300/70  bg-ink-950 rounded p-3">
               {selectedRun.decomposition}
             </div>
           )}
@@ -125,16 +125,16 @@ export function Orchestrate() {
                 <div className="flex items-center gap-2">
                   {statusIcon(st.status)}
                   <span className="text-sm font-medium">{st.label}</span>
-                  <span className="text-xs text-gray-400">({st.personaName ?? "Assistant"})</span>
-                  {st.elapsedMs && <span className="text-xs text-gray-400 ml-auto">{(st.elapsedMs / 1000).toFixed(1)}s</span>}
+                  <span className="text-xs text-cream-300/50">({st.personaName ?? "Assistant"})</span>
+                  {st.elapsedMs && <span className="text-xs text-cream-300/50 ml-auto">{(st.elapsedMs / 1000).toFixed(1)}s</span>}
                 </div>
                 {st.status === "done" && st.output && (
-                  <div className="mt-2 text-xs text-gray-600 dark:text-gray-400 bg-gray-50 dark:bg-gray-900 rounded p-2 max-h-24 overflow-y-auto">
+                  <div className="mt-2 text-xs text-cream-300/70  bg-ink-950 rounded p-2 max-h-24 overflow-y-auto">
                     {st.output.slice(0, 500)}{st.output.length > 500 ? "…" : ""}
                   </div>
                 )}
                 {st.status === "failed" && st.error && (
-                  <div className="mt-2 text-xs text-red-500">{st.error}</div>
+                  <div className="mt-2 text-xs text-coral-400">{st.error}</div>
                 )}
               </div>
             ))}
@@ -142,10 +142,10 @@ export function Orchestrate() {
 
           {/* Handoff chain visualization */}
           {selectedRun.subTasks && selectedRun.subTasks.length > 1 && (
-            <div className="flex items-center gap-1 text-xs text-gray-400 flex-wrap">
+            <div className="flex items-center gap-1 text-xs text-cream-300/50 flex-wrap">
               {selectedRun.subTasks.map((st: any, i: number) => (
                 <span key={st.id ?? i} className="flex items-center gap-1">
-                  <span className={`px-1.5 py-0.5 rounded ${st.status === "done" ? "bg-green-100 text-green-700" : st.status === "failed" ? "bg-red-100 text-red-700" : "bg-gray-100"}`}>
+                  <span className={`px-1.5 py-0.5 rounded ${st.status === "done" ? "bg-leaf-500/15 text-leaf-300" : st.status === "failed" ? "bg-coral-500/15 text-coral-300" : "bg-ink-800"}`}>
                     {st.label}
                   </span>
                   {i < selectedRun.subTasks.length - 1 && <ArrowRight className="w-3 h-3" />}
@@ -158,35 +158,35 @@ export function Orchestrate() {
           {selectedRun.finalReport && (
             <div>
               <h3 className="text-sm font-medium mb-2">Synthesized Result</h3>
-              <div className="text-sm whitespace-pre-wrap bg-gray-50 dark:bg-gray-900 rounded p-3 max-h-96 overflow-y-auto">
+              <div className="text-sm whitespace-pre-wrap bg-ink-950 rounded p-3 max-h-96 overflow-y-auto">
                 {selectedRun.finalReport}
               </div>
             </div>
           )}
 
           {selectedRun.elapsedMs && (
-            <div className="text-xs text-gray-400">Completed in {(selectedRun.elapsedMs / 1000).toFixed(1)}s</div>
+            <div className="text-xs text-cream-300/50">Completed in {(selectedRun.elapsedMs / 1000).toFixed(1)}s</div>
           )}
         </div>
       )}
 
       {/* Recent runs */}
-      <div className="bg-white dark:bg-gray-800 rounded-lg border p-4">
+      <div className="bg-ink-900 rounded-lg border p-4">
         <h2 className="font-semibold mb-3">Recent Orchestrations</h2>
         {loading ? (
           <div className="flex items-center justify-center h-16"><Loader2 className="animate-spin w-5 h-5" /></div>
         ) : runs.length === 0 ? (
-          <p className="text-sm text-gray-500">No orchestrations yet.</p>
+          <p className="text-sm text-cream-300/60">No orchestrations yet.</p>
         ) : (
           <div className="space-y-1">
             {runs.map((r: any) => (
-              <div key={r.id} className="flex items-center justify-between p-2 hover:bg-gray-50 dark:hover:bg-gray-700/50 rounded cursor-pointer" onClick={() => loadRun(r.id)}>
+              <div key={r.id} className="flex items-center justify-between p-2 hover:bg-ink-800/40 dark:hover:bg-ink-800/50 rounded cursor-pointer" onClick={() => loadRun(r.id)}>
                 <div className="flex items-center gap-2">
                   {statusIcon(r.status)}
                   <span className="text-sm">{r.label}</span>
-                  <span className="text-xs text-gray-400">{r.doneCount}/{r.subTaskCount} sub-tasks</span>
+                  <span className="text-xs text-cream-300/50">{r.doneCount}/{r.subTaskCount} sub-tasks</span>
                 </div>
-                <div className="flex items-center gap-3 text-xs text-gray-400">
+                <div className="flex items-center gap-3 text-xs text-cream-300/50">
                   {r.elapsedMs && <span>{(r.elapsedMs / 1000).toFixed(0)}s</span>}
                   <span>{new Date(r.createdAt).toLocaleDateString()}</span>
                 </div>

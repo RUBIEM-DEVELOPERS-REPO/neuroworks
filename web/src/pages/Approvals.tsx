@@ -116,6 +116,18 @@ function describeEffects(job: any): { bullets: string[]; severity: "high" | "med
   const inputs = job.inputs ?? {};
   const tpl = job.template as string | undefined;
   switch (tpl) {
+    case "paynow-payment": {
+      const amount = Number(inputs.amount ?? 0);
+      return {
+        severity: "high",
+        bullets: [
+          `Create a REAL Paynow payment for ${Number.isFinite(amount) ? amount.toFixed(2) : String(inputs.amount)} — ${String(inputs.description ?? "")}`,
+          `Issue a pay link the client can settle via EcoCash, OneMoney, card, or bank`,
+          inputs.email ? `Payer email: ${String(inputs.email)}` : `No payer email — Paynow will use the merchant default`,
+          `Money moves once the client pays — approve only if the amount and description are right`,
+        ],
+      };
+    }
     case "publish-folder": {
       const path = String(inputs.path ?? "(missing path)");
       const isPublic = Boolean(inputs.public);

@@ -9,7 +9,13 @@ export type QualityFlag = {
   persona?: string;
   template?: string;
   score?: number;
-  category?: "accuracy" | "relevance" | "tone" | "completeness" | "formatting" | "other";
+  category?: "accuracy" | "relevance" | "tone" | "completeness" | "formatting" | "localization" | "other";
+  // Language the flagged output was actually IN, as observed by the operator
+  // flagging it — not inferred (a persona's language pin can change after the
+  // job ran, and the org default can differ from what a specific job used).
+  // Lets Quality Dashboard / Mission Control filter to "Shona/Ndebele outputs
+  // flagged for improvement" for the native-speaker review process.
+  language?: "en" | "sn" | "nd";
   ts: string;
 };
 

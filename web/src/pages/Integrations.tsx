@@ -40,10 +40,24 @@ export function Integrations() {
   const [connecting, setConnecting] = useState<IntegrationProvider | null>(null);
   const [testing, setTesting] = useState<string | null>(null);
   const [testingAll, setTestingAll] = useState(false);
+  // Payment gateways are env-configured (not secret-entry connections), but
+  // they belong on this page too — one place to see everything agents can act
+  // on. Read-only status cards linking through to /payments.
+  const [gateways, setGateways] = useState<{ name: string; enabled: boolean; detail: string }[]>([]);
 
   async function refresh() {
     try { const c = await api.integrationsCatalog(); setProviders(c.providers); } catch {}
     try { const l = await api.listIntegrations(); setConnections(l.connections); } catch {}
+    try {
+      const [stripe, paynow] = await Promise.all([
+        api.paymentStatus().catch(() => null),
+        api.paynowStatus().catch(() => null),
+      ]);
+      setGateways([
+        { name: "Stripe", enabled: !!stripe?.enabled, detail: stripe?.enabled ? `${(stripe as any).currency?.toUpperCase?.() ?? ""} · payment links + subscriptions` : "STRIPE_SECRET_KEY not set" },
+        { name: "Paynow (Zimbabwe)", enabled: !!paynow?.enabled, detail: paynow?.enabled ? `integration ${paynow.integrationId} · EcoCash, OneMoney, cards` : "PAYNOW_INTEGRATION_ID/KEY not set" },
+      ]);
+    } catch { /* gateways card is best-effort */ }
   }
   useEffect(() => { void refresh(); }, []);
 
@@ -90,6 +104,23 @@ export function Integrations() {
           Secrets are <span className="text-cream-200">encrypted at rest</span> and never leave the server.
         </p>
       </div>
+
+      {gateways.length > 0 && (
+        <Card title="Payment gateways">
+          <div className="space-y-2">
+            {gateways.map(g => (
+              <div key={g.name} className="flex items-center gap-3 py-2 px-3 rounded-lg bg-ink-950/50 border border-ink-800">
+                <span className={`inline-block w-2 h-2 rounded-full shrink-0 ${g.enabled ? "bg-leaf-500" : "bg-cream-300/30"}`} />
+                <div className="flex-1 min-w-0">
+                  <div className="text-sm text-cream-100">{g.name}</div>
+                  <div className="text-[11px] text-cream-300/50">{g.enabled ? `Connected · ${g.detail}` : g.detail}</div>
+                </div>
+                <a href="/payments" className="text-[12px] text-violet-400 hover:text-violet-300 inline-flex items-center gap-1">Manage <ExternalLink size={12} /></a>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
 
       {connections.length > 0 && (
         <Card

@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { addPersona, deletePersona, extractPersonaMetadata, getActivePersona, loadPersonas, setActivePersona, slugifyId, type Persona } from "../lib/personas.js";
+import { addPersona, deletePersona, extractPersonaMetadata, getActivePersona, loadPersonas, setActivePersona, slugifyId, updatePersona, type Persona } from "../lib/personas.js";
 import { journal } from "../lib/journal.js";
 import { buildStarterTemplates, refreshPersonaTemplates, purgePersonaTemplates, listPersonaTemplates } from "../lib/persona-templates.js";
 import { saveCustomTemplate } from "../lib/custom-templates.js";
@@ -12,7 +12,7 @@ personasRouter.get("/", (_req, res) => {
 });
 
 personasRouter.post("/", async (req, res) => {
-  const { name, jobDescription, tone, role, description, responsibilities, systemPromptOverride } = (req.body ?? {}) as Partial<Persona>;
+  const { name, jobDescription, tone, role, description, responsibilities, systemPromptOverride, workMode } = (req.body ?? {}) as Partial<Persona>;
   if (!name || !String(name).trim()) return res.status(400).json({ error: "name required" });
   if (!jobDescription || !String(jobDescription).trim()) return res.status(400).json({ error: "jobDescription required" });
   let meta = { role: role ?? "Specialist", description: description ?? "", tone: tone ?? "professional", responsibilities: responsibilities ?? [] };
@@ -29,6 +29,7 @@ personasRouter.post("/", async (req, res) => {
     tone: meta.tone,
     responsibilities: meta.responsibilities,
     systemPromptOverride: systemPromptOverride ? String(systemPromptOverride) : undefined,
+    workMode: (["agent", "hybrid", "human"] as const).includes(workMode as any) ? workMode : undefined,
     createdAt: new Date().toISOString(),
   };
   addPersona(persona);
@@ -53,6 +54,14 @@ personasRouter.post("/", async (req, res) => {
     ].join("\n"),
   });
   res.json({ persona, generatedTemplateIds: generated.map(g => g.id) });
+});
+
+// Patch an existing hire — primarily the work mode (agent / hybrid / human),
+// plus tone/description tweaks from the Workforce page.
+personasRouter.patch("/:id", (req, res) => {
+  const p = updatePersona(String(req.params.id), req.body ?? {});
+  if (!p) return res.status(404).json({ error: "persona not found" });
+  res.json({ persona: p });
 });
 
 // generateStarterTemplates → moved to lib/persona-templates.ts so the same
