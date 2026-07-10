@@ -1,13 +1,14 @@
-# clawbot + NeuroWorks
+# NeuroWorks
 
-Local AI workforce console paired with an Obsidian second-brain.
+Local-first AI workforce platform paired with an Obsidian second-brain.
+(Repo renamed from `clawbot` on 2026-07-11 — GitHub redirects the old URL.)
 
 Two surfaces in one repo:
 
-- **clawbot** — cloud cron worker (GitHub Actions) that feeds repo activity into the `main-brain` Obsidian vault.
-- **NeuroWorks** — local web console for chatting with clawbot, browsing the vault, running templated tasks, and reviewing daily reflections. Multi-clawbot capable (primary + secondary worker).
+- **NeuroWorks** — local web console: chat with the agent, browse the vault, run templated tasks, review daily reflections. Multi-worker capable (primary + secondary).
+- **clawbot** — the cloud cron worker (GitHub Actions) inside it that feeds repo activity into the `main-brain` Obsidian vault. Also the historical/internal name still used for env var prefixes (`CLAWBOT_*`) and some file paths.
 
-## What clawbot does
+## What the cron worker does
 
 Three entrypoints:
 
@@ -146,6 +147,14 @@ The server enforces:
 - `/api/health` and `/api/peers/self` exempt for handshake.
 - `OPTIONS` preflight passes through.
 - Lift entirely with `CLAWBOT_ORIGIN_GUARD=0` (e.g., when fronted by a reverse proxy that rewrites Host — logged).
+
+**Enterprise mode** (`NEUROWORKS_ENTERPRISE_MODE=1`, off by default): the
+checks above stop DNS rebinding and cross-origin browser POSTs, but neither
+authenticates a plain server-to-server request — fine for a single loopback-
+bound machine, not once this instance is reachable from a wider network.
+Flipping this on requires every non-loopback request to carry a session or a
+`machine:full`-scoped API key. See [docs/DEPLOYMENT-SECRETS.md](docs/DEPLOYMENT-SECRETS.md#network-exposure--enterprise-mode)
+before exposing this beyond one trusted machine.
 
 Path + URL gates on agent primitives:
 - `CLAWBOT_FS_UNRESTRICTED=1` — lifts the sensitive-path guard for `fs.read_external` / `fs.list_external`.
