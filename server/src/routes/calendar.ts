@@ -122,7 +122,7 @@ calendarRouter.get("/agenda", async (req, res) => {
 
     let meetings: any[] = [];
     let meetingsError: string | undefined;
-    const icalSource = process.env.CLAWBOT_CALENDAR_ICAL_URL;
+    const icalSource = process.env.NEUROWORKS_CALENDAR_ICAL_URL;
     if (icalSource) {
       try {
         const { readICalSource } = await import("../lib/calendar-ical.js");

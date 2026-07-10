@@ -100,7 +100,7 @@ job log records:
 ## Reflection (nightly self-audit)
 
 `startReflectionScheduler` runs `POST /api/reflection/run` nightly at
-`CLAWBOT_REFLECTION_HOUR` (default 02:00 local). The reflection:
+`NEUROWORKS_REFLECTION_HOUR` (default 02:00 local). The reflection:
 
 1. Reads the last 24 h of jobs from the in-memory table.
 2. Computes per-kind stats (totals, ok, failed, latency, error patterns).

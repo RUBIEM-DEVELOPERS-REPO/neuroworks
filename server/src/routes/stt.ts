@@ -3,7 +3,7 @@ import { Router } from "express";
 // Speech-to-text via AssemblyAI. The browser records a short prompt and POSTs
 // the audio (base64) here; we upload it to AssemblyAI, kick off a transcript,
 // poll to completion, and return the text. The API key stays server-side
-// (CLAWBOT_ASSEMBLYAI_API_KEY) so it never reaches the frontend bundle.
+// (NEUROWORKS_ASSEMBLYAI_API_KEY) so it never reaches the frontend bundle.
 //
 // AssemblyAI's flow is async: /upload -> /transcript -> poll /transcript/:id.
 // For short chat prompts this completes in a few seconds; we hold the request
@@ -12,7 +12,7 @@ import { Router } from "express";
 export const sttRouter = Router();
 
 const AAI = "https://api.assemblyai.com/v2";
-const KEY = () => (process.env.CLAWBOT_ASSEMBLYAI_API_KEY ?? "").trim();
+const KEY = () => (process.env.NEUROWORKS_ASSEMBLYAI_API_KEY ?? "").trim();
 const MAX_AUDIO_BYTES = 25 * 1024 * 1024;
 const POLL_TIMEOUT_MS = 90_000;
 const POLL_INTERVAL_MS = 1_500;
@@ -21,14 +21,14 @@ sttRouter.get("/status", (_req, res) => {
   res.json({
     enabled: KEY().length > 0,
     provider: "assemblyai",
-    hint: KEY() ? undefined : "set CLAWBOT_ASSEMBLYAI_API_KEY in clawbot/.env and restart to enable the chat mic",
+    hint: KEY() ? undefined : "set NEUROWORKS_ASSEMBLYAI_API_KEY in clawbot/.env and restart to enable the chat mic",
   });
 });
 
 sttRouter.post("/", async (req, res) => {
   const key = KEY();
   if (!key) {
-    return res.status(400).json({ error: "speech-to-text not configured", hint: "set CLAWBOT_ASSEMBLYAI_API_KEY in clawbot/.env and restart" });
+    return res.status(400).json({ error: "speech-to-text not configured", hint: "set NEUROWORKS_ASSEMBLYAI_API_KEY in clawbot/.env and restart" });
   }
 
   // Accept either a bare base64 string or a data URL ("data:audio/webm;base64,...").

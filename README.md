@@ -6,7 +6,7 @@ Local-first AI workforce platform paired with an Obsidian second-brain.
 Two surfaces in one repo:
 
 - **NeuroWorks** — local web console: chat with the agent, browse the vault, run templated tasks, review daily reflections. Multi-worker capable (primary + secondary).
-- **clawbot** — the cloud cron worker (GitHub Actions) inside it that feeds repo activity into the `main-brain` Obsidian vault. Also the historical/internal name still used for env var prefixes (`CLAWBOT_*`) and some file paths.
+- **clawbot** — the cloud cron worker (GitHub Actions) inside it that feeds repo activity into the `main-brain` Obsidian vault. Also the historical/internal name still used for env var prefixes (`NEUROWORKS_*`) and some file paths.
 
 ## What the cron worker does
 
@@ -114,7 +114,7 @@ payments are optional add-ons configured in `.env`.
 ### Configuration
 
 `.env` keys (see `.env.example`):
-- `GITHUB_TOKEN` — fine-grained PAT (same one used for `CLAWBOT_PAT`).
+- `GITHUB_TOKEN` — fine-grained PAT (same one used for `NEUROWORKS_PAT`).
 - `GITHUB_OWNER` — `RUBIEM-DEVELOPERS-REPO`.
 - `VAULT_REPO` — `RUBIEM-DEVELOPERS-REPO/main-brain`.
 - `VAULT_PATH` — local path to vault (`D:\Main brain`).
@@ -129,7 +129,7 @@ The agent ships with 40+ skill `.md` playbooks at [server/src/skills/](server/sr
 
 Browse the catalog at `GET /api/skills` (JSON) — `name`, `description`, `source`, `applies_to`, `bodyChars`. Full body at `GET /api/skills/:name`.
 
-User playbooks dropped under [server/src/skills/_user/](server/src/skills/_user/) (gitignored) override built-ins with the same name. Remote skill fetching is gated behind `CLAWBOT_REMOTE_SKILLS=1` — see `.env.example`.
+User playbooks dropped under [server/src/skills/_user/](server/src/skills/_user/) (gitignored) override built-ins with the same name. Remote skill fetching is gated behind `NEUROWORKS_REMOTE_SKILLS=1` — see `.env.example`.
 
 The reflection loop reports per-skill success rate + avg picker score in the daily reflection, so weak playbooks surface for revision.
 
@@ -143,10 +143,10 @@ NeuroWorks binds loopback-only, but loopback alone doesn't defeat two real brows
 The server enforces:
 
 - **Host header allow-list**: `127.0.0.1:<port>` and `localhost:<port>` only.
-- **Origin header allow-list**: when set, must match `http://127.0.0.1:7470` (override with `CLAWBOT_WEB_ORIGIN`).
+- **Origin header allow-list**: when set, must match `http://127.0.0.1:7470` (override with `NEUROWORKS_WEB_ORIGIN`).
 - `/api/health` and `/api/peers/self` exempt for handshake.
 - `OPTIONS` preflight passes through.
-- Lift entirely with `CLAWBOT_ORIGIN_GUARD=0` (e.g., when fronted by a reverse proxy that rewrites Host — logged).
+- Lift entirely with `NEUROWORKS_ORIGIN_GUARD=0` (e.g., when fronted by a reverse proxy that rewrites Host — logged).
 
 **Enterprise mode** (`NEUROWORKS_ENTERPRISE_MODE=1`, off by default): the
 checks above stop DNS rebinding and cross-origin browser POSTs, but neither
@@ -157,10 +157,10 @@ Flipping this on requires every non-loopback request to carry a session or a
 before exposing this beyond one trusted machine.
 
 Path + URL gates on agent primitives:
-- `CLAWBOT_FS_UNRESTRICTED=1` — lifts the sensitive-path guard for `fs.read_external` / `fs.list_external`.
-- `CLAWBOT_WEB_ALLOW_PRIVATE=1` — lifts the SSRF guard against private/loopback IPs.
-- `CLAWBOT_VAULT_EDIT=1` — enables `vault.edit` (off by default).
-- Vault writes scanned for high-severity secrets — refused outright (set `CLAWBOT_VAULT_SCAN=0` to disable, not recommended).
+- `NEUROWORKS_FS_UNRESTRICTED=1` — lifts the sensitive-path guard for `fs.read_external` / `fs.list_external`.
+- `NEUROWORKS_WEB_ALLOW_PRIVATE=1` — lifts the SSRF guard against private/loopback IPs.
+- `NEUROWORKS_VAULT_EDIT=1` — enables `vault.edit` (off by default).
+- Vault writes scanned for high-severity secrets — refused outright (set `NEUROWORKS_VAULT_SCAN=0` to disable, not recommended).
 
 ## How summaries work
 
@@ -175,7 +175,7 @@ The Knowledge page lists committed summaries; click "Refresh summary" to regener
 ## Persistence + reflection
 
 - Job history persists as append-only JSONL at `.neuroworks/jobs/<YYYY-MM-DD>.jsonl` (gitignored). Survives restarts and the in-memory `RECENT=200` cap.
-- Daily reflection at 2 AM local (configurable via `CLAWBOT_REFLECTION_HOUR`) aggregates the last 24h across the local store, in-memory state, and every peer's `/api/peers/jobs` endpoint — so delegations to the secondary are visible.
+- Daily reflection at 2 AM local (configurable via `NEUROWORKS_REFLECTION_HOUR`) aggregates the last 24h across the local store, in-memory state, and every peer's `/api/peers/jobs` endpoint — so delegations to the secondary are visible.
 - Output lands at `<vault>/_neuroworks/reflections/<YYYY-MM-DD>.md` with sections "What went well / What went wrong / What I notice / What to try next" plus a raw stats snapshot.
 
 ## Multi-clawbot (primary + secondary)
@@ -190,15 +190,15 @@ The secondary acts as a parallel worker for sub-agent fan-out + the curation/rev
 ## Tests
 
 ```sh
-pnpm -F clawbot-server test         # vitest suite (one-shot)
-pnpm -F clawbot-server test:watch   # vitest watch mode
+pnpm -F neuroworks-server test         # vitest suite (one-shot)
+pnpm -F neuroworks-server test:watch   # vitest watch mode
 ```
 
 Tests cover the cascade contract: heuristic planning, skill picker scoring, direct-answer triage, and the origin guard. Don't refactor `agent.ts` without running the suite — the regexes are easy to drift.
 
 ## Required configuration (GitHub Actions side)
 
-- **Secret `CLAWBOT_PAT`** — fine-grained personal access token with: Contents read+write on the vault repo, Contents read across all owned repos, Metadata read, Pull requests read, Issues read, Administration read+write (for `publish-folder` to create new repos).
+- **Secret `NEUROWORKS_PAT`** — fine-grained personal access token with: Contents read+write on the vault repo, Contents read across all owned repos, Metadata read, Pull requests read, Issues read, Administration read+write (for `publish-folder` to create new repos).
 - **Variable `VAULT_REPO`** — `<owner>/main-brain`.
 
 ## Local use

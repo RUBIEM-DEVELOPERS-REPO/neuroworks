@@ -10,7 +10,7 @@
 //   4. restarts cloudflared if it dies and re-points the route.
 //
 // Run: node tools/inbound-tunnel.mjs   (expects the clawbot webhook on the port
-// in CLAWBOT_EMAIL_INBOUND_PORT, and Mailjet creds + token in clawbot/.env).
+// in NEUROWORKS_EMAIL_INBOUND_PORT, and Mailjet creds + token in clawbot/.env).
 //
 // No secrets are printed; the route Url (which embeds the token) is sent only to
 // Mailjet over HTTPS, never logged.
@@ -34,14 +34,14 @@ function loadEnv() {
 }
 
 const env = loadEnv();
-const KEY = env.CLAWBOT_MAILJET_API_KEY;
-const SEC = env.CLAWBOT_MAILJET_API_SECRET;
-const TOKEN = env.CLAWBOT_EMAIL_INBOUND_TOKEN;
-const PORT = env.CLAWBOT_EMAIL_INBOUND_PORT || "7475";
+const KEY = env.NEUROWORKS_MAILJET_API_KEY;
+const SEC = env.NEUROWORKS_MAILJET_API_SECRET;
+const TOKEN = env.NEUROWORKS_EMAIL_INBOUND_TOKEN;
+const PORT = env.NEUROWORKS_EMAIL_INBOUND_PORT || "7475";
 const CFD = resolve(ROOT, ".tools", "cloudflared.exe");
 
 if (!KEY || !SEC) { console.error("[tunnel] missing Mailjet creds in .env"); process.exit(1); }
-if (!TOKEN) { console.error("[tunnel] missing CLAWBOT_EMAIL_INBOUND_TOKEN in .env"); process.exit(1); }
+if (!TOKEN) { console.error("[tunnel] missing NEUROWORKS_EMAIL_INBOUND_TOKEN in .env"); process.exit(1); }
 
 const mjAuth = "Basic " + Buffer.from(`${KEY}:${SEC}`).toString("base64");
 

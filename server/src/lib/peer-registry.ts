@@ -1,4 +1,4 @@
-// Runtime peer registry. The env-seeded list (CLAWBOT_PEERS) is the starting
+// Runtime peer registry. The env-seeded list (NEUROWORKS_PEERS) is the starting
 // point, but peers can be added or dropped at runtime — by the Admin UI, by
 // auto-discovery scanning common local ports, or by a peer announcing itself.
 //
@@ -33,7 +33,7 @@ function init() {
     const k = normalize(u);
     if (!k) continue;
     if (!registry.has(k)) {
-      registry.set(k, { url: k, source: "env", consecutiveFails: 0, dropped: false, note: "from CLAWBOT_PEERS" });
+      registry.set(k, { url: k, source: "env", consecutiveFails: 0, dropped: false, note: "from NEUROWORKS_PEERS" });
     }
   }
 }

@@ -15,14 +15,14 @@ import { detectsShonaOrNdebele, shonaLanguageDirective } from "../lib/shona-glos
 
 // Below this answer length (chars), a Hermes result is treated as "couldn't do
 // it" and offloaded to clawbot. Catches empty / no-final-response / stub replies.
-const HERMES_MIN_ANSWER = Number(process.env.CLAWBOT_HERMES_MIN_ANSWER ?? "40");
+const HERMES_MIN_ANSWER = Number(process.env.NEUROWORKS_HERMES_MIN_ANSWER ?? "40");
 // Master switch for the Hermes→clawbot offload (default on).
-const HERMES_FALLBACK = process.env.CLAWBOT_HERMES_FALLBACK !== "0";
+const HERMES_FALLBACK = process.env.NEUROWORKS_HERMES_FALLBACK !== "0";
 // Quality gate — also offload a present-but-WEAK Hermes answer (one that runs
 // clawbot's quality.check and doesn't pass), not just hard failures. Default on;
 // time-bounded + fail-safe (a scorer error/timeout keeps the Hermes answer).
-const HERMES_QUALITY_GATE = process.env.CLAWBOT_HERMES_QUALITY_GATE !== "0";
-const HERMES_QUALITY_TIMEOUT_MS = Number(process.env.CLAWBOT_HERMES_QUALITY_TIMEOUT_MS ?? "45000");
+const HERMES_QUALITY_GATE = process.env.NEUROWORKS_HERMES_QUALITY_GATE !== "0";
+const HERMES_QUALITY_TIMEOUT_MS = Number(process.env.NEUROWORKS_HERMES_QUALITY_TIMEOUT_MS ?? "45000");
 
 // Run clawbot's quality.check on a Hermes answer. Returns { pass, score } or
 // null when the gate can't run (no primitive / scorer error / timeout) — in
@@ -75,15 +75,15 @@ async function pickLeastLoadedWorker(): Promise<PeerInfo | null> {
 // already running. Configurable via env so single-clawbot users can crank it up
 // to never delegate. Default 2 — when you've already queued one task and start
 // another, delegation kicks in if a peer is idle.
-const OVERLOAD_THRESHOLD = Number(process.env.CLAWBOT_OVERLOAD_THRESHOLD ?? "2");
+const OVERLOAD_THRESHOLD = Number(process.env.NEUROWORKS_OVERLOAD_THRESHOLD ?? "2");
 
 // When true (default), the primary clawbot delegates ALL ad-hoc general tasks
 // to the persona-shifter peer when one is reachable, then curates the result —
 // scoring quality, scanning for secrets, and capturing context-rooted answers
 // to the vault. The primary becomes the editor; the persona-shifter is the
-// worker. Set CLAWBOT_DELEGATE_ALL=0 to fall back to the old "only delegate
+// worker. Set NEUROWORKS_DELEGATE_ALL=0 to fall back to the old "only delegate
 // when overloaded or persona-shifted" routing.
-const DELEGATE_ALL = process.env.CLAWBOT_DELEGATE_ALL !== "0";
+const DELEGATE_ALL = process.env.NEUROWORKS_DELEGATE_ALL !== "0";
 
 export const chatRouter = Router();
 
@@ -552,7 +552,7 @@ async function handleChat(req: any, res: any) {
   }
 
   // Routing rules (in order):
-  //   1. Default (CLAWBOT_DELEGATE_ALL=1): the primary delegates EVERY ad-hoc
+  //   1. Default (NEUROWORKS_DELEGATE_ALL=1): the primary delegates EVERY ad-hoc
   //      task to the persona-shifter peer if one is reachable. The primary
   //      then curates the peer's output — quality + security gates, decides
   //      what gets captured to the vault. Worker/editor split.
@@ -590,7 +590,7 @@ async function handleChat(req: any, res: any) {
       // while local sits idle. If NO persona-shifter at all, fall through
       // to auto-spawn the worker so the route is at least set up.
       let workerPeer = await pickLeastLoadedWorker();
-      if (!workerPeer && process.env.CLAWBOT_AUTO_SPAWN_WORKER !== "0") {
+      if (!workerPeer && process.env.NEUROWORKS_AUTO_SPAWN_WORKER !== "0") {
         try {
           const handle = await Promise.race([
             ensureWorker({ waitForReady: true }),
@@ -1723,7 +1723,7 @@ void config; void searchVault; void ollamaGenerate;
 // Each task runs as its own job through the standard planAndExecute path,
 // with personaSystemSuffix injected so the persona's lane + voice apply.
 // Jobs fire concurrently — limited by the worker pool ceiling already in
-// place (CLAWBOT_MAX_WORKERS), so 6 team tasks against a 3-worker pool will
+// place (NEUROWORKS_MAX_WORKERS), so 6 team tasks against a 3-worker pool will
 // queue the last 3 behind the first 3.
 chatRouter.post("/team", async (req, res) => {
   try {

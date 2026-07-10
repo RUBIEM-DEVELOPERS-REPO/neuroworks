@@ -56,6 +56,6 @@ tags: [<topic>, <persona-if-relevant>]
 ## What NOT to write to the vault
 
 - Conversational chat replies (direct-answer outputs). Capture only when there's evidence + a useful summary.
-- Drafts the user didn't approve (gate via `CLAWBOT_VAULT_EDIT=1`).
+- Drafts the user didn't approve (gate via `NEUROWORKS_VAULT_EDIT=1`).
 - Anything that fails the security scan — refuses automatically.
 - Re-summaries of existing notes (cluttered the vault). Update the existing note in place instead.

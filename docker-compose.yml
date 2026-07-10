@@ -35,7 +35,7 @@ services:
       SERVE_WEB: "1"
       # Accessing via localhost:7471 works out of the box. Behind your own
       # domain/reverse proxy, add it so the Host allow-list (DNS-rebind defense)
-      # accepts it, e.g. CLAWBOT_ALLOWED_HOSTS: "neuroworks.example.com"
+      # accepts it, e.g. NEUROWORKS_ALLOWED_HOSTS: "neuroworks.example.com"
       # Pass real secrets via an .env file rather than committing them here.
     env_file:
       - path: .env

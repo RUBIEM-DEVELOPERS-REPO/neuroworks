@@ -64,7 +64,7 @@ Then open **http://127.0.0.1:7470** in your browser. The API runs on
 | GitHub-synced vault | `GITHUB_TOKEN`, `VAULT_REPO`, `VAULT_PATH` |
 | Email send (Mailjet) | `MAILJET_*` |
 | Payments (Stripe) | `STRIPE_*` |
-| Calendar | `CLAWBOT_CALENDAR_ICAL_URL` |
+| Calendar | `NEUROWORKS_CALENDAR_ICAL_URL` |
 
 Every value in `.env.example` is a placeholder — fill in only what you need.
 

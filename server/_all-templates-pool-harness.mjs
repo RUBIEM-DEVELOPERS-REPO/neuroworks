@@ -16,7 +16,7 @@
 //     saturation. Per-template grader + retry-on-fail for variance.
 //
 //   Phase C — OVERLOAD BURST. Fire 6 simultaneous persona-shifted chat
-//     tasks (more than the default CLAWBOT_MAX_WORKERS=3 cap) and watch
+//     tasks (more than the default NEUROWORKS_MAX_WORKERS=3 cap) and watch
 //     the managed worker pool scale: 1 → 2 → 3. Verifies the
 //     ensureExtraWorker scaling triggered from chat.ts when chosen
 //     peer already has inflight work.

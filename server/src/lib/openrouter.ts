@@ -12,7 +12,7 @@ export type OpenRouterCallOptions = {
 // provider hiccups. Errors carrying `transient: true` tell the llm-router it
 // may fall back to the local model instead of failing the whole task.
 const TRANSIENT_STATUS = new Set([429, 500, 502, 503, 504]);
-const MAX_ATTEMPTS = Math.max(1, Number(process.env.CLAWBOT_OR_MAX_ATTEMPTS ?? "3"));
+const MAX_ATTEMPTS = Math.max(1, Number(process.env.NEUROWORKS_OR_MAX_ATTEMPTS ?? "3"));
 const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
 // Exponential backoff: ~0.5s, 1s, 2s … capped at 8s.
 const backoffMs = (attempt: number) => Math.min(8_000, 500 * 2 ** (attempt - 1));
@@ -25,18 +25,18 @@ const backoffMs = (attempt: number) => Math.min(8_000, 500 * 2 ** (attempt - 1))
 // of consecutive failures we OPEN the circuit and fail fast (transient error →
 // instant local fallback) for a cooldown, so the outage costs seconds not
 // minutes. A single success closes it again.
-const CB_THRESHOLD = Math.max(1, Number(process.env.CLAWBOT_OR_CB_THRESHOLD ?? "2"));
-const CB_COOLDOWN_MS = Math.max(5_000, Number(process.env.CLAWBOT_OR_CB_COOLDOWN_MS ?? "60000"));
+const CB_THRESHOLD = Math.max(1, Number(process.env.NEUROWORKS_OR_CB_THRESHOLD ?? "2"));
+const CB_COOLDOWN_MS = Math.max(5_000, Number(process.env.NEUROWORKS_OR_CB_COOLDOWN_MS ?? "60000"));
 // Fallback hold when the FREE DAILY quota is exhausted but no reset time is
 // given. The daily cap (e.g. 50 free req/day) won't recover in 60s, so re-probing
 // on the normal cooldown just retry-storms all day. Hold local for an hour.
-const CB_DAILY_QUOTA_HOLD_MS = Math.max(60_000, Number(process.env.CLAWBOT_OR_DAILY_HOLD_MS ?? "3600000"));
+const CB_DAILY_QUOTA_HOLD_MS = Math.max(60_000, Number(process.env.NEUROWORKS_OR_DAILY_HOLD_MS ?? "3600000"));
 // Hold when the PROVIDER ACCOUNT is out of credits ("Your credit balance is
 // too low…" from the Anthropic-compatible endpoint, HTTP 402 / "Insufficient
 // credits" from OpenRouter proper). Credits don't recover on their own — a
 // human has to top up — so re-probing every 60s just fails every task's synth
 // in the meantime. Hold local for 30min between probes.
-const CB_BILLING_HOLD_MS = Math.max(60_000, Number(process.env.CLAWBOT_OR_BILLING_HOLD_MS ?? "1800000"));
+const CB_BILLING_HOLD_MS = Math.max(60_000, Number(process.env.NEUROWORKS_OR_BILLING_HOLD_MS ?? "1800000"));
 let cbConsecutiveFails = 0;
 let cbOpenUntil = 0;
 let cbDailyQuotaHit = false; // sticky: true once we've seen a free-models-per-day 429

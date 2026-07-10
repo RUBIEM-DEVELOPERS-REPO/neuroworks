@@ -125,10 +125,10 @@ function estimateTokens(s: string | undefined): number {
 // ~6k input tokens leaves no room for output — those calls SHOULD route to
 // OR which has 128k+ on gpt-4o-mini. Tunable via env so a user with a 32k
 // local model can raise the bar.
-const LOCAL_CONTEXT_BUDGET_TOKENS = Number(process.env.CLAWBOT_LOCAL_CTX_BUDGET ?? "6000");
+const LOCAL_CONTEXT_BUDGET_TOKENS = Number(process.env.NEUROWORKS_LOCAL_CTX_BUDGET ?? "6000");
 // Hard-complexity fallback: even if OR profiles aren't configured, a call
 // over this size goes to OR when the key is set. Saves the customer from
-// silent context-overflow truncation on Ollama. Set CLAWBOT_LOCAL_CTX_BUDGET=0
+// silent context-overflow truncation on Ollama. Set NEUROWORKS_LOCAL_CTX_BUDGET=0
 // to disable this complexity-based override entirely.
 function isTooBigForLocal(prompt: string, system: string | undefined): boolean {
   if (LOCAL_CONTEXT_BUDGET_TOKENS <= 0) return false;
@@ -262,7 +262,7 @@ async function callOllamaStream(prompt: string, system: string | undefined, mode
 // TRANSIENT errors (429 rate-limit, 5xx, network) instead fall back to the
 // local Ollama model when no token has streamed yet, so a temporary upstream
 // rate-limit doesn't fail the whole task with a partial result. Disable the
-// fallback with CLAWBOT_OR_FALLBACK_OLLAMA=0.
+// fallback with NEUROWORKS_OR_FALLBACK_OLLAMA=0.
 // Public entry — wraps the dispatcher to record cost for EVERY call (this is
 // how the Cost monitor page gets its data; recording is best-effort and never
 // blocks or breaks the actual generation).
@@ -297,7 +297,7 @@ async function generateWithMetaInner(prompt: string, system?: string, opts: LLMC
       if (opts.onToken) { try { opts.onToken(text, text); } catch { /* consumer error */ } }
       return { text, model };
     } catch (e: any) {
-      const fallbackOn = process.env.CLAWBOT_OR_FALLBACK_OLLAMA !== "0";
+      const fallbackOn = process.env.NEUROWORKS_OR_FALLBACK_OLLAMA !== "0";
       if (fallbackOn) {
         const localModel = opts.profile ? await pickModelFor(opts.profile, config.ollamaModel) : config.ollamaModel;
         console.warn(`[llm] MiniMax failure — falling back to local ${localModel}: ${String(e?.message ?? e).slice(0, 140)}`);
@@ -319,7 +319,7 @@ async function generateWithMetaInner(prompt: string, system?: string, opts: LLMC
     try {
       return await openrouterGenerateWithMeta(prompt, system, { model, onToken, maxTokens: opts.maxTokens, temperature: opts.temperature });
     } catch (e: any) {
-      const fallbackOn = process.env.CLAWBOT_OR_FALLBACK_OLLAMA !== "0";
+      const fallbackOn = process.env.NEUROWORKS_OR_FALLBACK_OLLAMA !== "0";
       if (isTransientError(e) && fallbackOn && !streamed) {
         const localModel = opts.profile ? await pickModelFor(opts.profile, config.ollamaModel) : config.ollamaModel;
         console.warn(`[llm] OpenRouter transient failure — falling back to local ${localModel}: ${String(e?.message ?? e).slice(0, 140)}`);
@@ -331,7 +331,7 @@ async function generateWithMetaInner(prompt: string, system?: string, opts: LLMC
       throw e;
     }
   }
-  // Little-coder harness for small local models. When CLAWBOT_USE_LITTLE_CODER=1
+  // Little-coder harness for small local models. When NEUROWORKS_USE_LITTLE_CODER=1
   // and the model is a small local model and little-coder is installed, route
   // through the optimised small-model execution path. OpenRouter/cloud models are
   // unaffected — they keep the existing dispatch path above.

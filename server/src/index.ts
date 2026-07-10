@@ -281,13 +281,13 @@ const server = app.listen(config.port, config.bindHost, () => {
   // Pre-warm the default model so the first user task doesn't pay model-load
   // tax (5-8s on cold cache). Fire-and-forget — server is already accepting
   // requests; we just want the model resident in Ollama's memory by the time
-  // someone clicks Send. Skipped if CLAWBOT_NO_WARMUP=1.
+  // someone clicks Send. Skipped if NEUROWORKS_NO_WARMUP=1.
   //
   // We now warm every UNIQUE model the profile router could pick — default +
   // any profile-specific env pin. Triage on qwen3.5:0.8b + synthesis on
   // qwen2.5:3b means two cold-load hits on the first ad-hoc task; warming
   // both at boot eliminates both.
-  if (process.env.CLAWBOT_NO_WARMUP !== "1") {
+  if (process.env.NEUROWORKS_NO_WARMUP !== "1") {
     const toWarm = new Set<string>([config.ollamaModel]);
     for (const envKey of ["OLLAMA_TRIAGE_MODEL", "OLLAMA_PLAN_MODEL", "OLLAMA_SYNTH_MODEL", "OLLAMA_EXTRACT_MODEL", "OLLAMA_BALANCED_MODEL"]) {
       const v = process.env[envKey]?.trim();
@@ -314,9 +314,9 @@ const server = app.listen(config.port, config.bindHost, () => {
   }
 
   // Scan localhost for other clawbot instances. Saves the user from having
-  // to set CLAWBOT_PEERS just to wire the primary ↔ secondary loop together.
-  // Disabled with CLAWBOT_NO_AUTODISCOVER=1.
-  if (process.env.CLAWBOT_NO_AUTODISCOVER !== "1") {
+  // to set NEUROWORKS_PEERS just to wire the primary ↔ secondary loop together.
+  // Disabled with NEUROWORKS_NO_AUTODISCOVER=1.
+  if (process.env.NEUROWORKS_NO_AUTODISCOVER !== "1") {
     autodiscoverLocalPeers()
       .then(r => { if (r.found > 0) console.log(`  ✓ auto-discovered ${r.found} peer${r.found === 1 ? "" : "s"} on localhost`); })
       .catch(() => { /* swallow */ });
@@ -342,12 +342,12 @@ const server = app.listen(config.port, config.bindHost, () => {
   // Auto-spawn a managed worker POOL if we are the primary. With >1 worker,
   // concurrent tasks fan out across the pool (least-loaded routing) instead of
   // funnelling to a single agent — the "only one agent working" fix. Pool size
-  // is CLAWBOT_POOL_WORKERS (default 2; capped at CLAWBOT_MAX_WORKERS). Set
-  // CLAWBOT_AUTO_SPAWN_WORKER=0 to disable spawning entirely, or
-  // CLAWBOT_POOL_WORKERS=1 to keep a single worker. The user gets parallel
+  // is NEUROWORKS_POOL_WORKERS (default 2; capped at NEUROWORKS_MAX_WORKERS). Set
+  // NEUROWORKS_AUTO_SPAWN_WORKER=0 to disable spawning entirely, or
+  // NEUROWORKS_POOL_WORKERS=1 to keep a single worker. The user gets parallel
   // sub-agents + the curation gate "for free" — no need to know `pnpm secondary`.
-  if (process.env.CLAWBOT_AUTO_SPAWN_WORKER !== "0" && config.role === "primary") {
-    const poolTarget = Math.max(1, Number(process.env.CLAWBOT_POOL_WORKERS ?? "2") || 2);
+  if (process.env.NEUROWORKS_AUTO_SPAWN_WORKER !== "0" && config.role === "primary") {
+    const poolTarget = Math.max(1, Number(process.env.NEUROWORKS_POOL_WORKERS ?? "2") || 2);
     setTimeout(() => {
       void ensurePool(poolTarget)
         .then(r => console.log(`  ⓦ worker pool warm — ${r.running} managed worker(s) ready (target ${poolTarget})`))
@@ -357,7 +357,7 @@ const server = app.listen(config.port, config.bindHost, () => {
 
   // Watch the vault for external edits so the search cache busts when
   // the user edits notes in Obsidian directly. Default-on; opt out via
-  // CLAWBOT_VAULT_WATCH=0 if you're on a filesystem where the recursive
+  // NEUROWORKS_VAULT_WATCH=0 if you're on a filesystem where the recursive
   // watcher misbehaves. Fall-back behaviour is the 60s search cache TTL.
   startVaultWatcher();
 
@@ -379,28 +379,28 @@ const server = app.listen(config.port, config.bindHost, () => {
 
   // Periodic git pull from origin so Obsidian edits made on another machine
   // (or via Obsidian's git plugin) sync into the local vault that clawbot
-  // reads. Default every 5m; opt out with CLAWBOT_VAULT_PULL=0.
+  // reads. Default every 5m; opt out with NEUROWORKS_VAULT_PULL=0.
   startVaultPullScheduler();
 
   // Nightly self-reflection. Only the primary runs the scheduler — secondary
   // clawbots are workers and the reflection covers the whole fleet from the
-  // primary's job list anyway. Disable with CLAWBOT_REFLECTION=0.
-  if (process.env.CLAWBOT_REFLECTION !== "0" && config.role === "primary") {
+  // primary's job list anyway. Disable with NEUROWORKS_REFLECTION=0.
+  if (process.env.NEUROWORKS_REFLECTION !== "0" && config.role === "primary") {
     startReflectionScheduler();
-    console.log(`  ⓘ nightly reflection scheduler armed (hour=${process.env.CLAWBOT_REFLECTION_HOUR ?? "2"})`);
+    console.log(`  ⓘ nightly reflection scheduler armed (hour=${process.env.NEUROWORKS_REFLECTION_HOUR ?? "2"})`);
   }
 
   // User-defined schedules — fires template runs on a friendly day-of-week +
   // time-of-day cadence. Primary-only so the same schedule doesn't run on
-  // every worker. Disable with CLAWBOT_SCHEDULES=0.
-  if (process.env.CLAWBOT_SCHEDULES !== "0" && config.role === "primary") {
+  // every worker. Disable with NEUROWORKS_SCHEDULES=0.
+  if (process.env.NEUROWORKS_SCHEDULES !== "0" && config.role === "primary") {
     startScheduleScheduler();
     console.log(`  ⓘ schedule tick armed (30s interval)`);
   }
 
   // Email bridge — inbound IMAP poll + outbound SMTP so users can drive
   // clawbot over email. Primary-only (one poller for the fleet). No-ops with
-  // a log when CLAWBOT_EMAIL_USER / CLAWBOT_EMAIL_APP_PASSWORD aren't set.
+  // a log when NEUROWORKS_EMAIL_USER / NEUROWORKS_EMAIL_APP_PASSWORD aren't set.
   if (config.role === "primary") {
     void startEmailBridge().catch(e =>
       console.warn(`  ⚠ email bridge start failed: ${e?.message ?? e}`)

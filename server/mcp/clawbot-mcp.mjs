@@ -13,11 +13,11 @@
 //   hermes mcp add clawbot -- node "<repo>/server/mcp/clawbot-mcp.mjs"
 // Then `hermes mcp configure` to enable the tools, `hermes mcp test clawbot`.
 //
-// Env: CLAWBOT_BASE (default http://127.0.0.1:7471).
+// Env: NEUROWORKS_BASE (default http://127.0.0.1:7471).
 
 import { createInterface } from "node:readline";
 
-const BASE = process.env.CLAWBOT_BASE ?? "http://127.0.0.1:7471";
+const BASE = process.env.NEUROWORKS_BASE ?? "http://127.0.0.1:7471";
 const PROTOCOL_VERSION = "2024-11-05";
 
 function send(msg) {

@@ -9,7 +9,7 @@ import { primitives, findPrimitive, type Primitive } from "../lib/primitives.js"
 // used. NOT exposed: money-moving (payment.link) or destructive writes
 // (vault.edit/write/append, web.interact) — see ALLOWLIST.
 //
-// Scope is "grounding + connectors + Aiia". Override with CLAWBOT_MCP_TOOLS
+// Scope is "grounding + connectors + Aiia". Override with NEUROWORKS_MCP_TOOLS
 // (comma-separated primitive names) if you need a different set.
 
 export const primitivesRouter = Router();
@@ -54,7 +54,7 @@ const DEFAULT_ALLOWLIST = [
 ];
 
 function allowlist(): Set<string> {
-  const env = (process.env.CLAWBOT_MCP_TOOLS ?? "").split(",").map(s => s.trim()).filter(Boolean);
+  const env = (process.env.NEUROWORKS_MCP_TOOLS ?? "").split(",").map(s => s.trim()).filter(Boolean);
   return new Set(env.length ? env : DEFAULT_ALLOWLIST);
 }
 

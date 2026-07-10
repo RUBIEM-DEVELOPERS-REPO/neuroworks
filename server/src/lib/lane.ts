@@ -49,7 +49,7 @@ const ROSTER_BLURB =
 // the heuristic isn't sure about — typically subtler boundary calls. We'd
 // rather fail-open quickly (let task through, persona prompt handles it) than
 // stall a user for 25s on a small classification.
-const LANE_CHECK_TIMEOUT_MS = Number(process.env.CLAWBOT_LANE_CHECK_TIMEOUT_MS ?? "6000");
+const LANE_CHECK_TIMEOUT_MS = Number(process.env.NEUROWORKS_LANE_CHECK_TIMEOUT_MS ?? "6000");
 
 // ─── Heuristic out-of-lane catcher ───────────────────────────────────
 //

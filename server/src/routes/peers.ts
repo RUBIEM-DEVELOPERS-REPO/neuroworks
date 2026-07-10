@@ -230,7 +230,7 @@ peersRouter.post("/register", (req, res) => {
   res.json(r);
 });
 
-// Drop a peer from the runtime registry. Doesn't affect CLAWBOT_PEERS env —
+// Drop a peer from the runtime registry. Doesn't affect NEUROWORKS_PEERS env —
 // to permanently remove an env peer, edit .env and restart. Useful for
 // removing a stale auto-discovered peer.
 peersRouter.delete("/register", (req, res) => {

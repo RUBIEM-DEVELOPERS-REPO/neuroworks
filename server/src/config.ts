@@ -124,16 +124,16 @@ const port = Number(pick("NEUROWORKS_PORT", "7471"));
 // Comma-separated list of peer clawbot base URLs. Each peer is another running
 // instance of this same server (different port, optionally different model).
 // Empty by default — single-clawbot mode. Example:
-//   CLAWBOT_PEERS=http://127.0.0.1:7472,http://127.0.0.1:7473
-const peers = pick("CLAWBOT_PEERS", "")
+//   NEUROWORKS_PEERS=http://127.0.0.1:7472,http://127.0.0.1:7473
+const peers = pick("NEUROWORKS_PEERS", "")
   .split(",").map(s => s.trim()).filter(Boolean);
 // Optional human-readable name for this clawbot — shows up in /api/health and
 // peer roll-call responses so dual-clawbot work can be told apart in logs.
-const name = pick("CLAWBOT_NAME", "primary");
+const name = pick("NEUROWORKS_NAME", "primary");
 // Functional role for this clawbot. The chat router uses it to decide where
 // to delegate persona-shifted work (away from "primary" toward "persona-shifter").
 // Free-form, but recommended values are: primary | persona-shifter | general | reviewer.
-const role = pick("CLAWBOT_ROLE", "primary");
+const role = pick("NEUROWORKS_ROLE", "primary");
 
 // ── Production web serving + network bind ──────────────────────────────
 // Locally, `pnpm dev` runs two processes: the Vite dev server (7470, proxies
@@ -250,14 +250,14 @@ export function validateConfig(): void {
   if (serveWeb) {
     const indexHtml = resolve(webDistPath, "index.html");
     if (!existsSync(indexHtml)) {
-      fatal.push(`SERVE_WEB is on but no built SPA found at ${webDistPath} — run "pnpm -F clawbot-web build" first.`);
+      fatal.push(`SERVE_WEB is on but no built SPA found at ${webDistPath} — run "pnpm -F neuroworks-web build" first.`);
     }
   }
 
   // Exposing the server beyond loopback without the origin guard is a DNS-
   // rebinding hole. Allow it only when explicitly overridden.
-  if (bindHost !== "127.0.0.1" && bindHost !== "localhost" && process.env.CLAWBOT_ORIGIN_GUARD === "0") {
-    warn.push(`bound to ${bindHost} with CLAWBOT_ORIGIN_GUARD=0 — the API is reachable off-host with no Host/Origin defense. Put it behind a trusted reverse proxy only.`);
+  if (bindHost !== "127.0.0.1" && bindHost !== "localhost" && process.env.NEUROWORKS_ORIGIN_GUARD === "0") {
+    warn.push(`bound to ${bindHost} with NEUROWORKS_ORIGIN_GUARD=0 — the API is reachable off-host with no Host/Origin defense. Put it behind a trusted reverse proxy only.`);
   }
   // Wide bind + enterprise mode off means every route requireLayer() doesn't
   // cover (the majority — see lib/access.ts) has no auth for non-browser

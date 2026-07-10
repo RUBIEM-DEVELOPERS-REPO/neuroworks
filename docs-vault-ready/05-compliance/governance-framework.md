@@ -47,7 +47,7 @@ This defends against:
 The agent's planner can only call HTTPS URLs through `web.fetch` /
 `web.search`, both gated by:
 
-- **SSRF gate** — `CLAWBOT_WEB_ALLOW_PRIVATE` must be set explicitly
+- **SSRF gate** — `NEUROWORKS_WEB_ALLOW_PRIVATE` must be set explicitly
   to allow requests to private IP ranges (10.0.0.0/8, 172.16/12,
   192.168/16, 169.254/16, ::1, fc00::/7).
 - **No credentials by default** — `web.fetch` does NOT carry
@@ -73,7 +73,7 @@ that escapes the root via `..` or absolute prefix is rejected with
 - `.git-credentials`
 - `package.json` files containing credential-like fields
 
-Lifting requires `CLAWBOT_FS_UNRESTRICTED=1`. The lift itself is logged
+Lifting requires `NEUROWORKS_FS_UNRESTRICTED=1`. The lift itself is logged
 on every fs operation, so out-of-policy uses are traceable.
 
 ### Vault security refusal
@@ -88,7 +88,7 @@ either.
 ### Context upload TTL
 
 Documents staged via `POST /api/uploads` with `target: "context"` live
-in `.neuroworks/context-uploads/` for `CLAWBOT_CONTEXT_UPLOAD_TTL_MS`
+in `.neuroworks/context-uploads/` for `NEUROWORKS_CONTEXT_UPLOAD_TTL_MS`
 (default 1 h). Every upload request triggers a `gcContextDir()` sweep
 that removes anything past TTL. The TTL is hard-enforced — there's no
 "keep alive" mechanism.
@@ -170,7 +170,7 @@ admin guide for the operational details. Compliance-relevant points:
 
 ### Nightly self-reflection
 
-`POST /api/reflection/run` runs nightly at `CLAWBOT_REFLECTION_HOUR`
+`POST /api/reflection/run` runs nightly at `NEUROWORKS_REFLECTION_HOUR`
 (default 02:00). It surfaces:
 
 - Per-kind task volumes + success rates
@@ -267,14 +267,14 @@ Bundled templates for typical compliance asks:
 |---|---|---|
 | Network bind | `127.0.0.1` | (not configurable — security invariant) |
 | Origin allow-list | `127.0.0.1:7470,7473,7474,7475` | `origin-guard.ts` source edit |
-| Vault edit | OFF | `CLAWBOT_VAULT_EDIT=1` |
-| Web private IPs | blocked | `CLAWBOT_WEB_ALLOW_PRIVATE=1` |
-| Sensitive paths | blocked | `CLAWBOT_FS_UNRESTRICTED=1` |
-| Context upload TTL | 1 h | `CLAWBOT_CONTEXT_UPLOAD_TTL_MS` |
+| Vault edit | OFF | `NEUROWORKS_VAULT_EDIT=1` |
+| Web private IPs | blocked | `NEUROWORKS_WEB_ALLOW_PRIVATE=1` |
+| Sensitive paths | blocked | `NEUROWORKS_FS_UNRESTRICTED=1` |
+| Context upload TTL | 1 h | `NEUROWORKS_CONTEXT_UPLOAD_TTL_MS` |
 | Approval gate | per-template `requiresApproval` | (not bypassable) |
-| Reflection | nightly @ 02:00 | `CLAWBOT_REFLECTION=0` to disable |
-| Worker auto-spawn | ON | `CLAWBOT_AUTO_SPAWN_WORKER=0` |
-| Max workers | 3 | `CLAWBOT_MAX_WORKERS` |
+| Reflection | nightly @ 02:00 | `NEUROWORKS_REFLECTION=0` to disable |
+| Worker auto-spawn | ON | `NEUROWORKS_AUTO_SPAWN_WORKER=0` |
+| Max workers | 3 | `NEUROWORKS_MAX_WORKERS` |
 
 Every lift requires an explicit env var; nothing defaults open. If a
 gate is impeding legitimate work, opening it is one env var + a server

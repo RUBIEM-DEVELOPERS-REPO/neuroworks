@@ -46,7 +46,7 @@ emailRouter.post("/send", async (req, res) => {
 emailRouter.post("/test", async (req, res) => {
   try {
     if (!emailConfigured()) {
-      return res.status(400).json({ error: "email not configured — set CLAWBOT_EMAIL_USER + CLAWBOT_EMAIL_APP_PASSWORD in .env" });
+      return res.status(400).json({ error: "email not configured — set NEUROWORKS_EMAIL_USER + NEUROWORKS_EMAIL_APP_PASSWORD in .env" });
     }
     const to = typeof req.body?.to === "string" ? req.body.to.trim() : "";
     if (!to || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(to)) {

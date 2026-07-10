@@ -18,7 +18,7 @@ const BASE = "http://127.0.0.1:7471";
 const HERMES = "C:/Users/Arthur Magaya/AppData/Local/hermes/hermes-agent/venv/Scripts/hermes.exe";
 const HERMES_ARGS_MODEL = ["-m", "openai/gpt-oss-20b:free", "--provider", "openrouter"];
 const HERMES_TIMEOUT_MS = 200_000;
-const CLAWBOT_POLL_MS = 150_000;
+const NEUROWORKS_POLL_MS = 150_000;
 
 // Each task: a prompt + coverage groups (each group = array of accepted
 // substrings; a group is "covered" if ANY of its substrings appears) + minLen.
@@ -63,7 +63,7 @@ async function runClawbot(prompt) {
     const jobId = j.jobId;
     if (!jobId) return { text: "", ms: Date.now() - t0, ok: false, note: `no jobId (kind=${j.kind})` };
     // poll
-    const deadline = Date.now() + CLAWBOT_POLL_MS;
+    const deadline = Date.now() + NEUROWORKS_POLL_MS;
     while (Date.now() < deadline) {
       await sleep(2500);
       const jr = await fetch(`${BASE}/api/templates/jobs/${jobId}`).then(x => x.json()).catch(() => null);

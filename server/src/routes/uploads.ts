@@ -37,7 +37,7 @@ const CONTEXT_DIR = resolve(__dirname, "../../../.neuroworks/context-uploads");
 // Default TTL — overridable per upload via body.ttlSeconds. Clamped to
 // [60s, 7 days] so a runaway value can't park stale uploads indefinitely
 // or evict an upload before it's used.
-const CONTEXT_TTL_MS = Number(process.env.CLAWBOT_CONTEXT_UPLOAD_TTL_MS ?? "3600000");
+const CONTEXT_TTL_MS = Number(process.env.NEUROWORKS_CONTEXT_UPLOAD_TTL_MS ?? "3600000");
 const MIN_TTL_MS = 60_000;
 const MAX_TTL_MS = 7 * 24 * 3600_000;
 

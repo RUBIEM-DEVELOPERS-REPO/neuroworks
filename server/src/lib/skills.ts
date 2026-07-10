@@ -488,18 +488,18 @@ Draft the skill playbook for this intent. Output only the markdown — no preamb
 
 // Fetch a remote skill .md (e.g. from GitHub raw, gist, or a curated repo)
 // and save it under skills/_user/ so it's available on the next list call.
-// Gated by CLAWBOT_REMOTE_SKILLS=1 — by default we refuse remote fetches so
+// Gated by NEUROWORKS_REMOTE_SKILLS=1 — by default we refuse remote fetches so
 // the user has to opt in to pulling agent guidance from external sources.
 export async function fetchRemoteSkill(url: string): Promise<{ saved: string; skill: Skill }> {
-  if (process.env.CLAWBOT_REMOTE_SKILLS !== "1") {
-    throw new Error("Remote skill fetch is disabled. Set CLAWBOT_REMOTE_SKILLS=1 in .env to allow pulling skill .md files from the internet.");
+  if (process.env.NEUROWORKS_REMOTE_SKILLS !== "1") {
+    throw new Error("Remote skill fetch is disabled. Set NEUROWORKS_REMOTE_SKILLS=1 in .env to allow pulling skill .md files from the internet.");
   }
   if (!/^https?:\/\//i.test(url)) {
     throw new Error(`Remote skill URL must be http(s): ${url}`);
   }
-  // SECURITY: SSRF block — opt-in CLAWBOT_REMOTE_SKILLS=1 doesn't imply
+  // SECURITY: SSRF block — opt-in NEUROWORKS_REMOTE_SKILLS=1 doesn't imply
   // "and also reach internal services". Anyone wanting to pull a skill from
-  // a private host must additionally set CLAWBOT_WEB_ALLOW_PRIVATE=1.
+  // a private host must additionally set NEUROWORKS_WEB_ALLOW_PRIVATE=1.
   const { assertSafePublicUrlAsync } = await import("./security-gates.js");
   await assertSafePublicUrlAsync(url);
   const r = await fetch(url, { redirect: "follow" });

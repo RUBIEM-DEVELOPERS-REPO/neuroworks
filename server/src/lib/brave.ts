@@ -12,7 +12,7 @@
 //        Windows: "C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe" --remote-debugging-port=9222
 //        macOS:   /Applications/Brave\ Browser.app/Contents/MacOS/Brave\ Browser --remote-debugging-port=9222
 //        Linux:   brave-browser --remote-debugging-port=9222
-//   3. Set CLAWBOT_BRAVE_READ=1 in .env to opt in.
+//   3. Set NEUROWORKS_BRAVE_READ=1 in .env to opt in.
 //   4. Optional: BRAVE_DEBUG_PORT to change from default 9222.
 //
 // Privacy: read-only means we can SEE every tab the user has open. That's a
@@ -31,7 +31,7 @@ let lastConnectAt = 0;
 const CONNECT_TTL_MS = 60_000; // re-validate connection every minute
 
 export function braveEnabled(): boolean {
-  return process.env.CLAWBOT_BRAVE_READ === "1";
+  return process.env.NEUROWORKS_BRAVE_READ === "1";
 }
 
 function bravePort(): number {
@@ -95,7 +95,7 @@ export async function listBraveTabs(): Promise<BraveTab[]> {
     throw new Error(
       braveEnabled()
         ? `Couldn't reach Brave on port ${bravePort()}. Launch Brave with --remote-debugging-port=${bravePort()} and keep it running.`
-        : "Brave integration is disabled. Set CLAWBOT_BRAVE_READ=1 in .env to enable, then launch Brave with --remote-debugging-port=9222."
+        : "Brave integration is disabled. Set NEUROWORKS_BRAVE_READ=1 in .env to enable, then launch Brave with --remote-debugging-port=9222."
     );
   }
   const tabs: BraveTab[] = [];

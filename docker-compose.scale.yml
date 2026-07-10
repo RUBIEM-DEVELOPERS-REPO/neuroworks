@@ -1,5 +1,5 @@
 # Horizontal scale overlay — adds API-only clawbot PEER(s) to the base stack
-# and wires the primary to them via CLAWBOT_PEERS + the lightest-idle load
+# and wires the primary to them via NEUROWORKS_PEERS + the lightest-idle load
 # balancer that's already in the server.
 #
 #   docker compose -f docker-compose.yml -f docker-compose.scale.yml up --build
@@ -24,7 +24,7 @@ services:
   # peers every 60s, but across containers we name it explicitly.
   neuroworks:
     environment:
-      CLAWBOT_PEERS: http://neuroworks-peer:7471
+      NEUROWORKS_PEERS: http://neuroworks-peer:7471
       # Containers reach the HOST's Ollama via host.docker.internal. Override in
       # .env to point at a shared/remote LLM instead.
       OLLAMA_HOST: ${OLLAMA_HOST:-http://host.docker.internal:11434}
@@ -39,12 +39,12 @@ services:
     image: neuroworks:local
     build: .
     restart: unless-stopped
-    command: ["pnpm", "-F", "clawbot-server", "start"]
+    command: ["pnpm", "-F", "neuroworks-server", "start"]
     environment:
       VAULT_PATH: /data/vault
       NEUROWORKS_PORT: "7471"
-      CLAWBOT_NAME: peer
-      CLAWBOT_ROLE: persona-shifter
+      NEUROWORKS_NAME: peer
+      NEUROWORKS_ROLE: persona-shifter
       OLLAMA_HOST: ${OLLAMA_HOST:-http://host.docker.internal:11434}
     extra_hosts:
       - "host.docker.internal:host-gateway"

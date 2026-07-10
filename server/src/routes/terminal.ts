@@ -10,14 +10,14 @@ import { resolve } from "node:path";
 // we read the shell's resulting working directory back via a marker line.
 //
 // SECURITY — this runs ARBITRARY shell commands in the host process with the
-// server's privileges. It is GATED behind CLAWBOT_TERMINAL=1 (off by default)
+// server's privileges. It is GATED behind NEUROWORKS_TERMINAL=1 (off by default)
 // and the server only listens on 127.0.0.1. Never expose this server to a
 // network without removing this route. Same trust model as the code.exec
 // primitive: treat the operator as the author.
 
 export const terminalRouter = Router();
 
-const ENABLED = () => process.env.CLAWBOT_TERMINAL === "1";
+const ENABLED = () => process.env.NEUROWORKS_TERMINAL === "1";
 const isWin = process.platform === "win32";
 const CWD_MARK = "__NWCWD__:";
 const EXIT_MARK = "__NWEXIT__:";
@@ -46,13 +46,13 @@ terminalRouter.get("/status", (_req, res) => {
     cwd: sessionCwd,
     shell: isWin ? "powershell" : "bash",
     platform: process.platform,
-    hint: ENABLED() ? undefined : "set CLAWBOT_TERMINAL=1 in clawbot/.env and restart to enable",
+    hint: ENABLED() ? undefined : "set NEUROWORKS_TERMINAL=1 in clawbot/.env and restart to enable",
   });
 });
 
 terminalRouter.post("/exec", async (req, res) => {
   if (!ENABLED()) {
-    return res.status(400).json({ error: "terminal disabled", hint: "set CLAWBOT_TERMINAL=1 in clawbot/.env and restart to enable. It runs arbitrary shell commands on the host." });
+    return res.status(400).json({ error: "terminal disabled", hint: "set NEUROWORKS_TERMINAL=1 in clawbot/.env and restart to enable. It runs arbitrary shell commands on the host." });
   }
   const command = typeof req.body?.command === "string" ? req.body.command : "";
   if (!command.trim()) return res.status(400).json({ error: "command is required" });

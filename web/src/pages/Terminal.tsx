@@ -112,7 +112,7 @@ export function Terminal() {
           <AlertTriangle size={18} className="shrink-0 mt-0.5" />
           <div>
             <div className="font-medium text-flame-200">Terminal is disabled</div>
-            <div className="mt-0.5 text-flame-300/90">{hint ?? "set CLAWBOT_TERMINAL=1 in clawbot/.env and restart the server to enable."}</div>
+            <div className="mt-0.5 text-flame-300/90">{hint ?? "set NEUROWORKS_TERMINAL=1 in clawbot/.env and restart the server to enable."}</div>
             <div className="mt-1 text-flame-300/70">It runs arbitrary commands on the host with the server's privileges — only enable on a machine you trust. The server listens on 127.0.0.1 only.</div>
           </div>
         </div>

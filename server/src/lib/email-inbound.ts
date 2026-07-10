@@ -5,12 +5,12 @@ import { processInboundEmail, stripQuotedReply } from "./email.js";
 import { evaluateAuthResultsHeader } from "./email-auth.js";
 
 // Dedicated, minimal HTTP listener for Mailjet's inbound Parse API. Runs on its
-// OWN port (CLAWBOT_EMAIL_INBOUND_PORT, default 7475) exposing ONLY this webhook
+// OWN port (NEUROWORKS_EMAIL_INBOUND_PORT, default 7475) exposing ONLY this webhook
 // — never the main clawbot API. This is the surface we expose through the public
 // tunnel, so /api/terminal, /api/chat, etc. are NOT reachable from the internet.
 //
 // Security, two gates:
-//   1. A shared token (CLAWBOT_EMAIL_INBOUND_TOKEN) must be present on every
+//   1. A shared token (NEUROWORKS_EMAIL_INBOUND_TOKEN) must be present on every
 //      request (?token= query or x-inbound-token header). We embed it in the URL
 //      registered with Mailjet. Without a token configured the webhook refuses
 //      to start — better off than wide open.
@@ -28,7 +28,7 @@ const state = {
 };
 
 export function getInboundWebhookStatus() {
-  return { ...state, tokenSet: (process.env.CLAWBOT_EMAIL_INBOUND_TOKEN ?? "").trim().length > 0 };
+  return { ...state, tokenSet: (process.env.NEUROWORKS_EMAIL_INBOUND_TOKEN ?? "").trim().length > 0 };
 }
 
 // Mailjet Parse payload keys vary by config (JSON, capitalised, dashed). Pull
@@ -58,12 +58,12 @@ function safeEqual(a: string, b: string): boolean {
 
 export function startInboundWebhook(): void {
   if (server) return;
-  const token = (process.env.CLAWBOT_EMAIL_INBOUND_TOKEN ?? "").trim();
+  const token = (process.env.NEUROWORKS_EMAIL_INBOUND_TOKEN ?? "").trim();
   if (!token) {
-    console.warn("  ⚠ email inbound webhook NOT started — set CLAWBOT_EMAIL_INBOUND_TOKEN to enable (it gates the public endpoint)");
+    console.warn("  ⚠ email inbound webhook NOT started — set NEUROWORKS_EMAIL_INBOUND_TOKEN to enable (it gates the public endpoint)");
     return;
   }
-  const port = Number(process.env.CLAWBOT_EMAIL_INBOUND_PORT ?? "7475") || 7475;
+  const port = Number(process.env.NEUROWORKS_EMAIL_INBOUND_PORT ?? "7475") || 7475;
   const app = express();
   app.disable("x-powered-by"); // don't advertise the stack on a public endpoint
   // Mailjet Parse posts JSON; tolerate urlencoded too. 10mb covers a parsed
@@ -104,7 +104,7 @@ export function startInboundWebhook(): void {
     // it can satisfy the allow-list. Reject explicit auth failures (a spoof);
     // in strict mode also reject when we can't verify at all.
     const auth = evaluateAuthResultsHeader(headers, sender);
-    const strict = (process.env.CLAWBOT_EMAIL_REQUIRE_AUTH ?? "").trim().toLowerCase() === "strict";
+    const strict = (process.env.NEUROWORKS_EMAIL_REQUIRE_AUTH ?? "").trim().toLowerCase() === "strict";
     if (auth === "fail" || (auth === "unknown" && strict)) {
       state.rejected += 1;
       console.warn(`[inbound-webhook] rejected ${sender}: email auth ${auth} (SPF/DKIM) — possible spoof`);

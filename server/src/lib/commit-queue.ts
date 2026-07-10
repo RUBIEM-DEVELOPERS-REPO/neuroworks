@@ -16,14 +16,14 @@
 //     false" if they care.
 //   • Survives a failed commit — the next enqueue retries cleanly.
 //
-// Set CLAWBOT_COMMIT_DEBOUNCE_MS to tune debounce. 0 = commit immediately
+// Set NEUROWORKS_COMMIT_DEBOUNCE_MS to tune debounce. 0 = commit immediately
 // (effectively pre-queue behaviour). Default: 4000ms — long enough to absorb
 // a wave of sub-agent writes, short enough that the user doesn't wait for
 // their note to appear in the vault.
 
 import { commitAndPush, vaultAheadBy } from "./vault.js";
 
-const DEBOUNCE_MS = Number(process.env.CLAWBOT_COMMIT_DEBOUNCE_MS ?? "4000");
+const DEBOUNCE_MS = Number(process.env.NEUROWORKS_COMMIT_DEBOUNCE_MS ?? "4000");
 
 type Pending = {
   message: string;

@@ -13,7 +13,7 @@ flowchart TB
   classDef store fill:#26313a,stroke:#5fa8c7,color:#e9f3f7;
   classDef proc fill:#2b2438,stroke:#a06bd6,color:#f4e9da;
 
-  KEY["🔑 secret key<br/>CLAWBOT_SECRET_KEY (env)<br/>else .neuroworks/.secret-key (mode 0600)"]:::store
+  KEY["🔑 secret key<br/>NEUROWORKS_SECRET_KEY (env)<br/>else .neuroworks/.secret-key (mode 0600)"]:::store
 
   subgraph LOAD["load() — read from disk"]
     F["records on disk"]:::store --> CHK{"isEncrypted()?<br/>value starts with v1:"}
@@ -91,7 +91,7 @@ flowchart TB
   end
 
   subgraph KEYED["⚠️ Decryption-coupled — carry together with secrets"]
-    SK[".neuroworks/.secret-key<br/>REQUIRED to read connector/data-source secrets.<br/>If you use CLAWBOT_SECRET_KEY in .env, carry that instead."]:::warn
+    SK[".neuroworks/.secret-key<br/>REQUIRED to read connector/data-source secrets.<br/>If you use NEUROWORKS_SECRET_KEY in .env, carry that instead."]:::warn
   end
 
   subgraph REBUILD["🔁 Rebuilt automatically — don't copy"]

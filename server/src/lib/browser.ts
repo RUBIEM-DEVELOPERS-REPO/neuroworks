@@ -210,7 +210,7 @@ export async function renderMarkdownToPdf(opts: { markdown: string; title?: stri
 export async function scrape(opts: ScrapeOptions): Promise<ScrapeResult> {
   // SECURITY: same SSRF block as web.fetch. A headless browser fetching
   // 169.254.169.254 would happily return cloud metadata; the gate stops
-  // that. Override via CLAWBOT_WEB_ALLOW_PRIVATE=1.
+  // that. Override via NEUROWORKS_WEB_ALLOW_PRIVATE=1.
   const { assertSafePublicUrlAsync } = await import("./security-gates.js");
   await assertSafePublicUrlAsync(opts.url);
   const timeoutMs = Math.min(60_000, Math.max(2_000, opts.timeoutMs ?? 20_000));

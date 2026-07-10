@@ -14,7 +14,7 @@ but a value that has left the machine once is compromised and gets rotated.
 
 | # | Secret | Env var | Where used | How to rotate |
 |---|--------|---------|------------|---------------|
-| 1 | GitHub PAT | `GITHUB_TOKEN` | vault push, repo digest, publish-folder | GitHub → Settings → Developer settings → Fine-grained tokens → revoke the old, mint new (Contents R/W on `main-brain`, Metadata R). Update `.env` + the digest workflow secret. |
+| 1 | GitHub PAT | `GITHUB_TOKEN` | vault push, repo digest, publish-folder | GitHub → Settings → Developer settings → Fine-grained tokens → revoke the old, mint new (Contents R/W on `main-brain`, Metadata R). Update `.env` + **add a repo secret named `NEUROWORKS_PAT`** with the new token (the workflow was renamed off `CLAWBOT_PAT` — add the new secret before the next 06:30 UTC cron run, then delete the old `CLAWBOT_PAT` secret once confirmed working). |
 | 2 | OpenRouter API key | `OPENROUTER_API_KEY` | cloud LLM synthesis/large tier | openrouter.ai → Keys → revoke + create. Update `.env`. |
 | 3 | OpenAI API key (`sk-…`) | `OPENAI_API_KEY` / model-provider | BYO provider path | platform.openai.com → API keys → revoke + create. Update the provider in the Models UI (re-encrypted) or `.env`. |
 | 4 | Slack bot token (`xoxb-…`) | integrations store | `slack.post` (chat.postMessage) | api.slack.com/apps → your app → OAuth & Permissions → **Reinstall** to rotate the bot token (or regenerate). Re-enter it in the Connectors/Integrations UI (stored AES-256-GCM encrypted). |
@@ -26,7 +26,7 @@ but a value that has left the machine once is compromised and gets rotated.
 |--------|---------|-----|
 | Webhook signing secret | `NW_WEBHOOK_SIGNING_SECRET` | Signs dispatch completion webhooks (`X-NeuroWorks-Signature`). Set a long random value: `openssl rand -hex 32`. |
 | Finance push token | `FINANCE_SYNC_TOKEN` | Shared secret the Finance System sends to POST `/api/public/dashboard`. Leave blank only on a fully trusted network. |
-| Allowed hosts | `CLAWBOT_ALLOWED_HOSTS` | Your production hostname(s) so the origin-guard (DNS-rebind defense) accepts the deployed SPA's API calls. |
+| Allowed hosts | `NEUROWORKS_ALLOWED_HOSTS` | Your production hostname(s) so the origin-guard (DNS-rebind defense) accepts the deployed SPA's API calls. |
 | Admin password | (Users UI) | Change the seeded admin (`admin@rubiem.com`) password from the dev default on first login. |
 
 ## Network exposure — enterprise mode
@@ -57,7 +57,7 @@ on most routes, including `/api/terminal` (shell), `/api/connectors`
    centrally; done for same-host peers via the loopback exemption, not yet
    done for cross-host peers.
 3. Put a real reverse proxy in front (TLS termination, this app has no
-   built-in HTTPS) and set `CLAWBOT_ALLOWED_HOSTS` / `CLAWBOT_WEB_ORIGIN` to
+   built-in HTTPS) and set `NEUROWORKS_ALLOWED_HOSTS` / `NEUROWORKS_WEB_ORIGIN` to
    match your real hostname.
 
 Toggling `NEUROWORKS_ENTERPRISE_MODE` back to unset/0 returns to the local
@@ -75,7 +75,7 @@ git -C "D:/Main brain" grep -iE "ghp_[A-Za-z0-9]{30}|sk-[A-Za-z0-9]{30}|xoxb-[0-
 git -C <clawbot> check-ignore .env    # → .env
 
 # 3. Boot in strict mode — refuses to start if a required secret is missing:
-NODE_ENV=production SERVE_WEB=1 pnpm -F clawbot-server start
+NODE_ENV=production SERVE_WEB=1 pnpm -F neuroworks-server start
 ```
 
 ## Standing rules

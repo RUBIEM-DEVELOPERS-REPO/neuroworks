@@ -70,10 +70,10 @@ statusRouter.post("/vault/clear-lock", (req, res) => {
   if (req.query.force === "1") {
     // Force path — bypass age check by re-running with the age threshold
     // temporarily lowered to 0. Done by setting the env locally for the call.
-    const prev = process.env.CLAWBOT_STALE_LOCK_AGE_MS;
-    process.env.CLAWBOT_STALE_LOCK_AGE_MS = "0";
+    const prev = process.env.NEUROWORKS_STALE_LOCK_AGE_MS;
+    process.env.NEUROWORKS_STALE_LOCK_AGE_MS = "0";
     const r = clearStaleVaultLock();
-    process.env.CLAWBOT_STALE_LOCK_AGE_MS = prev;
+    process.env.NEUROWORKS_STALE_LOCK_AGE_MS = prev;
     return res.json({ ...r, forced: true });
   }
   res.json(clearStaleVaultLock());

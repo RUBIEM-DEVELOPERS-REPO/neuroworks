@@ -11,7 +11,7 @@
 //     worker OR is already at cap.
 //   • Phase 3 — Persona-shifter routing fidelity: spot-check that a
 //     persona-shifted task and a default-clawbot task both go through
-//     the worker (per CLAWBOT_DELEGATE_ALL default).
+//     the worker (per NEUROWORKS_DELEGATE_ALL default).
 //   • Phase 4 — Multi-worker handoff (Sam→Olivia) — sequential within
 //     the phase since it's multi-turn dependent, but runs concurrently
 //     with the rest if BACKGROUND=1 (default off so the load chart stays

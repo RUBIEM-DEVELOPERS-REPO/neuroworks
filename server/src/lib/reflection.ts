@@ -526,7 +526,7 @@ let lastRunDate: string | null = null;
 
 export function startReflectionScheduler(): void {
   if (scheduler) return;
-  const REFLECTION_HOUR = Number(process.env.CLAWBOT_REFLECTION_HOUR ?? "2");
+  const REFLECTION_HOUR = Number(process.env.NEUROWORKS_REFLECTION_HOUR ?? "2");
   const tick = async () => {
     const now = new Date();
     // LOCAL date — toISOString() is UTC and put late-evening runs on the wrong

@@ -193,17 +193,17 @@ export type ProgressUpdater = (patch: Record<string, unknown>) => void;
 // Without this, every job ran its work immediately (fire-and-forget), so N
 // tasks submitted together all hit the LLM at once — on free-tier OpenRouter
 // that's a thundering herd where all N stall on rate limits. With a cap, only
-// CLAWBOT_MAX_CONCURRENT_JOBS run at a time; the rest wait in FIFO order while
+// NEUROWORKS_MAX_CONCURRENT_JOBS run at a time; the rest wait in FIFO order while
 // staying `pending` (still pollable). 0 = unbounded (legacy behaviour, default
 // so nothing changes unless the operator opts in).
-const MAX_CONCURRENT_JOBS = Math.max(0, Number(process.env.CLAWBOT_MAX_CONCURRENT_JOBS ?? "0"));
+const MAX_CONCURRENT_JOBS = Math.max(0, Number(process.env.NEUROWORKS_MAX_CONCURRENT_JOBS ?? "0"));
 // Mirror every job into the Obsidian vault as a markdown note? Default OFF — it
 // littered the user's real vault (D:\Main brain\_neuroworks\jobs\) with a new
 // file per task (incl. delegated sub-tasks + test runs). The durable record the
 // app actually reads (Reports, calendar, reflection) is the slim JSONL journal
 // via persistJobRecord, NOT these notes — so turning the mirror off loses no
-// function. Set CLAWBOT_JOURNAL_TO_VAULT=1 to restore the second-brain mirror.
-const JOURNAL_TO_VAULT = process.env.CLAWBOT_JOURNAL_TO_VAULT === "1";
+// function. Set NEUROWORKS_JOURNAL_TO_VAULT=1 to restore the second-brain mirror.
+const JOURNAL_TO_VAULT = process.env.NEUROWORKS_JOURNAL_TO_VAULT === "1";
 let activeJobs = 0;
 const slotWaiters: Array<() => void> = [];
 
@@ -269,7 +269,7 @@ export async function runJob<T>(j: Job, fn: (push: (msg: string) => void, progre
     // (a file per task cluttered the real vault). SCHEDULED runs are the
     // exception: those are the progress reports the operator wants in the
     // second brain (daily briefing, recurring digests). Opt everything in with
-    // CLAWBOT_JOURNAL_TO_VAULT=1.
+    // NEUROWORKS_JOURNAL_TO_VAULT=1.
     if (JOURNAL_TO_VAULT || j.scheduledBy) void journalJob(j);
     // Append a slim JSONL record to .neuroworks/jobs/ so the nightly
     // reflection still sees this job after the in-memory RECENT=200 cap

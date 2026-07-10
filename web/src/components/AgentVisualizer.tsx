@@ -66,7 +66,7 @@ export function AgentVisualizer() {
         {allBots.map((b, i) => <BotChip key={i} bot={b} />)}
         {allBots.length === 1 && (
           <div className="border border-dashed border-ink-700 rounded-lg px-4 py-3 text-xs text-cream-300/40 self-center">
-            + add a peer via <span className="font-mono text-cream-300/60">CLAWBOT_PEERS</span>
+            + add a peer via <span className="font-mono text-cream-300/60">NEUROWORKS_PEERS</span>
           </div>
         )}
       </div>

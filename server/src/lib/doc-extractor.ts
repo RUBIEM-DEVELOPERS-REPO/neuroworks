@@ -129,9 +129,9 @@ export async function extractDocText(absPath: string): Promise<ExtractResult> {
 // Auto-OCR fallback: when pdf-parse returns near-empty text (image-only
 // PDFs — scans, photos of documents), we transparently invoke the OCR
 // layer so the agent gets the actual content instead of an empty string.
-// Opt out with CLAWBOT_OCR_AUTO=0 or by passing an image-only PDF larger
+// Opt out with NEUROWORKS_OCR_AUTO=0 or by passing an image-only PDF larger
 // than the OCR cap (handled inside ocrFile).
-const OCR_AUTO = process.env.CLAWBOT_OCR_AUTO !== "0";
+const OCR_AUTO = process.env.NEUROWORKS_OCR_AUTO !== "0";
 const OCR_MIN_TEXT_THRESHOLD = 100; // chars below which we suspect image-only
 async function extractPdf(path: string, meta: { ext: string; name: string; bytes: number; fromCache: boolean }): Promise<ExtractResult> {
   try {

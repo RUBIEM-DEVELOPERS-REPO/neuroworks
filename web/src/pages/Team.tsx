@@ -8,7 +8,7 @@
 // plan-execute-synth pipeline that single-employee chat uses, and we
 // poll each one live below.
 //
-// Multi-clawbot: when CLAWBOT_DELEGATE_ALL is on (the default), each
+// Multi-clawbot: when NEUROWORKS_DELEGATE_ALL is on (the default), each
 // team job goes through the same peer-routing pipeline as chat does,
 // so a 5-employee team-task naturally fans out across whatever peer
 // workers are available (primary + secondary + auto-spawned extras).

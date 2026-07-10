@@ -10,20 +10,20 @@
 // Outbound: SMTP via the same Gmail account.
 //
 // SECURITY — inbound is an external trust boundary. We ONLY act on mail from
-// addresses on CLAWBOT_EMAIL_ALLOWED_SENDERS. If that list is empty, inbound
+// addresses on NEUROWORKS_EMAIL_ALLOWED_SENDERS. If that list is empty, inbound
 // processing is DISABLED (outbound send still works). Fail-safe: an open
 // inbound bridge would let anyone email-trigger jobs against the user's machine
 // and vault. The allow-list gates WHO may drive clawbot.
 //
 // Config (all via env — see clawbot/.env.example):
-//   CLAWBOT_EMAIL_USER             clawbot's gmail address (IMAP+SMTP login)
-//   CLAWBOT_EMAIL_APP_PASSWORD     gmail APP password (not the account password)
-//   CLAWBOT_EMAIL_FROM             From: header (defaults to USER)
-//   CLAWBOT_EMAIL_ALLOWED_SENDERS  comma list of addresses allowed to drive clawbot
-//   CLAWBOT_EMAIL_POLL_MS          inbox poll interval (default 30000, min 10000)
-//   CLAWBOT_EMAIL_IMAP_HOST/PORT   default imap.gmail.com:993
-//   CLAWBOT_EMAIL_SMTP_HOST/PORT   default smtp.gmail.com:465
-//   CLAWBOT_EMAIL=0                hard-disable the bridge even if creds present
+//   NEUROWORKS_EMAIL_USER             clawbot's gmail address (IMAP+SMTP login)
+//   NEUROWORKS_EMAIL_APP_PASSWORD     gmail APP password (not the account password)
+//   NEUROWORKS_EMAIL_FROM             From: header (defaults to USER)
+//   NEUROWORKS_EMAIL_ALLOWED_SENDERS  comma list of addresses allowed to drive clawbot
+//   NEUROWORKS_EMAIL_POLL_MS          inbox poll interval (default 30000, min 10000)
+//   NEUROWORKS_EMAIL_IMAP_HOST/PORT   default imap.gmail.com:993
+//   NEUROWORKS_EMAIL_SMTP_HOST/PORT   default smtp.gmail.com:465
+//   NEUROWORKS_EMAIL=0                hard-disable the bridge even if creds present
 
 import nodemailer, { type Transporter } from "nodemailer";
 import { existsSync, readFileSync, statSync } from "node:fs";
@@ -40,7 +40,7 @@ import { lookup as dnsLookup } from "node:dns/promises";
 //   "webhook" — Mailjet Parse API POSTs to our token-gated webhook (no Gmail).
 //   "imap"    — legacy: poll a Gmail mailbox over IMAP.
 //   "off"     — outbound only.
-// Defaults to "imap" for back-compat unless CLAWBOT_EMAIL_INBOUND_MODE is set.
+// Defaults to "imap" for back-compat unless NEUROWORKS_EMAIL_INBOUND_MODE is set.
 type InboundMode = "webhook" | "imap" | "off";
 
 type EmailEnv = {
@@ -68,21 +68,21 @@ type EmailEnv = {
 };
 
 function readEnv(): EmailEnv {
-  const user = (process.env.CLAWBOT_EMAIL_USER ?? "").trim();
-  const pass = (process.env.CLAWBOT_EMAIL_APP_PASSWORD ?? "").trim();
-  const from = (process.env.CLAWBOT_EMAIL_FROM ?? "").trim() || user;
-  const allowedSenders = (process.env.CLAWBOT_EMAIL_ALLOWED_SENDERS ?? "")
+  const user = (process.env.NEUROWORKS_EMAIL_USER ?? "").trim();
+  const pass = (process.env.NEUROWORKS_EMAIL_APP_PASSWORD ?? "").trim();
+  const from = (process.env.NEUROWORKS_EMAIL_FROM ?? "").trim() || user;
+  const allowedSenders = (process.env.NEUROWORKS_EMAIL_ALLOWED_SENDERS ?? "")
     .split(",").map(s => s.trim().toLowerCase()).filter(Boolean);
-  const pollMs = Math.max(10_000, Number(process.env.CLAWBOT_EMAIL_POLL_MS ?? "30000") || 30_000);
-  const imapHost = (process.env.CLAWBOT_EMAIL_IMAP_HOST ?? "imap.gmail.com").trim();
-  const imapPort = Number(process.env.CLAWBOT_EMAIL_IMAP_PORT ?? "993") || 993;
-  const smtpHost = (process.env.CLAWBOT_EMAIL_SMTP_HOST ?? "smtp.gmail.com").trim();
-  const smtpPort = Number(process.env.CLAWBOT_EMAIL_SMTP_PORT ?? "465") || 465;
-  const mailjetApiKey = (process.env.CLAWBOT_MAILJET_API_KEY ?? "").trim();
-  const mailjetApiSecret = (process.env.CLAWBOT_MAILJET_API_SECRET ?? "").trim();
-  const rawMode = (process.env.CLAWBOT_EMAIL_INBOUND_MODE ?? "").trim().toLowerCase();
+  const pollMs = Math.max(10_000, Number(process.env.NEUROWORKS_EMAIL_POLL_MS ?? "30000") || 30_000);
+  const imapHost = (process.env.NEUROWORKS_EMAIL_IMAP_HOST ?? "imap.gmail.com").trim();
+  const imapPort = Number(process.env.NEUROWORKS_EMAIL_IMAP_PORT ?? "993") || 993;
+  const smtpHost = (process.env.NEUROWORKS_EMAIL_SMTP_HOST ?? "smtp.gmail.com").trim();
+  const smtpPort = Number(process.env.NEUROWORKS_EMAIL_SMTP_PORT ?? "465") || 465;
+  const mailjetApiKey = (process.env.NEUROWORKS_MAILJET_API_KEY ?? "").trim();
+  const mailjetApiSecret = (process.env.NEUROWORKS_MAILJET_API_SECRET ?? "").trim();
+  const rawMode = (process.env.NEUROWORKS_EMAIL_INBOUND_MODE ?? "").trim().toLowerCase();
   const inboundMode: InboundMode = rawMode === "webhook" || rawMode === "off" ? rawMode : "imap";
-  const replyTo = (process.env.CLAWBOT_EMAIL_REPLY_TO ?? "").trim();
+  const replyTo = (process.env.NEUROWORKS_EMAIL_REPLY_TO ?? "").trim();
   return { user, pass, from, allowedSenders, pollMs, imapHost, imapPort, smtpHost, smtpPort, mailjetApiKey, mailjetApiSecret, inboundMode, replyTo };
 }
 
@@ -145,7 +145,7 @@ export function loadAttachments(paths: string[]): EmailAttachment[] {
 }
 
 // Mailjet HTTPS sender — POSTs to api.mailjet.com/v3.1/send. Used instead
-// of nodemailer.sendMail when CLAWBOT_MAILJET_API_KEY + _SECRET are set.
+// of nodemailer.sendMail when NEUROWORKS_MAILJET_API_KEY + _SECRET are set.
 // Auth is HTTP Basic with API_KEY:SECRET. The From: address must be on a
 // domain verified in the Mailjet dashboard or the send is rejected with
 // a "sender_unverified" / domain_not_authorized style error.
@@ -189,7 +189,7 @@ async function sendViaMailjet(env: EmailEnv, opts: {
   });
   const text = await res.text();
   if (res.status === 401 || res.status === 403) {
-    throw new Error(`mailjet auth failed (${res.status}) — check CLAWBOT_MAILJET_API_KEY + CLAWBOT_MAILJET_API_SECRET`);
+    throw new Error(`mailjet auth failed (${res.status}) — check NEUROWORKS_MAILJET_API_KEY + NEUROWORKS_MAILJET_API_SECRET`);
   }
   if (!res.ok) {
     // Mailjet returns 4xx for validation errors with a useful body.
@@ -249,7 +249,7 @@ async function sendOutbound(env: EmailEnv, opts: {
  *  key alone is configured (outbound-only). The bridge can't poll inbound
  *  without the IMAP creds, but sendTestEmail / sendReply work either way. */
 export function emailConfigured(): boolean {
-  if (process.env.CLAWBOT_EMAIL === "0") return false;
+  if (process.env.NEUROWORKS_EMAIL === "0") return false;
   const { user, pass, mailjetApiKey, mailjetApiSecret } = readEnv();
   // Outbound-only via Mailjet HTTPS: both halves of Mailjet auth + a From: user.
   if (mailjetApiKey.length > 0 && mailjetApiSecret.length > 0 && user.length > 0) return true;
@@ -512,7 +512,7 @@ export async function processInboundEmail(msg: InboundMessage): Promise<{ status
   // Anti-spoofing: an allow-listed From is attacker-controlled until verified.
   // The IMAP path supplies a cryptographic DKIM/DMARC verdict; reject explicit
   // failures (a spoof), and unverifiable mail too when REQUIRE_AUTH=strict.
-  const strictAuth = (process.env.CLAWBOT_EMAIL_REQUIRE_AUTH ?? "").trim().toLowerCase() === "strict";
+  const strictAuth = (process.env.NEUROWORKS_EMAIL_REQUIRE_AUTH ?? "").trim().toLowerCase() === "strict";
   if (msg.authVerdict === "fail" || (msg.authVerdict === "unknown" && strictAuth)) {
     status.skippedUnauthorized += 1;
     console.warn(`[email] rejected ${sender}: email auth ${msg.authVerdict} (DKIM/DMARC) — possible spoof`);
@@ -696,7 +696,7 @@ async function pollOnce(env: EmailEnv): Promise<void> {
 export async function startEmailBridge(): Promise<void> {
   if (started) return;
   if (!emailConfigured()) {
-    console.log("  ⓘ email bridge disabled (set CLAWBOT_EMAIL_USER + CLAWBOT_EMAIL_APP_PASSWORD to enable)");
+    console.log("  ⓘ email bridge disabled (set NEUROWORKS_EMAIL_USER + NEUROWORKS_EMAIL_APP_PASSWORD to enable)");
     return;
   }
   const env = readEnv();
@@ -726,7 +726,7 @@ export async function startEmailBridge(): Promise<void> {
 
   // An allow-list is the trust boundary for BOTH inbound transports.
   if (env.allowedSenders.length === 0) {
-    console.warn("  ⚠ email INBOUND disabled — set CLAWBOT_EMAIL_ALLOWED_SENDERS to allow senders (outbound send still works)");
+    console.warn("  ⚠ email INBOUND disabled — set NEUROWORKS_EMAIL_ALLOWED_SENDERS to allow senders (outbound send still works)");
     return; // fail safe — never accept inbound without an allow-list
   }
 
@@ -737,7 +737,7 @@ export async function startEmailBridge(): Promise<void> {
     return; // webhook mode: no IMAP poll
   }
   if (env.inboundMode === "off") {
-    console.log("  ⓘ email inbound OFF (CLAWBOT_EMAIL_INBOUND_MODE=off) — outbound only");
+    console.log("  ⓘ email inbound OFF (NEUROWORKS_EMAIL_INBOUND_MODE=off) — outbound only");
     return;
   }
 
@@ -942,7 +942,7 @@ export async function sendEmail(opts: {
   attachPaths?: string[];    // absolute file paths — loaded + base64'd here
 }): Promise<{ ok: true; transport: "mailjet" | "smtp"; from: string; to: string; recipients: string[]; subject: string; sentAt: string; attachments?: { filename: string; bytes: number }[] }> {
   const env = readEnv();
-  if (!emailConfigured()) throw new Error("email not configured — set CLAWBOT_MAILJET_API_KEY + _SECRET, or CLAWBOT_EMAIL_USER + _APP_PASSWORD");
+  if (!emailConfigured()) throw new Error("email not configured — set NEUROWORKS_MAILJET_API_KEY + _SECRET, or NEUROWORKS_EMAIL_USER + _APP_PASSWORD");
   const recipients = normalizeRecipients(opts.to);
   if (recipients.length === 0) throw new Error(`email.send: invalid 'to' — no recipients resolved from "${opts.to}"`);
   if (recipients.length > MAX_RECIPIENTS) throw new Error(`email.send: ${recipients.length} recipients exceeds the ${MAX_RECIPIENTS}-address cap — this usually means a wildcard/list reference wasn't filtered. Narrow the recipient list.`);

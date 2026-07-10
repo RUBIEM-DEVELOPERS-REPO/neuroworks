@@ -44,12 +44,12 @@ export type SensitivePathCheck = {
 };
 
 // Returns { blocked, reason } when the path matches a sensitive pattern AND
-// the override env (CLAWBOT_FS_UNRESTRICTED=1) is NOT set. The override is
+// the override env (NEUROWORKS_FS_UNRESTRICTED=1) is NOT set. The override is
 // explicit and global so a customer who needs to read their own .env for a
 // debugging task can do so consciously — and the audit log shows when it
 // was lifted.
 export function checkSensitivePath(rawPath: string): SensitivePathCheck {
-  if (process.env.CLAWBOT_FS_UNRESTRICTED === "1") return { blocked: false };
+  if (process.env.NEUROWORKS_FS_UNRESTRICTED === "1") return { blocked: false };
   let full: string;
   try { full = resolve(rawPath); } catch { return { blocked: false }; }
   for (const { pattern, reason } of SENSITIVE_PATH_PATTERNS) {
@@ -68,7 +68,7 @@ export function checkSensitivePath(rawPath: string): SensitivePathCheck {
 // Private/loopback IP detection. We block agent-driven fetches to these
 // ranges by default — they're the SSRF attack surface (cloud metadata
 // service, internal services, peer clawbot endpoints). Override via
-// CLAWBOT_WEB_ALLOW_PRIVATE=1 for legitimate use cases like fetching from
+// NEUROWORKS_WEB_ALLOW_PRIVATE=1 for legitimate use cases like fetching from
 // a local dev server.
 //
 // Covers:
@@ -105,7 +105,7 @@ export type PrivateAddressCheck = {
 };
 
 export function checkPrivateAddress(url: string): PrivateAddressCheck {
-  if (process.env.CLAWBOT_WEB_ALLOW_PRIVATE === "1") return { blocked: false };
+  if (process.env.NEUROWORKS_WEB_ALLOW_PRIVATE === "1") return { blocked: false };
   let host = "";
   try {
     const u = new URL(url);
@@ -153,7 +153,7 @@ export function assertSafeExternalPath(rawPath: string): void {
   if (check.blocked) {
     throw new Error(
       `Refused to read "${rawPath}" — ${check.reason}. ` +
-      `If you genuinely need this, set CLAWBOT_FS_UNRESTRICTED=1 in .env to lift the gate (logged).`,
+      `If you genuinely need this, set NEUROWORKS_FS_UNRESTRICTED=1 in .env to lift the gate (logged).`,
     );
   }
 }
@@ -164,7 +164,7 @@ export function assertSafePublicUrl(url: string): void {
     throw new Error(
       `Refused to fetch "${url}" — target ${check.host ?? "address"} is ${check.reason}. ` +
       `Agent web tools are restricted to the public internet to prevent SSRF. ` +
-      `Set CLAWBOT_WEB_ALLOW_PRIVATE=1 in .env if you genuinely need to reach internal hosts.`,
+      `Set NEUROWORKS_WEB_ALLOW_PRIVATE=1 in .env if you genuinely need to reach internal hosts.`,
     );
   }
 }
@@ -179,7 +179,7 @@ export function assertSafePublicUrl(url: string): void {
 export async function checkPrivateAddressAsync(url: string): Promise<PrivateAddressCheck> {
   const sync = checkPrivateAddress(url);
   if (sync.blocked) return sync;
-  if (process.env.CLAWBOT_WEB_ALLOW_PRIVATE === "1") return { blocked: false };
+  if (process.env.NEUROWORKS_WEB_ALLOW_PRIVATE === "1") return { blocked: false };
   let host = "";
   try { host = new URL(url).hostname.toLowerCase().replace(/^\[|\]$/g, ""); } catch { return { blocked: false }; }
   // Already an IP literal (v4 or v6) → the sync pass already evaluated it.
@@ -218,7 +218,7 @@ export async function assertSafePublicUrlAsync(url: string): Promise<void> {
     throw new Error(
       `Refused to fetch "${url}" — target ${check.host ?? "address"} is ${check.reason}. ` +
       `Agent web tools are restricted to the public internet to prevent SSRF. ` +
-      `Set CLAWBOT_WEB_ALLOW_PRIVATE=1 in .env if you genuinely need to reach internal hosts.`,
+      `Set NEUROWORKS_WEB_ALLOW_PRIVATE=1 in .env if you genuinely need to reach internal hosts.`,
     );
   }
 }

@@ -9,10 +9,10 @@ import { buildIndex, invalidateIndex, searchIndex, indexStats, isBuildInProgress
 
 const VAULT = config.vaultPath;
 
-// Set CLAWBOT_VAULT_SCAN=0 to disable. Default: ON. The scanner is fast (regex
+// Set NEUROWORKS_VAULT_SCAN=0 to disable. Default: ON. The scanner is fast (regex
 // only) and prevents secrets that landed in an LLM response from being
 // committed + pushed to a remote. High-severity findings refuse the write.
-const VAULT_SCAN_ENABLED = process.env.CLAWBOT_VAULT_SCAN !== "0";
+const VAULT_SCAN_ENABLED = process.env.NEUROWORKS_VAULT_SCAN !== "0";
 
 export type VaultNode = {
   name: string;
@@ -28,7 +28,7 @@ const HIDDEN_PREFIXES = [".obsidian", ".git", "node_modules"];
 // is treated as left over from a crashed git process. Git itself takes the
 // lock for milliseconds; anything more than 60s is almost certainly stale.
 // Tunable via env in case someone runs a slow filesystem sync on the vault.
-const STALE_LOCK_AGE_MS = Number(process.env.CLAWBOT_STALE_LOCK_AGE_MS ?? "60000");
+const STALE_LOCK_AGE_MS = Number(process.env.NEUROWORKS_STALE_LOCK_AGE_MS ?? "60000");
 // Known lock files git creates. We only ever touch `index.lock` — the others
 // are rare enough that auto-removing them could mask a real concurrent op.
 // If users hit those repeatedly we can add them later.
@@ -104,7 +104,7 @@ export function getVaultHealth(): VaultHealth {
   } catch (e: any) {
     reason = `vault health probe failed: ${e?.message ?? e}`;
   }
-  return { ok: exists && (gitRepo || !!process.env.CLAWBOT_VAULT_ALLOW_NO_GIT), vaultPath, exists, gitRepo, reason, index: indexStats() };
+  return { ok: exists && (gitRepo || !!process.env.NEUROWORKS_VAULT_ALLOW_NO_GIT), vaultPath, exists, gitRepo, reason, index: indexStats() };
 }
 
 export function listVault(rel = ""): VaultNode[] {
@@ -311,9 +311,9 @@ export async function commitAndPush(message: string) {
   // rewinds local commits and replays them, which can drop into a paused
   // interactive-rebase state and cause every subsequent journal commit to
   // re-trigger the same loop. The local commit is already durable; let the user
-  // reconcile the remote manually. Set CLAWBOT_AUTO_REBASE_RECOVERY=1 to opt in.
-  if (process.env.CLAWBOT_AUTO_REBASE_RECOVERY !== "1") {
-    return { committed: true, pushed: false, error: `push rejected; auto-rebase disabled (set CLAWBOT_AUTO_REBASE_RECOVERY=1 to enable). Original error: ${String(pushErr.message ?? pushErr).slice(0, 200)}` };
+  // reconcile the remote manually. Set NEUROWORKS_AUTO_REBASE_RECOVERY=1 to opt in.
+  if (process.env.NEUROWORKS_AUTO_REBASE_RECOVERY !== "1") {
+    return { committed: true, pushed: false, error: `push rejected; auto-rebase disabled (set NEUROWORKS_AUTO_REBASE_RECOVERY=1 to enable). Original error: ${String(pushErr.message ?? pushErr).slice(0, 200)}` };
   }
   try {
     return await raceTimeout(rebaseWithSidesteppedConflicts(git, String(pushErr.message ?? pushErr)), PUSH_TIMEOUT_MS * 2, "rebase timeout");
@@ -408,7 +408,7 @@ function parseUntrackedConflicts(stderr: string): string[] {
 // on the very next search.
 type SearchHit = { path: string; line: number; preview: string };
 const SEARCH_CACHE = new Map<string, { at: number; results: SearchHit[] }>();
-const SEARCH_CACHE_TTL_MS = Number(process.env.CLAWBOT_VAULT_SEARCH_TTL_MS ?? "60000");
+const SEARCH_CACHE_TTL_MS = Number(process.env.NEUROWORKS_VAULT_SEARCH_TTL_MS ?? "60000");
 const SEARCH_CACHE_MAX = 200;
 
 function invalidateSearchCache() {
@@ -438,8 +438,8 @@ const WATCH_COALESCE_MS = 250;
 
 export function startVaultWatcher(): void {
   if (vaultWatcher) return;
-  if (process.env.CLAWBOT_VAULT_WATCH === "0") {
-    console.log("[vault] fs.watch disabled via CLAWBOT_VAULT_WATCH=0 — search cache only busts on server-side writes");
+  if (process.env.NEUROWORKS_VAULT_WATCH === "0") {
+    console.log("[vault] fs.watch disabled via NEUROWORKS_VAULT_WATCH=0 — search cache only busts on server-side writes");
     return;
   }
   try {
@@ -494,8 +494,8 @@ export function stopVaultWatcher(): void {
 // that landed locally — a remote Obsidian save needs a manual git pull
 // before clawbot can search / read it.
 //
-// Defaults: every CLAWBOT_VAULT_PULL_MIN minutes (default 5). Skipped when:
-//   • CLAWBOT_VAULT_PULL=0 (opt-out)
+// Defaults: every NEUROWORKS_VAULT_PULL_MIN minutes (default 5). Skipped when:
+//   • NEUROWORKS_VAULT_PULL=0 (opt-out)
 //   • Local has uncommitted changes (a pull would conflict with in-flight work)
 //   • A push is currently in flight (avoid racing simpleGit calls)
 //   • Vault path doesn't exist (drive unmounted)
@@ -536,11 +536,11 @@ export async function pullFromOrigin(): Promise<{ ok: boolean; reason?: string; 
 
 export function startVaultPullScheduler(): void {
   if (vaultPullTimer) return;
-  if (process.env.CLAWBOT_VAULT_PULL === "0") {
-    console.log("[vault] periodic pull disabled via CLAWBOT_VAULT_PULL=0");
+  if (process.env.NEUROWORKS_VAULT_PULL === "0") {
+    console.log("[vault] periodic pull disabled via NEUROWORKS_VAULT_PULL=0");
     return;
   }
-  const minutes = Math.max(1, Number(process.env.CLAWBOT_VAULT_PULL_MIN ?? "5"));
+  const minutes = Math.max(1, Number(process.env.NEUROWORKS_VAULT_PULL_MIN ?? "5"));
   const ms = minutes * 60_000;
   vaultPullTimer = setInterval(() => {
     void pullFromOrigin().catch((e: any) => console.warn(`[vault] pull error: ${e?.message ?? e}`));
@@ -548,7 +548,7 @@ export function startVaultPullScheduler(): void {
   vaultPullTimer.unref?.();
   // Fire one immediately so a fresh-start server catches up before doing work.
   void pullFromOrigin().catch(() => { /* logged inside */ });
-  console.log(`[vault] periodic pull armed (every ${minutes}m, opt out with CLAWBOT_VAULT_PULL=0)`);
+  console.log(`[vault] periodic pull armed (every ${minutes}m, opt out with NEUROWORKS_VAULT_PULL=0)`);
 }
 
 export function stopVaultPullScheduler(): void {

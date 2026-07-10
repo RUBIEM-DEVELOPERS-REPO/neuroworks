@@ -5,7 +5,7 @@
 //   "fail"    → an explicit failure / spoof (aligned auth expected but absent).
 //   "unknown" → can't tell (no policy / no signature / lib error).
 // The caller gates on it: "fail" is always rejected; "unknown" is rejected only
-// when CLAWBOT_EMAIL_REQUIRE_AUTH=strict, otherwise allowed (then the sender
+// when NEUROWORKS_EMAIL_REQUIRE_AUTH=strict, otherwise allowed (then the sender
 // allow-list is the remaining gate).
 
 export type AuthVerdict = "pass" | "fail" | "unknown";

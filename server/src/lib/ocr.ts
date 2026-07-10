@@ -125,10 +125,10 @@ async function ocrCloud(buf: Buffer, ext: string): Promise<OcrResult> {
     throw new Error("cloud OCR unavailable: OPENROUTER_API_KEY not set");
   }
   // Pick a multimodal model that accepts our content type. Override via
-  // CLAWBOT_OCR_CLOUD_MODEL. Defaults to a Gemini flash model — it's fast,
+  // NEUROWORKS_OCR_CLOUD_MODEL. Defaults to a Gemini flash model — it's fast,
   // cheap, accepts PDFs natively, and OpenRouter routes it cleanly. The
   // anthropic claude family is a strong fallback for messy scans.
-  const model = process.env.CLAWBOT_OCR_CLOUD_MODEL ?? "google/gemini-2.0-flash-001";
+  const model = process.env.NEUROWORKS_OCR_CLOUD_MODEL ?? "google/gemini-2.0-flash-001";
   const mime = mimeForExt(ext);
   const isPdf = ext === ".pdf";
   const b64 = buf.toString("base64");

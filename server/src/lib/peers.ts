@@ -212,7 +212,7 @@ export async function delegateToPeer(peer: PeerInfo, args: {
   // routinely takes 4 minutes JUST to plan a multi-perspective task, leaving
   // no time for the actual work. Bumped to 12 min default, tunable via env
   // so customers running larger local models can shorten it.
-  const DELEGATE_TIMEOUT_MS = Number(process.env.CLAWBOT_PEER_DELEGATE_TIMEOUT_MS ?? (12 * 60_000));
+  const DELEGATE_TIMEOUT_MS = Number(process.env.NEUROWORKS_PEER_DELEGATE_TIMEOUT_MS ?? (12 * 60_000));
   const deadline = Date.now() + DELEGATE_TIMEOUT_MS;
   let attempt = 0;
   // Track how many log lines we've already forwarded so each poll only emits
@@ -313,7 +313,7 @@ export async function delegateToBestPeer(args: { task: string; persona?: string 
   // Poll. Bound at 12 minutes — research/synthesis on a peer can be slow
   // (qwen2.5:3b can take 3-4 min just to plan a complex task), but not
   // infinite. Same env knob as the specific-peer delegate path.
-  const DELEGATE_TIMEOUT_MS = Number(process.env.CLAWBOT_PEER_DELEGATE_TIMEOUT_MS ?? (12 * 60_000));
+  const DELEGATE_TIMEOUT_MS = Number(process.env.NEUROWORKS_PEER_DELEGATE_TIMEOUT_MS ?? (12 * 60_000));
   const deadline = Date.now() + DELEGATE_TIMEOUT_MS;
   let attempt = 0;
   // Same transient-poll tolerance as delegateToPeer — one dropped connection

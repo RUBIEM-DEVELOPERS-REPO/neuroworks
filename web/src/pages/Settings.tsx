@@ -42,13 +42,13 @@ export function Settings() {
           <li><span className="text-cream-300/50">OLLAMA_SYNTH_MODEL</span> — pin a model for synthesis</li>
           <li><span className="text-cream-300/50">OLLAMA_TRIAGE_MODEL</span> — pin a model for triage / direct-answer classification</li>
           <li><span className="text-cream-300/50">OLLAMA_EXTRACT_MODEL</span> — pin a model for JSON extraction (personas, quality)</li>
-          <li><span className="text-cream-300/50">CLAWBOT_TRIAGE</span> — set to <span className="text-cream-300/40">0</span> to disable the direct-answer shortcut</li>
-          <li><span className="text-cream-300/50">CLAWBOT_PEERS</span> — comma-separated peer URLs for delegation + review</li>
-          <li><span className="text-cream-300/50">CLAWBOT_AUTO_REVIEW</span> — set to <span className="text-cream-300/40">0</span> to disable post-synthesis peer review</li>
-          <li><span className="text-cream-300/50">CLAWBOT_OVERLOAD_THRESHOLD</span> — local in-flight count that triggers peer hand-off (default 2)</li>
-          <li><span className="text-cream-300/50">CLAWBOT_VAULT_SCAN</span> — set to <span className="text-cream-300/40">0</span> to disable secret-scan gate on vault writes</li>
-          <li><span className="text-cream-300/50">CLAWBOT_AUTO_REBASE_RECOVERY</span> — set to <span className="text-cream-300/40">1</span> to enable post-push rebase recovery (off by default — risky)</li>
-          <li><span className="text-cream-300/50">CLAWBOT_NO_WARMUP</span> — set to <span className="text-cream-300/40">1</span> to skip Ollama pre-warm at boot</li>
+          <li><span className="text-cream-300/50">NEUROWORKS_TRIAGE</span> — set to <span className="text-cream-300/40">0</span> to disable the direct-answer shortcut</li>
+          <li><span className="text-cream-300/50">NEUROWORKS_PEERS</span> — comma-separated peer URLs for delegation + review</li>
+          <li><span className="text-cream-300/50">NEUROWORKS_AUTO_REVIEW</span> — set to <span className="text-cream-300/40">0</span> to disable post-synthesis peer review</li>
+          <li><span className="text-cream-300/50">NEUROWORKS_OVERLOAD_THRESHOLD</span> — local in-flight count that triggers peer hand-off (default 2)</li>
+          <li><span className="text-cream-300/50">NEUROWORKS_VAULT_SCAN</span> — set to <span className="text-cream-300/40">0</span> to disable secret-scan gate on vault writes</li>
+          <li><span className="text-cream-300/50">NEUROWORKS_AUTO_REBASE_RECOVERY</span> — set to <span className="text-cream-300/40">1</span> to enable post-push rebase recovery (off by default — risky)</li>
+          <li><span className="text-cream-300/50">NEUROWORKS_NO_WARMUP</span> — set to <span className="text-cream-300/40">1</span> to skip Ollama pre-warm at boot</li>
           <li><span className="text-cream-300/50">NEUROWORKS_PORT</span> — backend bind port</li>
         </ul>
       </Card>

@@ -3,7 +3,7 @@
 // live at .neuroworks/integrations.json (per-machine, gitignored).
 //
 // Secrets (tokens, webhook URLs) are ENCRYPTED AT REST with AES-256-GCM. The
-// key comes from CLAWBOT_SECRET_KEY (hex/base64/passphrase) or, if unset, a
+// key comes from NEUROWORKS_SECRET_KEY (hex/base64/passphrase) or, if unset, a
 // generated key persisted at .neuroworks/.secret-key (also gitignored). So a
 // leaked integrations.json is useless without the separate key.
 

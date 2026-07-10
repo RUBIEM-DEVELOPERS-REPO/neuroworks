@@ -45,7 +45,7 @@ let personasSyncDirty = false;
 // filtered by `persona: clawbot` in their frontmatter. The systemPromptOverride
 // is what drives the structured-output style on the Results page (no markdown
 // bullet noise unless lists are genuinely listy).
-export const BUILTIN_CLAWBOT_PERSONA: Persona = {
+export const BUILTIN_NEUROWORKS_PERSONA: Persona = {
   id: "clawbot",
   name: "Neuro",
   role: "AI agent operator",
@@ -1033,7 +1033,7 @@ How you operate:
 };
 
 export const BUILTIN_PERSONAS: Persona[] = [
-  BUILTIN_CLAWBOT_PERSONA,
+  BUILTIN_NEUROWORKS_PERSONA,
   BUILTIN_RESEARCHER_PERSONA,
   BUILTIN_KNOWITALL_PERSONA,
   BUILTIN_MARKETING_PERSONA,
@@ -1090,7 +1090,7 @@ function ensureBuiltinSeeded(s: PersonaStore): PersonaStore {
     }
   }
   // First-ever seed → activate Clawbot by default.
-  if (s.activeId === null && s.personas.length > 0) s.activeId = BUILTIN_CLAWBOT_PERSONA.id;
+  if (s.activeId === null && s.personas.length > 0) s.activeId = BUILTIN_NEUROWORKS_PERSONA.id;
   // Generate starter templates for newly-seeded built-ins. Lazy import to
   // avoid a circular dep — persona-templates imports custom-templates which
   // imports journal which imports vault. Loading it at module-top would
@@ -1166,7 +1166,7 @@ export function deletePersona(id: string): boolean {
   const idx = s.personas.findIndex(x => x.id === id);
   if (idx === -1) return false;
   s.personas.splice(idx, 1);
-  if (s.activeId === id) s.activeId = BUILTIN_CLAWBOT_PERSONA.id;
+  if (s.activeId === id) s.activeId = BUILTIN_NEUROWORKS_PERSONA.id;
   savePersonaStore(s);
   return true;
 }

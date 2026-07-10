@@ -1,6 +1,6 @@
 // Shared AES-256-GCM "secret box" for encrypting sensitive values at rest
 // (integration tokens, DB connection strings). The key comes from
-// CLAWBOT_SECRET_KEY (hex/base64/passphrase → SHA-256) or, if unset, a random
+// NEUROWORKS_SECRET_KEY (hex/base64/passphrase → SHA-256) or, if unset, a random
 // key persisted at .neuroworks/.secret-key (mode 0600, gitignored). So a leaked
 // integrations.json / data-sources.json is useless without the separate key.
 //
@@ -19,7 +19,7 @@ const KEY_PATH = resolve(CONFIG_DIR, ".secret-key");
 let cachedKey: Buffer | null = null;
 function secretKey(): Buffer {
   if (cachedKey) return cachedKey;
-  const fromEnv = (process.env.CLAWBOT_SECRET_KEY ?? "").trim();
+  const fromEnv = (process.env.NEUROWORKS_SECRET_KEY ?? "").trim();
   if (fromEnv) {
     cachedKey = createHash("sha256").update(fromEnv).digest();
     return cachedKey;

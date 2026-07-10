@@ -158,11 +158,11 @@ scope + permission gate.
 
 | Primitive | Reaches | Permission gate |
 |---|---|---|
-| `web.fetch` | Any HTTPS URL | SSRF gate via `CLAWBOT_WEB_ALLOW_PRIVATE`; blocks private IP ranges by default |
+| `web.fetch` | Any HTTPS URL | SSRF gate via `NEUROWORKS_WEB_ALLOW_PRIVATE`; blocks private IP ranges by default |
 | `web.search` | DuckDuckGo HTTP → Bing HTTP → DDG Playwright → Bing Playwright | Same SSRF gate |
 | `research.deep` | Web + vault | Both gates apply |
 | `vault.read` / `vault.write` / `vault.scan_docs` | `D:\Main brain` (configurable) | `assertSafeExternalPath` blocks `.env`, `.ssh`, `.aws` |
-| `fs.find_in` / `fs.read_into_vault` | Downloads / Desktop / Documents | `CLAWBOT_FS_UNRESTRICTED` to lift the sensitive-path gate |
+| `fs.find_in` / `fs.read_into_vault` | Downloads / Desktop / Documents | `NEUROWORKS_FS_UNRESTRICTED` to lift the sensitive-path gate |
 | `github.api` | api.github.com | `GITHUB_TOKEN` env var |
 | `ollama.generate` | Local Ollama (`OLLAMA_HOST`) | Loopback by default |
 | `openrouter.generate` | OpenRouter API | `OPENROUTER_API_KEY` env var |
@@ -176,9 +176,9 @@ To add an integration (e.g. Gmail), the recipe is:
    that wraps the third-party SDK. Adapters MUST:
    - Read credentials only from `.env` (never from user input).
    - Implement a `withScope(scopeKey, fn)` wrapper that checks
-     `process.env.CLAWBOT_INT_<NAME>_<SCOPE>=1` before allowing the
-     operation. Granular: `CLAWBOT_INT_GMAIL_READ=1`,
-     `CLAWBOT_INT_GMAIL_SEND=1` are separate.
+     `process.env.NEUROWORKS_INT_<NAME>_<SCOPE>=1` before allowing the
+     operation. Granular: `NEUROWORKS_INT_GMAIL_READ=1`,
+     `NEUROWORKS_INT_GMAIL_SEND=1` are separate.
    - Log every call to the job log including the scope key, the
      operation, and a redacted summary of the payload.
 2. **Register as a primitive** in `server/src/lib/primitives.ts` with a
@@ -194,7 +194,7 @@ To add an integration (e.g. Gmail), the recipe is:
 
 ### Permission-aware access patterns
 
-- **Scope-keyed env vars:** `CLAWBOT_INT_<NAME>_<SCOPE>=1` is the unit
+- **Scope-keyed env vars:** `NEUROWORKS_INT_<NAME>_<SCOPE>=1` is the unit
   of permission. Set the ones you want, leave the rest unset. No
   per-user RBAC (single-machine product), but the pattern carries over
   cleanly when running multiple workers as different OS users.

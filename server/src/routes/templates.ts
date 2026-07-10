@@ -110,7 +110,7 @@ templatesRouter.get("/jobs", (_req, res) => {
   // fast and focused. Everything older still lives on disk (the job journal) and
   // is surfaced through the vault + Knowledge (reflections + journaled notes),
   // so nothing is lost — it's just not loaded into the live list.
-  const MAX_FEED = Number(process.env.CLAWBOT_TASKS_FEED_LIMIT ?? "150");
+  const MAX_FEED = Number(process.env.NEUROWORKS_TASKS_FEED_LIMIT ?? "150");
   const visible = filterJobsForCaller(_req, all);
   const jobs = visible.slice(0, MAX_FEED);
   res.json({ jobs, total: visible.length, limit: MAX_FEED, truncated: visible.length > MAX_FEED });

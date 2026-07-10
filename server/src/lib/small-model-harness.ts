@@ -1,6 +1,6 @@
 // Small-model harness powered by little-coder (npm install -g little-coder).
 //
-// When CLAWBOT_USE_LITTLE_CODER=1 and the active model is a local small model
+// When NEUROWORKS_USE_LITTLE_CODER=1 and the active model is a local small model
 // (Ollama / llama.cpp / LM Studio), the agent loop defers to little-coder's
 // small-model-optimised execution path instead of using the generic Ollama
 // dispatch. OpenRouter / cloud models continue using the existing code path.
@@ -13,15 +13,15 @@
 //
 // Usage:
 //   npm install -g little-coder
-//   export CLAWBOT_USE_LITTLE_CODER=1
+//   export NEUROWORKS_USE_LITTLE_CODER=1
 //   # When using a small local model, the harness auto-activates.
-//   # Export CLAWBOT_LITTLE_CODER_MODEL=ollama/qwen3.5 to pin a specific model.
+//   # Export NEUROWORKS_LITTLE_CODER_MODEL=ollama/qwen3.5 to pin a specific model.
 
 import { execSync, execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 
-const LC_MODEL_ENV = "CLAWBOT_LITTLE_CODER_MODEL";
-const LC_ENABLED_ENV = "CLAWBOT_USE_LITTLE_CODER";
+const LC_MODEL_ENV = "NEUROWORKS_LITTLE_CODER_MODEL";
+const LC_ENABLED_ENV = "NEUROWORKS_USE_LITTLE_CODER";
 
 // Models considered "small" — when they match, the harness can kick in.
 const SMALL_MODEL_PATTERNS = [

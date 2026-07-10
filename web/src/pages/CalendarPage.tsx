@@ -152,7 +152,7 @@ export function CalendarPage() {
               <AgendaSection
                 icon={<CalendarDays size={14} />}
                 title="Meetings"
-                empty={agenda.meetingsError ? `iCal feed error: ${agenda.meetingsError}` : "No meetings (set CLAWBOT_CALENDAR_ICAL_URL in clawbot/.env to overlay your real calendar)."}
+                empty={agenda.meetingsError ? `iCal feed error: ${agenda.meetingsError}` : "No meetings (set NEUROWORKS_CALENDAR_ICAL_URL in clawbot/.env to overlay your real calendar)."}
                 items={agenda.meetings.map(m => ({
                   title: m.summary,
                   meta: `${new Date(m.start).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}${m.end ? `–${new Date(m.end).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : ""}${m.location ? ` · ${m.location}` : ""}`,

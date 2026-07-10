@@ -23,7 +23,7 @@
 // expose no secrets and peer probes need them to succeed pre-handshake.
 // Everything else flows through both checks.
 //
-// Override with CLAWBOT_ORIGIN_GUARD=0 if you're running the server
+// Override with NEUROWORKS_ORIGIN_GUARD=0 if you're running the server
 // behind a reverse proxy that rewrites Host. The override is logged.
 
 import type { Request, Response, NextFunction } from "express";
@@ -41,16 +41,16 @@ const ALLOWED_HOSTS = new Set<string>([
 
 // Extra hosts for single-port production (SERVE_WEB), where the SPA and API
 // share one origin on the operator's real hostname/domain. Comma-separated,
-// e.g. CLAWBOT_ALLOWED_HOSTS=neuroworks.example.com,neuroworks.example.com:7471
+// e.g. NEUROWORKS_ALLOWED_HOSTS=neuroworks.example.com,neuroworks.example.com:7471
 // Without this the Host allow-list would 403 every /api call from the deployed
 // SPA. Static asset GETs are exempt below, so only the SPA's XHRs need this.
-for (const h of (process.env.CLAWBOT_ALLOWED_HOSTS ?? "").split(",").map(s => s.trim().toLowerCase()).filter(Boolean)) {
+for (const h of (process.env.NEUROWORKS_ALLOWED_HOSTS ?? "").split(",").map(s => s.trim().toLowerCase()).filter(Boolean)) {
   ALLOWED_HOSTS.add(h);
 }
 
 // Web UI origin. Vite dev binds 7470; if you change that, set
-// CLAWBOT_WEB_ORIGIN to the new value (comma-separated for multiple).
-const WEB_ORIGIN_ENV = process.env.CLAWBOT_WEB_ORIGIN?.trim();
+// NEUROWORKS_WEB_ORIGIN to the new value (comma-separated for multiple).
+const WEB_ORIGIN_ENV = process.env.NEUROWORKS_WEB_ORIGIN?.trim();
 // Exported so index.ts's CORS header reflects the SAME allow-list this guard
 // enforces, instead of a second hardcoded copy that drifts from it.
 export const ALLOWED_ORIGINS = new Set<string>(
@@ -76,9 +76,9 @@ const EXEMPT_PATHS = new Set<string>([
   "/api/payments/paynow/result",
 ]);
 
-const DISABLED = process.env.CLAWBOT_ORIGIN_GUARD === "0";
+const DISABLED = process.env.NEUROWORKS_ORIGIN_GUARD === "0";
 if (DISABLED) {
-  console.warn("[origin-guard] DISABLED via CLAWBOT_ORIGIN_GUARD=0 — DNS rebinding + cross-origin POST attacks are NOT defended.");
+  console.warn("[origin-guard] DISABLED via NEUROWORKS_ORIGIN_GUARD=0 — DNS rebinding + cross-origin POST attacks are NOT defended.");
 }
 
 export function originGuard(req: Request, res: Response, next: NextFunction): void {
@@ -111,7 +111,7 @@ export function originGuard(req: Request, res: Response, next: NextFunction): vo
         `Request Host header "${host || "(none)"}" is not in the allow-list. ` +
         `This API only accepts requests where Host is 127.0.0.1:${PORT} or localhost:${PORT}. ` +
         `If you reached this through a domain, that's likely DNS rebinding. ` +
-        `Override with CLAWBOT_ORIGIN_GUARD=0 if you genuinely need a reverse-proxy setup.`,
+        `Override with NEUROWORKS_ORIGIN_GUARD=0 if you genuinely need a reverse-proxy setup.`,
     });
     return;
   }
@@ -137,7 +137,7 @@ export function originGuard(req: Request, res: Response, next: NextFunction): vo
         message:
           `Origin "${originHeader}" is not in the allow-list. ` +
           `The local API only accepts browser requests from ${[...ALLOWED_ORIGINS].join(", ")}. ` +
-          `Set CLAWBOT_WEB_ORIGIN=<your-web-origin> to add a custom web origin.`,
+          `Set NEUROWORKS_WEB_ORIGIN=<your-web-origin> to add a custom web origin.`,
       });
       return;
     }

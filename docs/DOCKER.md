@@ -57,7 +57,7 @@ the named-volume separation already keeps platform writes off your system drive.
 ## Horizontal scale (multi-host)
 
 `docker-compose.scale.yml` overlays an API-only clawbot **peer** onto the base
-stack and wires the primary to it via `CLAWBOT_PEERS` + the server's built-in
+stack and wires the primary to it via `NEUROWORKS_PEERS` + the server's built-in
 lightest-idle load balancer:
 
 ```

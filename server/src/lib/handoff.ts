@@ -33,7 +33,7 @@ const MAX_STEPS_CEILING = 8;
 // occasionally fall into a multi-minute re-plan; without this cap one runaway
 // step would stall the whole relay. On timeout we mark the step failed and move
 // to the next teammate.
-const STEP_TIMEOUT_MS = Number(process.env.CLAWBOT_HANDOFF_STEP_TIMEOUT_MS ?? "200000");
+const STEP_TIMEOUT_MS = Number(process.env.NEUROWORKS_HANDOFF_STEP_TIMEOUT_MS ?? "200000");
 
 export type HandoffStepStatus = "pending" | "running" | "done" | "failed";
 export type HandoffStep = {

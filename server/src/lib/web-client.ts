@@ -28,7 +28,7 @@ function pickUA(seed?: string): string {
 // Tiny in-memory cache. Keyed by URL; TTL configurable via env. Default 10
 // minutes — long enough that a multiperspective run reuses fetches, short
 // enough that real news pages aren't stale by the next call.
-const CACHE_TTL_MS = Number(process.env.CLAWBOT_WEB_CACHE_TTL_MS ?? "600000");
+const CACHE_TTL_MS = Number(process.env.NEUROWORKS_WEB_CACHE_TTL_MS ?? "600000");
 const cache = new Map<string, { at: number; status: number; contentType: string; text: string; title?: string }>();
 
 function cacheGet(url: string) {
@@ -105,7 +105,7 @@ export type FetchOptions = {
 export async function fetchWeb(url: string, opts: FetchOptions = {}): Promise<{ status: number; contentType: string; text: string; title?: string; fromCache: boolean }> {
   // SECURITY: block private / loopback / metadata-service addresses to
   // prevent SSRF via a prompt-injected agent. Override with
-  // CLAWBOT_WEB_ALLOW_PRIVATE=1 for legitimate local-host fetches.
+  // NEUROWORKS_WEB_ALLOW_PRIVATE=1 for legitimate local-host fetches.
   const { assertSafePublicUrlAsync } = await import("./security-gates.js");
   await assertSafePublicUrlAsync(url);
   const timeoutMs = opts.timeoutMs ?? 8_000;
