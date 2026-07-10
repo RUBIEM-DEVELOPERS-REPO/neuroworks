@@ -29,6 +29,39 @@ export type Primitive = {
   handler: (args: Record<string, any>) => Promise<any>;
 };
 
+// Resolve a fs.find_in-style folder shortcut ("downloads" | "desktop" |
+// "documents" | "vault" | "inbox" | "home" | "all" | an absolute path) to
+// real root path(s). Exported so agent.ts's plan-repair step (converting a
+// malformed fs.find_in call with no `name` into a proper fs.list_external
+// listing) can resolve the same folder word without duplicating this table.
+export function resolveFsFolderRoots(folderArg: string): string[] {
+  const home = homedir();
+  const shortcuts: Record<string, string> = {
+    downloads: join(home, "Downloads"),
+    download: join(home, "Downloads"),
+    desktop: join(home, "Desktop"),
+    documents: join(home, "Documents"),
+    docs: join(home, "Documents"),
+    music: join(home, "Music"),
+    pictures: join(home, "Pictures"),
+    photos: join(home, "Pictures"),
+    videos: join(home, "Videos"),
+    home: home,
+    vault: config.vaultPath,
+    inbox: join(config.vaultPath, "0-Inbox"),
+  };
+  const lowerArg = folderArg.toLowerCase();
+  // "all" previously meant Downloads+Desktop+Documents+Inbox only — Music/
+  // Pictures/Videos were completely unreachable under ANY "all" search
+  // regardless of query, which is exactly wrong for "find my song/photo/clip"
+  // (reproduced live 2026-07-10: a real "Dont Miss (Prod P.A).mp3" sitting in
+  // Music was reported as "zero matches" because the search never looked
+  // there, not because the file didn't exist).
+  return lowerArg === "all" || lowerArg === "any" || lowerArg === "everywhere"
+    ? [shortcuts.downloads, shortcuts.desktop, shortcuts.documents, shortcuts.music, shortcuts.pictures, shortcuts.videos, shortcuts.inbox]
+    : [shortcuts[lowerArg] ?? resolve(folderArg)];
+}
+
 // Per-root listing cache for fs.find_in. Many tasks in a row hit the
 // same root (Downloads, Desktop, etc.); re-walking 10k+ files on every
 // call is the dominant cost. Keyed on the (sorted-roots, depth) pair so
@@ -901,10 +934,10 @@ export const primitives: Primitive[] = [
   },
   {
     name: "fs.find_in",
-    description: "Find files in a known user folder (downloads / desktop / documents / vault) whose name matches a substring. Use this FIRST when the customer says 'check my downloads for X', 'look in my documents for Y', or just 'whats in this doc X' (use folder='all' for the latter — searches Downloads, Desktop, Documents, and the vault Inbox in parallel). Cross-platform: resolves to ~/Downloads etc. on macOS/Linux and %USERPROFILE%\\Downloads on Windows. Returns matches sorted by how closely the name matches (an exact-ish match beats a token buried in a much longer name, e.g. an auto-captured vault research note titled after a whole sentence); ties fall back to newest-first so 'the X I just saved' wins among equally-good matches.",
+    description: "Find files in a known user folder (downloads / desktop / documents / music / pictures / videos / vault) whose name matches a substring. Use this FIRST when the customer says 'check my downloads for X', 'find this song', 'find that photo', or just 'whats in this doc X' (use folder='all' for the latter — searches Downloads, Desktop, Documents, Music, Pictures, Videos, and the vault Inbox in parallel). For a song/track/audio request prefer folder='music' first (faster, and the file is almost always there) before falling back to folder='all'. Cross-platform: resolves to ~/Downloads etc. on macOS/Linux and %USERPROFILE%\\Downloads on Windows. Returns matches sorted by how closely the name matches (an exact-ish match beats a token buried in a much longer name, e.g. an auto-captured vault research note titled after a whole sentence); ties fall back to newest-first so 'the X I just saved' wins among equally-good matches.",
     readonly: true,
     args: [
-      { name: "folder", type: "string", required: true, description: "Folder shortcut: 'downloads' | 'desktop' | 'documents' | 'vault' | 'inbox' | 'home' | 'all' — or an absolute path. 'all' searches Downloads + Desktop + Documents + Inbox in parallel." },
+      { name: "folder", type: "string", required: true, description: "Folder shortcut: 'downloads' | 'desktop' | 'documents' | 'music' | 'pictures' | 'videos' | 'vault' | 'inbox' | 'home' | 'all' — or an absolute path. Use 'music' for a song/track/audio-file request, 'pictures' for a photo/image. 'all' searches Downloads + Desktop + Documents + Music + Pictures + Videos + Inbox in parallel." },
       { name: "name", type: "string", required: true, description: "Filename substring to match (case-insensitive). E.g. 'Aiia Reference Letter' matches 'Aiia-Reference-Letter.pdf'." },
       { name: "limit", type: "number", required: false, description: "Max matches to return (default 10, cap 50)" },
       { name: "depth", type: "number", required: false, description: "Subfolder recursion depth (default 2, cap 4)" },
@@ -916,30 +949,7 @@ export const primitives: Primitive[] = [
       if (!nameArg) throw new Error("fs.find_in: 'name' is required");
       const limit = Math.max(1, Math.min(50, Number(args.limit ?? 10)));
       const depth = Math.max(1, Math.min(4, Number(args.depth ?? 2)));
-      // Resolve folder shortcut → absolute path, cross-platform.
-      // homedir() returns /Users/<user> on macOS, C:\Users\<user> on Windows,
-      // /home/<user> on Linux. Default Downloads/Desktop/Documents folders
-      // sit directly under that on all three. The "vault" shortcut maps to
-      // the configured Obsidian vault path. "home" is allowed but its
-      // search still goes through the same security gate, so .ssh/.aws
-      // etc. inside ~ get refused. "all" expands to a list — we hit all
-      // common user-doc folders so "whats in this doc X" works without
-      // the caller having to guess which folder X lives in.
-      const home = homedir();
-      const shortcuts: Record<string, string> = {
-        downloads: join(home, "Downloads"),
-        download: join(home, "Downloads"),
-        desktop: join(home, "Desktop"),
-        documents: join(home, "Documents"),
-        docs: join(home, "Documents"),
-        home: home,
-        vault: config.vaultPath,
-        inbox: join(config.vaultPath, "0-Inbox"),
-      };
-      const lowerArg = folderArg.toLowerCase();
-      const roots: string[] = lowerArg === "all" || lowerArg === "any" || lowerArg === "everywhere"
-        ? [shortcuts.downloads, shortcuts.desktop, shortcuts.documents, shortcuts.inbox]
-        : [shortcuts[lowerArg] ?? resolve(folderArg)];
+      const roots = resolveFsFolderRoots(folderArg);
       // Security gate — refuses .ssh / .aws / cred-store dirs even if the
       // customer somehow asks for them by absolute path. Applied per-root.
       const { assertSafeExternalPath } = await import("./security-gates.js");
@@ -1868,6 +1878,21 @@ ${vaultHits.slice(0, 8).map(h => `- [[${h.path}]] (line ${h.line})`).join("\n") 
       const department = args.department ? String(args.department) : undefined;
       const data = listDepartmentData(department).map(d => ({ department: d.department, title: d.title, content: d.content }));
       return { departments: listDepartments(), data };
+    },
+  },
+  {
+    name: "finance.snapshot",
+    description: "RETIRED (2026-07-10) legacy push-model snapshot — the Finance System used to POST its dashboard to /api/public/dashboard and this read it back. That pushed data was stale and has been cleared; this now always returns available:false. For real financial figures, use connector.call on the live \"Aiia FinanceFlow\" connector instead (list-budgets, list-receipts, list-requisitions endpoints). Kept only in case the old push mechanism is ever revived.",
+    readonly: true,
+    args: [],
+    handler: async () => {
+      const { getFinanceSnapshot } = await import("./finance-snapshot.js");
+      const snap = getFinanceSnapshot();
+      if (!snap) {
+        return { available: false, message: "No finance data has been pushed yet (this push-model mechanism is retired). Use connector.call on the live \"Aiia FinanceFlow\" connector instead — list-budgets, list-receipts, list-requisitions." };
+      }
+      const staleDays = Math.floor((Date.now() - new Date(snap.receivedAt).getTime()) / 86_400_000);
+      return { available: true, mapped: snap.mapped, currency: snap.currency, period: snap.period, receivedAt: snap.receivedAt, staleDays };
     },
   },
   {
@@ -3583,6 +3608,7 @@ export function humanStepLabel(tool: string, args: Record<string, any> = {}): st
     case "quality.check":      return "Quality-checking the draft";
     case "security.scan":      return s("kind") ? `Security-scanning the ${s("kind")}` : "Security-scanning the content";
     case "governance.check":   return "Checking against governance policies";
+    case "finance.snapshot":   return "Reading the latest Aiia Finance figures";
     default:                   return tool;
   }
 }

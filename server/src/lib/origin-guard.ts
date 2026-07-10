@@ -51,7 +51,9 @@ for (const h of (process.env.CLAWBOT_ALLOWED_HOSTS ?? "").split(",").map(s => s.
 // Web UI origin. Vite dev binds 7470; if you change that, set
 // CLAWBOT_WEB_ORIGIN to the new value (comma-separated for multiple).
 const WEB_ORIGIN_ENV = process.env.CLAWBOT_WEB_ORIGIN?.trim();
-const ALLOWED_ORIGINS = new Set<string>(
+// Exported so index.ts's CORS header reflects the SAME allow-list this guard
+// enforces, instead of a second hardcoded copy that drifts from it.
+export const ALLOWED_ORIGINS = new Set<string>(
   (WEB_ORIGIN_ENV ? WEB_ORIGIN_ENV.split(",").map(s => s.trim()) : [
     "http://127.0.0.1:7470",
     "http://localhost:7470",

@@ -63,7 +63,8 @@ import { skillForgeRouter } from "./routes/skill-forge.js";
 import { orchestratorRouter } from "./routes/orchestrator.js";
 import { requireLayer } from "./lib/access.js";
 import { startEmailBridge, stopEmailBridge } from "./lib/email.js";
-import { originGuard } from "./lib/origin-guard.js";
+import { originGuard, ALLOWED_ORIGINS } from "./lib/origin-guard.js";
+import { enterpriseAuthGuard } from "./lib/enterprise-auth.js";
 
 // Fail-fast: refuse to boot on a fatal misconfiguration (bad port, SERVE_WEB
 // without a build, missing required env in production). No-op warnings locally.
@@ -97,10 +98,26 @@ app.use((req, res, next) => {
   next();
 });
 app.use(express.json({ limit: "25mb", type: ["application/json", "text/plain"] }));
-app.use((_req, res, next) => {
-  res.setHeader("Access-Control-Allow-Origin", "http://127.0.0.1:7470");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+app.use((req, res, next) => {
+  // Reflect the request's Origin only if it's actually in the allow-list
+  // (the same one origin-guard enforces below) instead of a single hardcoded
+  // dev URL — a second copy of that list here would silently drift from it.
+  // Same-origin / non-browser requests carry no Origin and need no CORS
+  // header at all.
+  const reqOrigin = req.headers.origin;
+  if (typeof reqOrigin === "string" && ALLOWED_ORIGINS.has(reqOrigin.toLowerCase())) {
+    res.setHeader("Access-Control-Allow-Origin", reqOrigin);
+  }
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Api-Key, X-Session-Token, Idempotency-Key");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
+  // Baseline security headers — no framing, no MIME-sniffing, no referrer
+  // leakage, HSTS for the (rare) TLS-terminated-here case. Real defense for
+  // this app is origin-guard/enterprise-auth above, not these — but "no
+  // security headers at all" fails any basic scan, so ship the free ones.
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "DENY");
+  res.setHeader("Referrer-Policy", "no-referrer");
+  res.setHeader("Strict-Transport-Security", "max-age=63072000; includeSubDomains");
   next();
 });
 app.options("*", (_req, res) => res.sendStatus(204));
@@ -110,6 +127,10 @@ app.options("*", (_req, res) => res.sendStatus(204));
 // bind alone isn't enough — text/plain JSON POSTs skip CORS preflight.
 // See origin-guard.ts for the threat model.
 app.use(originGuard);
+// Real authentication for non-browser callers when this instance is
+// network-exposed. No-op unless NEUROWORKS_ENTERPRISE_MODE=1 — see
+// lib/enterprise-auth.ts for what problem this closes.
+app.use(enterpriseAuthGuard);
 
 app.get("/api/health", (_req, res) => res.json({
   ok: true,

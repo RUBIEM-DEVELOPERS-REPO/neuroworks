@@ -72,6 +72,7 @@ function resolvePersona(id: string | undefined | null): ReturnType<typeof getAct
 teamRouter.post("/", async (req, res) => {
   try {
     const rawTasks = req.body?.tasks;
+    const testMode = req.body?.testMode === true;
     if (!Array.isArray(rawTasks) || rawTasks.length === 0) {
       return res.status(400).json({ error: "tasks must be a non-empty array" });
     }
@@ -190,6 +191,7 @@ teamRouter.post("/", async (req, res) => {
         return planAndExecute(enrichedTask, push, (patch) => progress(patch as Record<string, unknown>), {
           personaSystemSuffix: pinnedSuffix,
           workMode: persona?.workMode,
+          testMode,
         });
       });
     }

@@ -18,8 +18,13 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const STATE_DIR = resolve(__dirname, "../../../.neuroworks");
 const KEYS_PATH = resolve(STATE_DIR, "api-keys.json");
 
-export type ApiKeyScope = "dispatch:write" | "dispatch:read";
-export const ALL_SCOPES: ApiKeyScope[] = ["dispatch:write", "dispatch:read"];
+export type ApiKeyScope = "dispatch:write" | "dispatch:read" | "machine:full";
+export const ALL_SCOPES: ApiKeyScope[] = ["dispatch:write", "dispatch:read", "machine:full"];
+// Default scopes for a key minted with no explicit scopes array. Deliberately
+// excludes "machine:full" (full API access, used to authenticate as a trusted
+// machine caller under enterprise mode) — that's meaningfully more powerful
+// than dispatch access and must be requested explicitly, not granted by omission.
+const DEFAULT_SCOPES: ApiKeyScope[] = ["dispatch:write", "dispatch:read"];
 
 export type ApiKeyRecord = {
   id: string;
@@ -57,14 +62,14 @@ function redact(r: ApiKeyRecord): ApiKeyPublic {
   return pub;
 }
 
-export function createApiKey(label: string, scopes: ApiKeyScope[] = ALL_SCOPES): { key: ApiKeyPublic; token: string } {
+export function createApiKey(label: string, scopes: ApiKeyScope[] = DEFAULT_SCOPES): { key: ApiKeyPublic; token: string } {
   const token = "nw_" + randomBytes(32).toString("base64url");
   const record: ApiKeyRecord = {
     id: randomUUID(),
     label: label.trim() || "unnamed",
     hash: sha(token),
     prefix: token.slice(0, 12),
-    scopes: scopes.length ? scopes : ALL_SCOPES,
+    scopes: scopes.length ? scopes : DEFAULT_SCOPES,
     createdAt: new Date().toISOString(),
   };
   const list = load();

@@ -145,6 +145,17 @@ const role = pick("CLAWBOT_ROLE", "primary");
 //   NEUROWORKS_BIND_HOST   → 0.0.0.0 in a container so the port is reachable
 //   NODE_ENV=production    → flips fail-fast validation on (see validateConfig)
 const bindHost = pick("NEUROWORKS_BIND_HOST", "127.0.0.1");
+// Enterprise mode — off by default (current local/loopback trust model is
+// unchanged), flip to "1" the moment this instance is network-reachable
+// (cloud VM, shared server, behind a proxy that isn't strictly loopback-only).
+// Requires every non-exempt request to carry either a human session token or
+// a "machine:full"-scoped API key (see lib/enterprise-auth.ts) — closes the
+// gap where requireLayer() and origin-guard both explicitly let token-less /
+// Origin-less requests through, which is fine for a single trusted machine
+// but not once the port is reachable from a wider network. Same-machine
+// requests (loopback remoteAddress) stay exempt regardless, so local peers/
+// workers keep working with zero extra config.
+const enterpriseMode = ["1", "true", "yes"].includes(pick("NEUROWORKS_ENTERPRISE_MODE", "").toLowerCase());
 const serveWeb = ["1", "true", "yes"].includes(pick("SERVE_WEB", "").toLowerCase());
 // web/dist sits at clawbot/web/dist; __dirname is server/src (tsx) so ../../web/dist.
 const webDistPath = resolve(__dirname, "../../web/dist");
@@ -204,6 +215,7 @@ export const config = {
   name,
   role,
   bindHost,
+  enterpriseMode,
   serveWeb,
   webDistPath,
   nodeEnv,
@@ -246,6 +258,12 @@ export function validateConfig(): void {
   // rebinding hole. Allow it only when explicitly overridden.
   if (bindHost !== "127.0.0.1" && bindHost !== "localhost" && process.env.CLAWBOT_ORIGIN_GUARD === "0") {
     warn.push(`bound to ${bindHost} with CLAWBOT_ORIGIN_GUARD=0 — the API is reachable off-host with no Host/Origin defense. Put it behind a trusted reverse proxy only.`);
+  }
+  // Wide bind + enterprise mode off means every route requireLayer() doesn't
+  // cover (the majority — see lib/access.ts) has no auth for non-browser
+  // callers at all; origin-guard only defends the browser-attack vector.
+  if (bindHost !== "127.0.0.1" && bindHost !== "localhost" && !enterpriseMode) {
+    warn.push(`bound to ${bindHost} with NEUROWORKS_ENTERPRISE_MODE unset — most routes have no authentication for non-browser callers. Set NEUROWORKS_ENTERPRISE_MODE=1 (and mint a "machine:full" API key for any cross-host peers) before exposing this beyond a single trusted machine.`);
   }
 
   // In strict mode the required env (GITHUB_TOKEN etc.) must actually be set.

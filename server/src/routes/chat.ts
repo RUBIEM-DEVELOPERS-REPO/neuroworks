@@ -1728,6 +1728,7 @@ void config; void searchVault; void ollamaGenerate;
 chatRouter.post("/team", async (req, res) => {
   try {
     const rawTasks = Array.isArray(req.body?.tasks) ? req.body.tasks : [];
+    const testMode = req.body?.testMode === true;
     if (rawTasks.length === 0) {
       return res.status(400).json({ error: "tasks: [] required (at least one task)" });
     }
@@ -1821,7 +1822,7 @@ chatRouter.post("/team", async (req, res) => {
           : content + attachmentBlock;
         const personaSuffix = personaSystemSuffix(persona);
         if (persona) push(`Working as ${persona.name} — ${persona.role}.`);
-        const r = await planAndExecute(enriched, push, (patch) => progress(patch as Record<string, unknown>), { personaSystemSuffix: personaSuffix, workMode: persona?.workMode });
+        const r = await planAndExecute(enriched, push, (patch) => progress(patch as Record<string, unknown>), { personaSystemSuffix: personaSuffix, workMode: persona?.workMode, testMode });
         if (r.hadWrites) {
           push("Wrote to second brain — committing.");
           try {

@@ -77,9 +77,12 @@ dispatchKeysRouter.get("/", (_req, res) => {
 dispatchKeysRouter.post("/", (req, res) => {
   const label = String(req.body?.label ?? "").trim();
   if (!label) return res.status(400).json({ error: "label is required" });
+  // Default to dispatch-only scopes when the caller omits an explicit list —
+  // "machine:full" (full API access under enterprise mode) must be requested
+  // by name, never granted by omission.
   const reqScopes: ApiKeyScope[] = Array.isArray(req.body?.scopes)
     ? req.body.scopes.filter((s: any): s is ApiKeyScope => ALL_SCOPES.includes(s))
-    : ALL_SCOPES;
+    : ["dispatch:write", "dispatch:read"];
   const { key, token } = createApiKey(label, reqScopes);
   // token is returned ONCE — the UI must surface it for the operator to copy.
   res.json({ key, token });

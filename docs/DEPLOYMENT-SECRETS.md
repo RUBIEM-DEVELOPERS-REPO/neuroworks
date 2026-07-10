@@ -29,6 +29,41 @@ but a value that has left the machine once is compromised and gets rotated.
 | Allowed hosts | `CLAWBOT_ALLOWED_HOSTS` | Your production hostname(s) so the origin-guard (DNS-rebind defense) accepts the deployed SPA's API calls. |
 | Admin password | (Users UI) | Change the seeded admin (`admin@rubiem.com`) password from the dev default on first login. |
 
+## Network exposure — enterprise mode
+
+Off by default. The local trust model (`lib/access.ts`) explicitly lets
+token-less requests through as "operator/machine context", and `origin-guard`
+(the DNS-rebinding / cross-origin-POST defense) explicitly exempts requests
+with no `Origin` header — both correct for "runs on one trusted machine,
+never network-exposed," neither is authentication. The moment this instance
+is reachable from a wider network (cloud VM, shared server, a proxy that
+isn't strictly loopback-only), those two facts combine into: no auth at all
+on most routes, including `/api/terminal` (shell), `/api/connectors`
+(credentials), `/api/models` (API keys), `/api/cost` (money).
+
+**Before exposing this beyond one trusted machine:**
+
+1. Set `NEUROWORKS_ENTERPRISE_MODE=1`. This requires every request that
+   isn't same-machine (checked via the OS socket `remoteAddress`, not a
+   spoofable header) to carry either a human session token or a
+   `machine:full`-scoped API key. `validateConfig()` already warns at boot
+   if bound wide with this unset.
+2. For any peer/worker on a **different host** than this instance (same-host
+   peers/workers are exempt automatically via the loopback check): mint a
+   key with `POST /api/dispatch-keys {"label":"peer-x","scopes":["machine:full"]}`
+   and configure that peer to send `Authorization: Bearer nw_...`. This is
+   NOT wired automatically across every internal caller — `lib/peers.ts` has
+   7+ independent `fetch()` call sites with no shared HTTP client to patch
+   centrally; done for same-host peers via the loopback exemption, not yet
+   done for cross-host peers.
+3. Put a real reverse proxy in front (TLS termination, this app has no
+   built-in HTTPS) and set `CLAWBOT_ALLOWED_HOSTS` / `CLAWBOT_WEB_ORIGIN` to
+   match your real hostname.
+
+Toggling `NEUROWORKS_ENTERPRISE_MODE` back to unset/0 returns to the local
+trust model immediately — it's one env var, not a structural redeploy, so
+"disconnect from the net, reconnect later" is a config flip either direction.
+
 ## Verify after rotating
 
 ```bash

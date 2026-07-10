@@ -549,10 +549,11 @@ export async function generalTaskRunner(inputs: Record<string, unknown>, push: (
   const task = String(inputs.task ?? "").trim();
   if (!task) throw new Error("missing 'task' input");
   const saveAs = inputs.save_as_template !== false;
+  const testMode = inputs.testMode === true;
   const persona = getActivePersona();
   const personaSuffix = personaSystemSuffix(persona);
   if (persona) push(`Working as ${persona.name} — ${persona.role}.`);
-  const r = await planAndExecute(task, push, (patch) => progress?.(patch as Record<string, unknown>), { personaSystemSuffix: personaSuffix, workMode: persona?.workMode });
+  const r = await planAndExecute(task, push, (patch) => progress?.(patch as Record<string, unknown>), { personaSystemSuffix: personaSuffix, workMode: persona?.workMode, testMode });
 
   // If the agent wrote anything to the vault, also commit + push
   if (r.hadWrites) {

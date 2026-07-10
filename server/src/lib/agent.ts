@@ -22,7 +22,18 @@ import { classifyDeliverable, taskWantsResearch } from "./deliverable.js";
 // called Summit Recon CONSO..." never even looked at the filesystem).
 // Keep the "called/named" synonym list in sync with the (file|doc|document|
 // pdf|docx?|xlsx?|pptx?) set defaultVaultPlan's needle-stripper already uses.
-const LOCAL_FS_HINT_RE = /\b(downloads?|desktop|documents?|my\s+pc|my\s+computer|on\s+disk|local\s+file|(?:file|doc|document|pdf|docx?|xlsx?|pptx?)\s+(?:called|named))\b/i;
+const LOCAL_FS_HINT_RE = /\b(downloads?|desktop|documents?|music|pictures|photos|videos|my\s+pc|my\s+computer|on\s+disk|local\s+file|(?:file|doc|document|pdf|docx?|xlsx?|pptx?|mp3|m4a|wav|flac|song|track|audio)\s+(?:called|named|titled))\b/i;
+
+// Module-level so BOTH heuristicPlan (which runs first and can short-circuit
+// straight to research.deep via detectResearchSignals — "the latest budgets"
+// matches its recency pattern) and plan()'s financeContext hint agree on
+// what counts as a finance-readout task. Without heuristicPlan also
+// checking this, it intercepts finance questions before plan() ever runs,
+// so the LLM-prompt hint never gets a chance — reproduced live 2026-07-10
+// ("Give me the Aiia Finance Summary — pull the latest budgets..." routed
+// to research.deep and returned "no data found" despite the FinanceFlow
+// connector being live and correctly configured).
+const FINANCE_READOUT_RE = /\b(aiia\s*finance|finance\s*(summary|dashboard|snapshot|read[\s-]?out)|financial\s+(summary|position|dashboard|snapshot)|how\s+(?:are\s+we|is\s+the\s+business)\s+doing\s+financially|net\s+profit|cash\s+balance|company'?s?\s+finances|our\s+(?:revenue|financials?)|budgets?|receipts?|purchase\s+requisitions?)\b/i;
 
 // Parse the "Interpretation: intent=foo, target=..." line that chat.ts
 // appends to enriched tasks. Returns the intent label when present, or
@@ -356,6 +367,24 @@ export async function plan(task: string, _personaSystemSuffix?: string, push?: (
   } else if (recallRe.test(task)) {
     memoryContext = `\n\nMemory-recall context: the task asks what the agent REMEMBERS / has on file about something. The FIRST step MUST be memory.search with {query: "<the key terms — the entity/topic the user named>"} (NOT research.deep / vault.search — durable facts live in _neuroworks/memory, which those tools do not read). If the user named an exact subject stored before, memory.recall {subject} is more precise. Synthesise the answer from the returned facts; if none are found, say so plainly rather than inventing.\n`;
   }
+  // Aiia Finance hint — same failure shape as activity/memory above: without
+  // an explicit steer, the planner has no way to know where finance data
+  // lives (persona system prompts and skill playbooks are injected at
+  // synth/direct time, NOT into planning — see the plan-phase sys prompt
+  // built below, which never includes personaSystemSuffix). A "Aiia Finance
+  // Summary" task silently fell through to vault.search + vault.read (found
+  // nothing) before this hint existed, and the synth apologised for a
+  // "missing connector" — reproduced live 2026-07-09.
+  //
+  // 2026-07-10: the old push-model snapshot (Finance System POSTs to
+  // /api/public/dashboard, NeuroWorks stores one 5-field snapshot) is
+  // retired — its data was stale (last pushed 2026-07-01) and has been
+  // deleted from the vault. The real, live source is now the "Aiia
+  // FinanceFlow" connector (external app, budgets/receipts/requisitions,
+  // read-only, session-cookie auth that expires ~24h from setup).
+  const financeContext = FINANCE_READOUT_RE.test(task)
+    ? `\n\nAiia Finance context: the task asks for the company's real financial figures. Real data now lives in the live "Aiia FinanceFlow" connector — NOT finance.snapshot (retired, its pushed data was stale and has been cleared — it will return available:false), NOT vault.search, NOT research.deep. The plan should use connector.call on connector "Aiia FinanceFlow" against whichever endpoint(s) the question needs: list-budgets (/api/budgets), list-receipts (/api/receipts), list-requisitions (/api/requisitions). If unsure what's available, connector.describe {name:"Aiia FinanceFlow"} first. Synthesise the answer strictly from what the connector returns — never invent a figure. If the call fails (e.g. 401 — the connector's session cookie expires ~24h after each manual re-auth), say plainly that the FinanceFlow connection needs to be refreshed and stop; do not fall back to finance.snapshot or a vault note.\n`
+    : "";
   // Complexity fan-out hint: big or multi-part tasks should be decomposed into
   // PARALLEL sub-agents, not one serial chain. The executor already runs
   // independent steps as concurrent sub-agents (waves + dual-lane budgets) —
@@ -380,7 +409,7 @@ export async function plan(task: string, _personaSystemSuffix?: string, push?: (
     ? `\n\nHybrid role context: this hire is part agent, part human. Split the work deliberately — plan agent steps for everything the catalog can do, and add ONE human.request step (with typed items) for the parts that genuinely need the person: internal figures not in the vault/connectors/databases, judgment calls, sign-offs, offline actions, or documents only they hold. Do NOT fabricate content to avoid asking.\n`
     : "";
   // Compact catalog: ~40% smaller prompt → faster planning on small models.
-  const sys = injectLanguagePrompt(PLAN_SYSTEM, "plan") + primitivesPromptCatalog({ compact: true }) + vaultContext + researchContext + companyDataContext + localFsContext + emailContext + activityContext + memoryContext + explicitToolContext + workModeContext + fanOutContext;
+  const sys = injectLanguagePrompt(PLAN_SYSTEM, "plan") + primitivesPromptCatalog({ compact: true }) + vaultContext + researchContext + companyDataContext + localFsContext + emailContext + activityContext + memoryContext + financeContext + explicitToolContext + workModeContext + fanOutContext;
 
 
   // Race the planner LLM call against PLAN_TIMEOUT_MS. If the LLM stalls,
@@ -880,7 +909,7 @@ export async function planAndExecute(
   task: string,
   push: (msg: string) => void,
   onProgress?: (patch: Partial<AgentResult> & { phase?: string }) => void,
-  opts: { personaSystemSuffix?: string; autoReview?: boolean; preplan?: Plan; workMode?: "agent" | "hybrid" | "human" } = {},
+  opts: { personaSystemSuffix?: string; autoReview?: boolean; preplan?: Plan; workMode?: "agent" | "hybrid" | "human"; testMode?: boolean } = {},
 ): Promise<AgentResult> {
   // Human-worker gate: a hire whose workMode is "human" doesn't get an agent
   // loop at all — the task is logged, parked in waiting_on_human, and the
@@ -1303,6 +1332,54 @@ export async function planAndExecute(
       if (repaired.steps[0]?.tool === "fs.find_in") {
         push(`Plan repair: rerouting from web/vault search to local-PC search — task mentions ${localFsTaskHint[1]}.`);
         p = repaired;
+      }
+    }
+  }
+  // PLAN REPAIR — fs.find_in with no name. `name` is a required, substring-
+  // match argument (fs.find_in is a NAME search, not a folder listing) —
+  // there's no "list everything" mode. A "list all downloads and summarise
+  // what's there" style task has no specific filename to search for, and a
+  // planner LLM sometimes reaches for fs.find_in anyway and just omits
+  // `name`, which throws immediately ("fs.find_in: 'name' is required") and
+  // kills the whole step with nothing to show for it (reproduced live
+  // 2026-07-10). The correct tool for "what's in this folder" is
+  // fs.list_external — swap in place rather than failing the step.
+  for (let i = 0; i < p.steps.length; i++) {
+    const step = p.steps[i];
+    if (step.tool === "fs.find_in" && !String(step.args?.name ?? "").trim()) {
+      const folderArg = String(step.args?.folder ?? "downloads");
+      const { resolveFsFolderRoots } = await import("./primitives.js");
+      const root = resolveFsFolderRoots(folderArg)[0];
+      push(`Plan repair: fs.find_in had no name to search for — listing ${folderArg} instead (fs.list_external).`);
+      step.tool = "fs.list_external";
+      step.args = { path: root, depth: 2 };
+      step.label = humanStepLabel("fs.list_external", { path: root });
+      // Any later step referencing this step's result via $step_i.matches...
+      // (fs.find_in's shape) would now resolve to nothing — fs.list_external
+      // returns `entries`, not `matches`. Rewrite those references rather
+      // than leaving a step pointed at a field that no longer exists.
+      for (let j = i + 1; j < p.steps.length; j++) {
+        const later = p.steps[j];
+        const raw = JSON.stringify(later.args ?? {});
+        if (raw.includes(`$step_${i}.matches`)) {
+          later.args = JSON.parse(raw.replaceAll(`$step_${i}.matches`, `$step_${i}.entries`));
+        }
+      }
+    }
+  }
+  // PLAN REPAIR — test-mode capture suppression. research.deep and
+  // research.multiperspective default `capture: true` (write a note to
+  // 0-Inbox/) unless a caller explicitly opts out. Internal QA/stress
+  // harnesses never did, so 3 concentrated sweep days (2026-05-29/30,
+  // 06-01) wrote 1,036 machine-test notes straight into the user's actual
+  // vault — reproduced and root-caused 2026-07-10 during a vault sweep.
+  // Callers now opt IN to test mode via {testMode:true} in the request
+  // body (threaded through generalTaskRunner); when set, force capture off
+  // on every step regardless of what the planner decided.
+  if (opts.testMode) {
+    for (const step of p.steps) {
+      if ((step.tool === "research.deep" || step.tool === "research.multiperspective") && step.args) {
+        (step.args as Record<string, unknown>).capture = false;
       }
     }
   }
@@ -1768,6 +1845,12 @@ export function extractTopic(task: string): string {
 export function heuristicPlan(task: string, opts: { hasAttachments?: boolean } = {}): Plan | null {
   const t = task.trim();
   if (!t) return null;
+  // Finance-readout tasks bail out to the real LLM planner, which carries
+  // the financeContext hint steering it to connector.call on "Aiia
+  // FinanceFlow". Without this, the research-signal heuristic below (any
+  // recency marker like "latest") intercepts first and routes straight to
+  // research.deep — the planner-side hint never gets a chance to run.
+  if (FINANCE_READOUT_RE.test(t)) return null;
   // When attachments are present, suppress the shape shortcuts that
   // funnel summarize/explain/research onto vault.search or research.deep.
   // The actual source material is already inline as an "Attached documents"
@@ -2395,6 +2478,9 @@ export function defaultVaultPlan(task: string, opts: { hasAttachments?: boolean 
     const folder = folderWord.startsWith("download") ? "downloads"
       : folderWord.startsWith("desktop")  ? "desktop"
       : folderWord.startsWith("document") ? "documents"
+      : folderWord === "music"            ? "music"
+      : folderWord === "pictures" || folderWord === "photos" ? "pictures"
+      : folderWord === "videos"           ? "videos"
       :                                     "all";
     // Trim the task to the first paragraph/sentence — governance prefixes
     // ("Alignment check — required before responding...") and chat-history
