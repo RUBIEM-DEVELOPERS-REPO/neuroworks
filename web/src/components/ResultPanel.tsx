@@ -341,7 +341,7 @@ function RunDigestResult({ job }: { job: any }) {
       <div className="space-y-2 text-sm">
         <div>Lookback window: <span className="font-mono text-cream-100">{r.lookbackDays} days</span></div>
         <div className="text-cream-300/70">Workflow is running on GitHub Actions. Check the digest in <Link to="/knowledge/_clawbot" className="text-violet-400 hover:text-violet-500">Knowledge › _clawbot</Link> after the run finishes.</div>
-        <a href="https://github.com/RUBIEM-DEVELOPERS-REPO/clawbot/actions" target="_blank" rel="noopener noreferrer" className="inline-block text-xs text-violet-400 hover:text-violet-500 mt-2">View on GitHub Actions →</a>
+        <a href="https://github.com/RUBIEM-DEVELOPERS-REPO/neuroworks/actions" target="_blank" rel="noopener noreferrer" className="inline-block text-xs text-violet-400 hover:text-violet-500 mt-2">View on GitHub Actions →</a>
       </div>
     </Card>
   );

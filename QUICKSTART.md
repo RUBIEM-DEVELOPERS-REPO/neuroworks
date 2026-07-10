@@ -16,8 +16,8 @@ are optional add-ons you can configure later in `.env`.
 ## 1. Get the code
 
 ```bash
-git clone https://github.com/RUBIEM-DEVELOPERS-REPO/clawbot.git
-cd clawbot
+git clone https://github.com/RUBIEM-DEVELOPERS-REPO/neuroworks.git
+cd neuroworks
 ```
 
 (Or download the ZIP from GitHub and unzip it.)
