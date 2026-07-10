@@ -1,0 +1,142 @@
+# Multi-turn Continuity Harness :: r2 :: 2026-05-21T15:36:07.848Z
+Server: http://127.0.0.1:7471
+Model: qwen2.5:3b
+OpenRouter: enabled (openai/gpt-oss-20b:free)
+
+▶ shorten-pronoun
+  ✗ 143.1s :: C(-1) → C-
+▶ what-about-shift
+  ✓ 35.7s :: A → A
+▶ pronoun-it-summary
+  ✓ 41.4s :: A → A
+▶ explicit-switch
+  ✗ ERROR: poll timeout for a36f45ee-7888-43e0-9524-3c2717d58e27
+▶ bare-yes-with-context
+  ✗ ERROR: poll timeout for 4480a15d-3ae1-4e61-94d3-c29f4c68a90c
+▶ affirmation-cold
+  ✓ 2.7s :: A → A
+▶ continue-cold
+  ✓ 0.1s :: A → A
+▶ qa-then-bullet
+  ✗ ERROR: poll timeout for 83cf88b6-5856-431c-8f6b-0a4ab6949319
+## Scorecard
+
+| probe | target | elapsed | content | time | FINAL | description |
+|---|---|---|---|---|---|---|
+| shorten-pronoun | 90s | 143.1s | C | -1 | **C-** | Turn 1: explain RAG. Turn 2: 'shorten it' — should produce a shorter RAG explanation. |
+| what-about-shift | 60s | 35.7s | A | 0 | **A** | Turn 1: capital of France. Turn 2: 'what about Germany' — should answer Berlin. |
+| pronoun-it-summary | 90s | 41.4s | A | 0 | **A** | Turn 1: what is HTTP/2. Turn 2: 'summarise it in one sentence'. |
+| explicit-switch | 60s | -1s | F | 0 | **F** | Turn 1: tell me about Python. Turn 2: 'new task: what is Rust' — should switch topic. |
+| bare-yes-with-context | 30s | -1s | F | 0 | **F** | Turn 1: 'should I research X' (clawbot offers). Turn 2: 'yes' — should ack and act on prior offer. |
+| affirmation-cold | 5s | 2.7s | A | 0 | **A** | Cold 'yes' with NO prior context — should ask for clarification, not act. |
+| continue-cold | 5s | 0.1s | A | 0 | **A** | Cold 'continue' with NO prior context — should ask 'from where'. |
+| qa-then-bullet | 120s | -1s | F | 0 | **F** | Turn 1: explain transformers (model arch). Turn 2: 'give me 3 key components' — should produce 3 bullets about transformers. |
+
+**Summary:** 4 above B · 0 at B · 4 below B / 8
+
+## Outputs
+
+
+### shorten-pronoun — C-
+*Turn 1: explain RAG. Turn 2: 'shorten it' — should produce a shorter RAG explanation.*
+
+**Conversation:**
+- user: explain RAG retrieval augmented generation
+- assistant: _Assumed: I am explaining what Retrieval-Augmented Generation (RAG) is._
+
+Retrieval-Augmented Generation (RAG) is a technique in natural language proc
+- user: shorten it
+
+**Final assistant response (source: task):**
+```
+**Shortened version of “Sea Song” (Robert Wyatt) – chord outline**
+
+- **Intro** – Eb F Bb Eb | Cm Cm7 Cm6 | D E7b5  
+- **Verse 1** (first half) – F#m F Am Em | F#m F Am Em | F#m F Am Em | F#m F Am Em  
+  (lyrics: “You look different… baby sperm whale”)  
+- **Bridge** – Ebmaj7 Cm7 Bbmaj7 | Ebmaj7 Cm Cm7 Cm6 | D E7b5  
+- **Verse 2** – F#m F Am Em | Am Em | F#m F Am Em | F Am (×5) | F D  
+
+**Key points**
+
+- The song stays in **E‑minor** for the vocal sections, with a **modal shift** to **Eb‑major** for the instrumental bridge.  
+- The recurring **F#m – F – Am – Em** progression underpins most ver
+```
+
+### what-about-shift — A
+*Turn 1: capital of France. Turn 2: 'what about Germany' — should answer Berlin.*
+
+**Conversation:**
+- user: what is the capital of France
+- assistant: The capital of France is Paris. I don't have specific knowledge of 'AIIA' in this context. Could you tell me more about what you're looking for regard
+- user: what about Germany
+
+**Final assistant response (source: inline):**
+```
+The capital of Germany is Berlin.
+```
+
+### pronoun-it-summary — A
+*Turn 1: what is HTTP/2. Turn 2: 'summarise it in one sentence'.*
+
+**Conversation:**
+- user: what is HTTP/2
+- assistant: HTTP/2 is an evolution of the Hypertext Transfer Protocol (HTTP) designed to improve performance and scalability over HTTP/1.x. It introduces several 
+- user: summarise it in one sentence
+
+**Final assistant response (source: inline):**
+```
+HTTP/2 improves performance over HTTP/1.x by adding multiplexing, header compression with HPACK, and binary framing, which together reduce latency, shrink headers, and increase throughput for web traffic.
+```
+
+### explicit-switch — F
+*Turn 1: tell me about Python. Turn 2: 'new task: what is Rust' — should switch topic.*
+
+**Conversation:**
+
+**Final assistant response (source: error):**
+```
+poll timeout for a36f45ee-7888-43e0-9524-3c2717d58e27
+```
+
+### bare-yes-with-context — F
+*Turn 1: 'should I research X' (clawbot offers). Turn 2: 'yes' — should ack and act on prior offer.*
+
+**Conversation:**
+
+**Final assistant response (source: error):**
+```
+poll timeout for 4480a15d-3ae1-4e61-94d3-c29f4c68a90c
+```
+
+### affirmation-cold — A
+*Cold 'yes' with NO prior context — should ask for clarification, not act.*
+
+**Conversation:**
+- user: yes
+
+**Final assistant response (source: inline):**
+```
+I don't have a pending suggestion to confirm — what would you like me to do? Drop me a task or a question and I'll get on it.
+```
+
+### continue-cold — A
+*Cold 'continue' with NO prior context — should ask 'from where'.*
+
+**Conversation:**
+- user: continue
+
+**Final assistant response (source: inline):**
+```
+Continue from where? I don't see a previous thread to pick up — share the topic or paste what we were working on.
+```
+
+### qa-then-bullet — F
+*Turn 1: explain transformers (model arch). Turn 2: 'give me 3 key components' — should produce 3 bullets about transformers.*
+
+**Conversation:**
+
+**Final assistant response (source: error):**
+```
+poll timeout for 83cf88b6-5856-431c-8f6b-0a4ab6949319
+```

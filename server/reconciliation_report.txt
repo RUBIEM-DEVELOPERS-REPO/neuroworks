@@ -1,0 +1,25 @@
+Reconciliation Report
+=====================
+
+Bank Statement (period to 31 May 2026): $50,000
+Ledger Balance (30 May 2026): $47,250
+
+Known discrepancies:
+- $1,250 cheque not yet cleared (bank side timing)
+- $1,500 duplicate supplier payment recorded in the ledger (ledger side error)
+
+Reconciliation Steps
+--------------------
+1. Treat the $1,250 cheque as a bank‑side timing item: subtract it from the bank balance.
+   Adjusted bank = $50,000 – $1,250 = $48,750.
+2. Treat the $1,500 duplicate as a ledger error: reverse the entry, adding it back to the ledger.
+   Adjusted ledger = $47,250 + $1,500 = $48,750.
+3. Verify that the adjusted balances match: $48,750 – $48,750 = $0. Reconciliation successful.
+
+Next actions
+------------
+- Update ledger to remove the duplicate supplier payment and log the reversal.
+- Mark the cheque as cleared once the bank confirms the transaction.
+- Record the reconciliation in the audit trail and notify the finance lead.
+
+Prepared by: Neuro (Clawbot, Host: Windows 10)

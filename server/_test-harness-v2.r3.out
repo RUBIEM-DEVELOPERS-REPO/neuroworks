@@ -1,0 +1,126 @@
+# Test harness v2 run :: v2-r3 :: 2026-05-20T16:28:51.710Z
+Server:        http://127.0.0.1:7471
+Model:         qwen2.5:3b
+OpenRouter:    enabled (openai/gpt-oss-20b:free)
+
+> date (what's the date today...)
+  0.1s :: A  -> A
+> bigmath (what is 137 * 24...)
+  0s :: A  -> A
+> rag (explain RAG retrieval augmented generation...)
+  43s :: A  -> A
+> who-dario (who is dario amodei...)
+  34.5s :: B  -> B
+> vault-list5 (list 5 notes from my vault inbox folder...)
+  73s :: A  -> A
+> vault-ts (search my vault for notes mentioning typescript...)
+  0.2s :: B+  -> B+
+> rag-best (research how RAG systems handle citation grounding...)
+  86.8s :: A-  -> A-
+> llm-compare (compare local LLM inference with cloud APIs and gi...)
+  126s :: A  -> A
+| id | tier | target | elapsed | content | time | FINAL |
+|---|---|---|---|---|---|---|
+| date | trivial | 5s | 0.1s | A | 0 | **A** |
+| bigmath | trivial | 5s | 0s | A | 0 | **A** |
+| rag | research-light | 60s | 43s | A | 0 | **A** |
+| who-dario | research-light | 60s | 34.5s | B | 0 | **B** |
+| vault-list5 | multi-step | 120s | 73s | A | 0 | **A** |
+| vault-ts | multi-step | 90s | 0.2s | B+ | 0 | **B+** |
+| rag-best | heavy | 200s | 86.8s | A- | 0 | **A-** |
+| llm-compare | heavy | 200s | 126s | A | 0 | **A** |
+
+Summary: 7 strictly above B - 1 at B - 0 below B / total 8
+
+## Outputs
+
+### date - what's the date today
+grade: **A** (content A, time penalty 0) - 0.1s vs 5s target
+
+```
+Today is Wednesday, May 20, 2026.
+```
+
+### bigmath - what is 137 * 24
+grade: **A** (content A, time penalty 0) - 0s vs 5s target
+
+```
+137 * 24 = 3288
+```
+
+### rag - explain RAG retrieval augmented generation
+grade: **A** (content A, time penalty 0) - 43s vs 60s target
+plan: 1 step(s) - research.deep=ok/41571ms
+
+```
+**Retrieval‑Augmented Generation (RAG)** is a two‑stage architecture that couples a **retriever** with a **generator** so that a language model can ground its output in up‑to‑date external knowledge instead of relying solely on what it learned during pre‑training.
+
+| Stage | What happens | Key components |
+|-------|--------------|----------------|
+| **1. Retrieval** | The user query is encoded into a dense vector and matched against vectors stored in a **vector database** that contain embeddings of external documents (web pages, PDFs, APIs, etc.). The most similar chunks are returned. | • External knowledge source  <br>• Text chunking & preprocessing  <br>• Embedding model  <br>• Vector DB  
+```
+
+### who-dario - who is dario amodei
+grade: **B** (content B, time penalty 0) - 34.5s vs 60s target
+plan: 1 step(s) - research.deep=ok/11954ms
+
+```
+I’m sorry, but the sources provided contain no information about Dario Amodei. They only describe a conference hotel and its café in Denmark, and do not mention any person named Dario Amodei. Consequently, I cannot give a reliable answer to the question with the evidence at hand.
+```
+
+### vault-list5 - list 5 notes from my vault inbox folder
+grade: **A** (content A, time penalty 0) - 73s vs 120s target
+skill: list-making (score 29)
+plan: 4 step(s) - vault.list=ok/3ms, quality.check=fail/8499ms, security.scan=ok/0ms, peer.review=ok/22943ms
+
+```
+1. The file *2026-04-27-aiia-pc-inventory.md* documents the current hardware inventory for the AIIA project.  
+2. *2026-05-18-clawbot-update.md* outlines recent changes and bug fixes applied to the Clawbot system.  
+3. *2026-05-19-1773731595-eoi-training-ai-260316-110157-1.md* contains a summary of the EOI training session for the AI model.  
+4. *2026-05-19-202605171116-research-check-in-my-downloads-for-aiia-referen.md* lists research files downloaded for AIIA reference.  
+5. *202604291418-neuroworks-smoke-test.md* reports the initial smoke test results for the Neuroworks component.
+```
+
+### vault-ts - search my vault for notes mentioning typescript
+grade: **B+** (content B+, time penalty 0) - 0.2s vs 90s target
+
+```
+Found **5** notes mentioning **typescript**:
+
+1. **decisions.md** (line 23) — **Decision:** The cloud-side `clawbot` is built as a small standalone TypeScript repo that runs in GitHub Actions, not as an openclaw plugin. Openclaw stays in 
+2. **_knowledge/downloads/files/Documents/dpa_system_testing_strategy_for_claude.md** (line 502) — If using **Node.js / TypeScript**:
+3. **_neuroworks/jobs/2026-05-20-search-the-knowledge-base-09a9293a.md** (line 26) — "query": "typescript"
+4. **_neuroworks/jobs/2026-05-20-search-the-knowledge-base-4f62cf7b.md** (line 26) — "query": "typescript"
+5. **_neuroworks/jobs/2026-05-20-search-the-knowledge-base-b847b95a.md** (line 26) — "query": "my vault for notes
+```
+
+### rag-best - research how RAG systems handle citation grounding and give me 3 best practices
+grade: **A-** (content A-, time penalty 0) - 86.8s vs 200s target
+plan: 4 step(s) - research.deep=ok/48131ms, quality.check=fail/8768ms, security.scan=ok/0ms, peer.review=fail/8715ms
+
+```
+**How Retrieval‑Augmented Generation (RAG) systems handle citation grounding**
+
+RAG pipelines combine a **retriever** (which pulls relevant documents from a knowledge base) with a **generator** (which produces the final answer).  To make the answer traceable, the system must **ground** each statement in the retrieved source(s) and surface a citation that a user can verify.  The most common mechanisms are:
+
+| Grounding step | What the system does | Typical implementation |
+|----------------|----------------------|------------------------|
+| **Chunk‑level retrieval** | The retriever returns small, self‑contained passages (e.g., 100‑300 words) that each contain a clear bibliographic identifier 
+```
+
+### llm-compare - compare local LLM inference with cloud APIs and give me 3 trade-offs each way
+grade: **A** (content A, time penalty 0) - 126s vs 200s target
+plan: 4 step(s) - research.multiperspective=ok/36029ms, quality.check=ok/17306ms, security.scan=ok/0ms, peer.review=fail/9406ms
+
+```
+**For local inference**
+
+1. **Up‑front hardware cost** – Purchasing GPUs or specialized accelerators requires significant capital expenditure before any model can be run.  
+2. **Data privacy control** – All input and output remain on‑premises, eliminating exposure to third‑party networks and simplifying compliance.  
+3. **Latency advantage** – Inference occurs locally, so response times are limited only by the device’s compute speed, often sub‑millisecond for small models.
+
+**For cloud APIs**
+
+1. **Pay‑as‑you‑go pricing** – No hardware purchase is needed; costs scale with usage, which can be economical for intermittent workloads.  
+2. **Scalable compute** – Providers can allocate large clust
+```

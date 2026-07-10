@@ -131,7 +131,53 @@ export const TASK_PROFILES = {
   balanced:    { jsonStrict: 3, reasoning: 3, longForm: 3, speed: 3 } as TaskNeeds,
 };
 
+// Per-profile env overrides. Setting any of these pins that profile to a
+// specific model name, bypassing the capability scorer. Useful when you want
+// a small/fast model for planning and a larger one for synthesis without
+// having to swap the global default constantly.
+const ENV_OVERRIDE_KEYS: Record<keyof typeof TASK_PROFILES, string> = {
+  planning: "OLLAMA_PLAN_MODEL",
+  synthesis: "OLLAMA_SYNTH_MODEL",
+  triage: "OLLAMA_TRIAGE_MODEL",
+  extraction: "OLLAMA_EXTRACT_MODEL",
+  balanced: "OLLAMA_BALANCED_MODEL",
+};
+
+// Per-profile pick cache. The scorer is cheap on its own but pickModelFor
+// gets called PER PLAN STEP — in a wave of 6 sub-agents each running
+// ollama.generate, that's 6 sorts and 6 env-lookups for the same answer.
+// We cache the chosen name for the lifetime of the listModels cache (30s)
+// so a single sub-agent burst pays the picker cost exactly once.
+const PICK_CACHE = new Map<string, { at: number; name: string }>();
+const PICK_CACHE_MS = 30_000;
+
 // Convenience for primitives that want to ask "give me the right model for this kind of task".
 export async function pickModelFor(profile: keyof typeof TASK_PROFILES, fallback?: string): Promise<string> {
-  return pickModel(TASK_PROFILES[profile], fallback);
+  const cacheKey = `${profile}|${fallback ?? ""}`;
+  const hit = PICK_CACHE.get(cacheKey);
+  if (hit && Date.now() - hit.at < PICK_CACHE_MS) return hit.name;
+  // Env override wins over the scorer. We still verify the named model is
+  // pulled — if not, we fall back to the scorer to avoid a hard failure when
+  // the user has a stale env pinned to a deleted model.
+  const envName = process.env[ENV_OVERRIDE_KEYS[profile]]?.trim();
+  let name: string;
+  if (envName) {
+    const all = await listModels();
+    if (all.find(m => m.name === envName)) {
+      name = envName;
+    } else {
+      name = await pickModel(TASK_PROFILES[profile], fallback);
+    }
+  } else {
+    name = await pickModel(TASK_PROFILES[profile], fallback);
+  }
+  PICK_CACHE.set(cacheKey, { at: Date.now(), name });
+  return name;
+}
+
+// Bust the pick cache. Called when the user pulls a new model or changes the
+// env override — otherwise stale picks linger up to 30s.
+export function invalidateModelPickCache() {
+  PICK_CACHE.clear();
+  cache = null;
 }

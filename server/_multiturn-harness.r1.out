@@ -1,0 +1,151 @@
+# Multi-turn Continuity Harness :: r1 :: 2026-05-21T15:04:55.164Z
+Server: http://127.0.0.1:7471
+Model: qwen2.5:3b
+OpenRouter: enabled (openai/gpt-oss-20b:free)
+
+▶ shorten-pronoun
+  ✗ 145.4s :: C(-1) → C-
+▶ what-about-shift
+  ○ 67.1s :: B → B
+▶ pronoun-it-summary
+  ✗ 54.9s :: C → C
+▶ explicit-switch
+  ✓ 63.6s :: A → A
+▶ bare-yes-with-context
+  ✗ 105.8s :: B(-5) → D+
+▶ affirmation-cold
+  ✓ 0s :: A → A
+▶ continue-cold
+  ✓ 0s :: A → A
+▶ qa-then-bullet
+  ✗ 121.1s :: C → C
+## Scorecard
+
+| probe | target | elapsed | content | time | FINAL | description |
+|---|---|---|---|---|---|---|
+| shorten-pronoun | 90s | 145.4s | C | -1 | **C-** | Turn 1: explain RAG. Turn 2: 'shorten it' — should produce a shorter RAG explanation. |
+| what-about-shift | 60s | 67.1s | B | 0 | **B** | Turn 1: capital of France. Turn 2: 'what about Germany' — should answer Berlin. |
+| pronoun-it-summary | 90s | 54.9s | C | 0 | **C** | Turn 1: what is HTTP/2. Turn 2: 'summarise it in one sentence'. |
+| explicit-switch | 60s | 63.6s | A | 0 | **A** | Turn 1: tell me about Python. Turn 2: 'new task: what is Rust' — should switch topic. |
+| bare-yes-with-context | 30s | 105.8s | B | -5 | **D+** | Turn 1: 'should I research X' (clawbot offers). Turn 2: 'yes' — should ack and act on prior offer. |
+| affirmation-cold | 5s | 0s | A | 0 | **A** | Cold 'yes' with NO prior context — should ask for clarification, not act. |
+| continue-cold | 5s | 0s | A | 0 | **A** | Cold 'continue' with NO prior context — should ask 'from where'. |
+| qa-then-bullet | 120s | 121.1s | C | 0 | **C** | Turn 1: explain transformers (model arch). Turn 2: 'give me 3 key components' — should produce 3 bullets about transformers. |
+
+**Summary:** 3 above B · 1 at B · 4 below B / 8
+
+## Outputs
+
+
+### shorten-pronoun — C-
+*Turn 1: explain RAG. Turn 2: 'shorten it' — should produce a shorter RAG explanation.*
+
+**Conversation:**
+- user: explain RAG retrieval augmented generation
+- assistant: _I don't know — could you tell me more about the specific aspect of RAG (Retrieval-Augmented Generation) you want to understand?_
+
+### Explanation of 
+- user: shorten it
+
+**Final assistant response (source: task):**
+```
+I’m sorry, but there isn’t enough information to know what you’d like shortened. Please provide the text or content you want condensed, and I’ll be happy to help.
+```
+
+### what-about-shift — B
+*Turn 1: capital of France. Turn 2: 'what about Germany' — should answer Berlin.*
+
+**Conversation:**
+- user: what is the capital of France
+- assistant: The capital of France is Paris. 
+
+I don't have specific knowledge of 'AIIA' in this context.
+
+Questions:
+1. Could you provide more details about why u
+- user: what about Germany
+
+**Final assistant response (source: task):**
+```
+I’m sorry, but the sources you provided do not contain any information about Germany. Both links are generic YouTube Help pages (one about downloading the mobile app and one about verifying a YouTube account) and they do not mention Germany or any Germany‑specific policies, features, or requirements. Without relevant evidence, I can’t give a substantive answer about Germany. If you can supply a source that discusses Germany, I’ll be happy to synthesize the information for you.
+```
+
+### pronoun-it-summary — C
+*Turn 1: what is HTTP/2. Turn 2: 'summarise it in one sentence'.*
+
+**Conversation:**
+- user: what is HTTP/2
+- assistant: HTTP/2 is an evolution of the Hypertext Transfer Protocol (HTTP) designed to improve performance by allowing multiple requests to be sent over a singl
+- user: summarise it in one sentence
+
+**Final assistant response (source: task):**
+```
+Ocean Network Express (ONE) is a global container liner shipping company that operates a 2.2 million‑TEU fleet serving 244 ports worldwide with 165 weekly service loops【1†L1-L5】.
+```
+
+### explicit-switch — A
+*Turn 1: tell me about Python. Turn 2: 'new task: what is Rust' — should switch topic.*
+
+**Conversation:**
+- user: tell me about Python in two sentences
+- assistant: Python is an easy‑to‑learn, high‑level programming language that lets both beginners and experienced developers write clear, readable code for a vast 
+- user: new task: what is Rust
+
+**Final assistant response (source: task):**
+```
+**Rust – a modern systems programming language**
+
+| Aspect | What the evidence says |
+|--------|------------------------|
+| **Performance** | Rust compiles to native code with **no runtime or garbage collector**, giving “blazingly fast and memory‑efficient” execution that suits performance‑critical services, embedded devices, and language interop [1]. |
+| **Reliability** | Its **ownership model and rich type system** enforce memory‑safety and thread‑safety at compile time, eliminating many classes of bugs before the program runs [1]. |
+| **Productivity** | The language ships with **excellent d
+```
+
+### bare-yes-with-context — D+
+*Turn 1: 'should I research X' (clawbot offers). Turn 2: 'yes' — should ack and act on prior offer.*
+
+**Conversation:**
+- user: I'm thinking about researching the LK-99 superconductor saga — should I
+- assistant: I’m sorry, but the provided sources do not contain any information about the LK‑99 superconductor claims or the subsequent scientific debate. Without 
+- user: yes
+
+**Final assistant response (source: task):**
+```
+That sounds interesting, but let's focus on what you need help with first.
+```
+
+### affirmation-cold — A
+*Cold 'yes' with NO prior context — should ask for clarification, not act.*
+
+**Conversation:**
+- user: yes
+
+**Final assistant response (source: inline):**
+```
+I don't have a pending suggestion to confirm — what would you like me to do? Drop me a task or a question and I'll get on it.
+```
+
+### continue-cold — A
+*Cold 'continue' with NO prior context — should ask 'from where'.*
+
+**Conversation:**
+- user: continue
+
+**Final assistant response (source: inline):**
+```
+Continue from where? I don't see a previous thread to pick up — share the topic or paste what we were working on.
+```
+
+### qa-then-bullet — C
+*Turn 1: explain transformers (model arch). Turn 2: 'give me 3 key components' — should produce 3 bullets about transformers.*
+
+**Conversation:**
+- user: explain transformer neural networks
+- assistant: Transformer Neural Networks (TNNs) are a type of deep learning architecture that significantly improved the performance of sequence-to-sequence tasks,
+- user: give me 3 key components
+
+**Final assistant response (source: task):**
+```
+I’m sorry, but the provided sources do not contain information about any specific “three key components.” The available references describe the numeral 3, the municipal district Praha 3, and a music video titled “3” by Britney Spears, none of which outline a set of three components for a particular concept or system. Without relevant evidence, I can’t supply a concise, evidence‑grounded answer.
+```

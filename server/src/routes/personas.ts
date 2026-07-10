@@ -1,7 +1,8 @@
 import { Router } from "express";
-import { addPersona, deletePersona, extractPersonaMetadata, getActivePersona, loadPersonas, setActivePersona, slugifyId, type Persona } from "../lib/personas.js";
+import { addPersona, deletePersona, extractPersonaMetadata, getActivePersona, loadPersonas, setActivePersona, slugifyId, updatePersona, type Persona } from "../lib/personas.js";
 import { journal } from "../lib/journal.js";
-import { saveCustomTemplate, slugify, type CustomTemplate } from "../lib/custom-templates.js";
+import { buildStarterTemplates, refreshPersonaTemplates, purgePersonaTemplates, listPersonaTemplates } from "../lib/persona-templates.js";
+import { saveCustomTemplate } from "../lib/custom-templates.js";
 
 export const personasRouter = Router();
 
@@ -11,7 +12,7 @@ personasRouter.get("/", (_req, res) => {
 });
 
 personasRouter.post("/", async (req, res) => {
-  const { name, jobDescription, tone, role, description, responsibilities, systemPromptOverride } = (req.body ?? {}) as Partial<Persona>;
+  const { name, jobDescription, tone, role, description, responsibilities, systemPromptOverride, workMode } = (req.body ?? {}) as Partial<Persona>;
   if (!name || !String(name).trim()) return res.status(400).json({ error: "name required" });
   if (!jobDescription || !String(jobDescription).trim()) return res.status(400).json({ error: "jobDescription required" });
   let meta = { role: role ?? "Specialist", description: description ?? "", tone: tone ?? "professional", responsibilities: responsibilities ?? [] };
@@ -28,13 +29,15 @@ personasRouter.post("/", async (req, res) => {
     tone: meta.tone,
     responsibilities: meta.responsibilities,
     systemPromptOverride: systemPromptOverride ? String(systemPromptOverride) : undefined,
+    workMode: (["agent", "hybrid", "human"] as const).includes(workMode as any) ? workMode : undefined,
     createdAt: new Date().toISOString(),
   };
   addPersona(persona);
-  // Generate starter templates from the persona's responsibilities so the dashboard
-  // immediately reflects the role's day-to-day work. Each responsibility becomes a
-  // one-step `general-task` template the user can re-run with a click.
-  const generated = generateStarterTemplates(persona);
+  // Generate starter templates so the dashboard immediately reflects the
+  // role's day-to-day work. Built-in personas (researcher, etc.) get
+  // curated templates with pre-baked plans; everyone else gets one
+  // template per responsibility, re-planned on each run.
+  const generated = buildStarterTemplates(persona);
   for (const t of generated) saveCustomTemplate(t);
   void journal({
     kind: "persona",
@@ -53,25 +56,37 @@ personasRouter.post("/", async (req, res) => {
   res.json({ persona, generatedTemplateIds: generated.map(g => g.id) });
 });
 
-function generateStarterTemplates(persona: Persona): CustomTemplate[] {
-  const out: CustomTemplate[] = [];
-  for (const resp of persona.responsibilities.slice(0, 5)) {
-    const task = `As a ${persona.role}, ${resp.toLowerCase().replace(/\.$/, "")}.`;
-    const id = `custom-${persona.id}-${slugify(resp).slice(0, 40)}`;
-    out.push({
-      id,
-      role: "Custom",
-      title: resp.length > 80 ? resp.slice(0, 77) + "…" : resp,
-      description: `Persona-derived starter task for "${persona.name}".`,
-      origin: { task, createdAt: new Date().toISOString() },
-      // Empty plan — running this template re-plans against the persona system suffix
-      // each time, so the LLM stays in the persona role for execution.
-      plan: { steps: [], summary: undefined, waves: [] },
-      runCount: 0,
-    });
-  }
-  return out;
-}
+// Patch an existing hire — primarily the work mode (agent / hybrid / human),
+// plus tone/description tweaks from the Workforce page.
+personasRouter.patch("/:id", (req, res) => {
+  const p = updatePersona(String(req.params.id), req.body ?? {});
+  if (!p) return res.status(404).json({ error: "persona not found" });
+  res.json({ persona: p });
+});
+
+// generateStarterTemplates → moved to lib/persona-templates.ts so the same
+// builder can be invoked from the built-in seed path AND the refresh endpoint.
+
+// Refresh persona-derived templates from current responsibilities. Useful
+// after editing a persona's JD outside the create flow, or for built-ins to
+// pick up newly-curated templates after a code change. Keeps runCount on
+// templates whose id is unchanged.
+personasRouter.post("/:id/refresh-templates", (req, res) => {
+  const s = loadPersonas();
+  const persona = s.personas.find(p => p.id === req.params.id);
+  if (!persona) return res.status(404).json({ error: "persona not found" });
+  const result = refreshPersonaTemplates(persona);
+  res.json({ persona: persona.id, ...result });
+});
+
+// Inspect which custom templates belong to this persona. Used by the UI to
+// show a count badge on each persona card.
+personasRouter.get("/:id/templates", (req, res) => {
+  const s = loadPersonas();
+  const persona = s.personas.find(p => p.id === req.params.id);
+  if (!persona) return res.status(404).json({ error: "persona not found" });
+  res.json({ templates: listPersonaTemplates(persona.id) });
+});
 
 personasRouter.post("/:id/activate", (req, res) => {
   try {
@@ -88,9 +103,12 @@ personasRouter.post("/deactivate", (_req, res) => {
 });
 
 personasRouter.delete("/:id", (req, res) => {
+  // Persona-derived templates are owned by the persona — when the persona
+  // goes, the templates go with it. The user can always create new ones.
+  const removed = purgePersonaTemplates(req.params.id);
   const ok = deletePersona(req.params.id);
   if (!ok) return res.status(404).json({ error: "not found" });
-  res.json({ deleted: true });
+  res.json({ deleted: true, removedTemplates: removed });
 });
 
 personasRouter.post("/preview", async (req, res) => {

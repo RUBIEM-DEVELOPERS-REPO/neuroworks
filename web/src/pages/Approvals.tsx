@@ -42,33 +42,159 @@ export function Approvals() {
         </Card>
       ) : (
         <ul className="space-y-2">
-          {jobs.map(j => (
-            <li key={j.id}>
-              <Card>
-                <div className="flex items-start justify-between gap-3">
-                  <div className="min-w-0 flex-1">
-                    <div className="text-sm font-medium text-cream-50">{j.title ?? j.kind}</div>
-                    <div className="text-xs text-cream-300/60 mt-0.5">{new Date(j.startedAt).toLocaleString()}</div>
-                    {j.inputs && Object.keys(j.inputs).length > 0 && (
-                      <div className="mt-2 grid grid-cols-2 gap-1 text-[11px] font-mono">
-                        {Object.entries(j.inputs).map(([k, v]) => (
-                          <div key={k}><span className="text-cream-300/50">{k}:</span> <span className="text-cream-200 break-all">{String(v)}</span></div>
-                        ))}
+          {jobs.map(j => {
+            const planSteps = j.plan?.steps as { tool: string; label?: string; rationale?: string }[] | undefined;
+            const hasPlan = Array.isArray(planSteps) && planSteps.length > 0;
+            const effects = describeEffects(j);
+            return (
+              <li key={j.id}>
+                <Card>
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0 flex-1">
+                      <div className="text-sm font-medium text-cream-50">{j.title ?? j.kind}</div>
+                      <div className="text-xs text-cream-300/60 mt-0.5">{new Date(j.startedAt).toLocaleString()}</div>
+                      {hasPlan ? (
+                        <div className="mt-3 rounded-md border border-violet-500/30 bg-violet-500/5 p-3 text-xs">
+                          <div className="text-[10px] uppercase tracking-wider text-violet-300/70 mb-2">Proposed plan — {planSteps!.length} step{planSteps!.length === 1 ? "" : "s"}</div>
+                          <ol className="space-y-1.5">
+                            {planSteps!.map((s, i) => (
+                              <li key={i} className="flex gap-2">
+                                <span className="text-violet-400/70 font-mono shrink-0">{i + 1}.</span>
+                                <span className="min-w-0">
+                                  <span className="font-mono text-violet-200">{s.tool}</span>
+                                  {s.label && s.label !== s.tool && <span className="text-cream-200"> — {s.label}</span>}
+                                  {s.rationale && <span className="block text-cream-300/50 text-[11px]">{s.rationale}</span>}
+                                </span>
+                              </li>
+                            ))}
+                          </ol>
+                          <div className="text-[10px] text-cream-300/40 mt-2 pt-2 border-t border-violet-500/15">Approving runs these steps as-is, then synthesises the answer.</div>
+                        </div>
+                      ) : (
+                      <div className={`mt-3 rounded-md border p-3 text-xs ${effects.severity === "high" ? "bg-flame-500/5 border-flame-500/30" : "bg-ink-950 border-ink-800"}`}>
+                        <div className="text-[10px] uppercase tracking-wider text-cream-300/50 mb-1.5">If you approve, Neuro will:</div>
+                        <ul className="space-y-1 text-cream-200">
+                          {effects.bullets.map((b, i) => <li key={i}>· {b}</li>)}
+                        </ul>
+                        {effects.severity === "high" && (
+                          <div className="text-[10px] text-flame-400 mt-2 pt-2 border-t border-flame-500/20">⚠ This action is hard to reverse — double-check the inputs.</div>
+                        )}
                       </div>
-                    )}
+                      )}
+                      {j.inputs && Object.keys(j.inputs).length > 0 && (
+                        <details className="mt-2">
+                          <summary className="text-[11px] text-cream-300/60 cursor-pointer hover:text-cream-100">Raw inputs</summary>
+                          <div className="mt-1.5 grid grid-cols-2 gap-1 text-[11px] font-mono">
+                            {Object.entries(j.inputs).map(([k, v]) => (
+                              <div key={k}><span className="text-cream-300/50">{k}:</span> <span className="text-cream-200 break-all">{String(v)}</span></div>
+                            ))}
+                          </div>
+                        </details>
+                      )}
+                    </div>
+                    <div className="flex gap-2 shrink-0">
+                      <button onClick={() => reject(j.id)} disabled={busy === j.id} className="px-3 py-1.5 rounded-md text-xs text-cream-300 hover:text-cream-100 border border-ink-700 disabled:opacity-50">Reject</button>
+                      <button onClick={() => approve(j.id)} disabled={busy === j.id} className="px-3 py-1.5 rounded-md text-xs bg-leaf-500 hover:bg-leaf-400 text-ink-950 font-medium disabled:opacity-50">{busy === j.id ? "…" : "Approve"}</button>
+                    </div>
                   </div>
-                  <div className="flex gap-2 shrink-0">
-                    <button onClick={() => reject(j.id)} disabled={busy === j.id} className="px-3 py-1.5 rounded-md text-xs text-cream-300 hover:text-cream-100 border border-ink-700 disabled:opacity-50">Reject</button>
-                    <button onClick={() => approve(j.id)} disabled={busy === j.id} className="px-3 py-1.5 rounded-md text-xs bg-leaf-500 hover:bg-leaf-400 text-ink-950 font-medium disabled:opacity-50">{busy === j.id ? "…" : "Approve"}</button>
-                  </div>
-                </div>
-              </Card>
-            </li>
-          ))}
+                </Card>
+              </li>
+            );
+          })}
         </ul>
       )}
 
       {err && <div className="text-xs text-coral-400">{err}</div>}
     </div>
   );
+}
+
+// Plain-English preview of what an awaiting-approval job will actually do.
+// Severity gates the warning band: "high" for hard-to-reverse external writes,
+// "medium" for vault-only writes, "low" for everything else.
+function describeEffects(job: any): { bullets: string[]; severity: "high" | "medium" | "low" } {
+  const inputs = job.inputs ?? {};
+  const tpl = job.template as string | undefined;
+  switch (tpl) {
+    case "paynow-payment": {
+      const amount = Number(inputs.amount ?? 0);
+      return {
+        severity: "high",
+        bullets: [
+          `Create a REAL Paynow payment for ${Number.isFinite(amount) ? amount.toFixed(2) : String(inputs.amount)} — ${String(inputs.description ?? "")}`,
+          `Issue a pay link the client can settle via EcoCash, OneMoney, card, or bank`,
+          inputs.email ? `Payer email: ${String(inputs.email)}` : `No payer email — Paynow will use the merchant default`,
+          `Money moves once the client pays — approve only if the amount and description are right`,
+        ],
+      };
+    }
+    case "publish-folder": {
+      const path = String(inputs.path ?? "(missing path)");
+      const isPublic = Boolean(inputs.public);
+      const repoName = String(inputs.name ?? "").trim() || "(auto-named from folder)";
+      return {
+        severity: "high",
+        bullets: [
+          `Create a ${isPublic ? "public" : "private"} GitHub repo named ${repoName}`,
+          `Initialize git in ${path} (if not already a repo)`,
+          `Push the folder contents to the new remote`,
+        ],
+      };
+    }
+    case "general-task": {
+      const task = String(inputs.task ?? "").slice(0, 200);
+      return {
+        severity: "medium",
+        bullets: [
+          `Plan tool steps for: "${task}"`,
+          `Execute the plan against the vault, GitHub, and local LLM`,
+          `Save the successful plan as a reusable template`,
+        ],
+      };
+    }
+    case "add-note": {
+      return {
+        severity: "low",
+        bullets: [
+          `Write a new note to 0-Inbox/ titled "${String(inputs.title ?? "")}"`,
+          `Commit and push the vault repo`,
+        ],
+      };
+    }
+    case "summarize-repo": {
+      return {
+        severity: "low",
+        bullets: [
+          `Fetch ${String(inputs.repo ?? "")} from GitHub and summarize via Ollama`,
+          `Write the summary to _clawbot/summaries/ in the vault and push`,
+        ],
+      };
+    }
+    case "run-digest": {
+      return {
+        severity: "low",
+        bullets: [
+          `Trigger the daily-digest GitHub Actions workflow (lookback ${String(inputs.lookbackDays ?? 7)}d)`,
+        ],
+      };
+    }
+    case "sync-downloads": {
+      return {
+        severity: "medium",
+        bullets: [
+          `Mirror new files from ${String(inputs.source || "~/Downloads")} into the vault`,
+          `Source files are not moved or deleted — only copies are made`,
+          `Commit and push the vault`,
+        ],
+      };
+    }
+    default: {
+      return {
+        severity: "medium",
+        bullets: [
+          `Run template "${tpl ?? "unknown"}" with the inputs shown below`,
+        ],
+      };
+    }
+  }
 }

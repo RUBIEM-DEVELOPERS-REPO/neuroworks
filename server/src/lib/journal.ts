@@ -1,4 +1,5 @@
-import { writeVaultFile, commitAndPush } from "./vault.js";
+import { writeVaultFile } from "./vault.js";
+import { enqueueVaultCommit } from "./commit-queue.js";
 
 export type JournalEntry = {
   kind: "job" | "persona" | "template" | "loop" | "session";
@@ -62,9 +63,10 @@ export async function journal(entry: JournalEntry): Promise<{ path: string } | {
       writeVaultFile(path, md);
     }
 
-    // Best-effort commit. The 15s push timeout in vault.ts handles stalled remotes.
-    try { await commitAndPush(`neuroworks: ${entry.kind} — ${entry.slug}`); }
-    catch { /* swallow — file is on disk, push can be reconciled later */ }
+    // Best-effort commit — debounced + serialised through the commit queue
+    // so a burst of journal entries from a wave of sub-agents collapses into
+    // a single git commit. Never throws.
+    void enqueueVaultCommit(`neuroworks: ${entry.kind} — ${entry.slug}`);
 
     return { path };
   } catch (e: any) {

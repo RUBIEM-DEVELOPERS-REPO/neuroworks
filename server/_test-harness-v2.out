@@ -1,0 +1,149 @@
+# Test harness v2 run :: v2-mixed :: 2026-05-20T15:35:52.423Z
+Server:        http://127.0.0.1:7471
+Model:         qwen2.5:3b
+OpenRouter:    enabled (openai/gpt-oss-20b:free)
+
+> date (what's the date today...)
+  22.5s :: D- (time -6) -> F
+> bigmath (what is 137 * 24...)
+  0s :: A  -> A
+> rag (explain RAG retrieval augmented generation...)
+  150.3s :: A (time -3) -> B
+> who-dario (who is dario amodei...)
+  44.3s :: B  -> B
+> code-read (find the synthesize function in the clawbot server...)
+  101.8s :: A  -> A
+> vault-ts (search my vault for notes mentioning typescript...)
+  0.2s :: B  -> B
+> rag-best (research how RAG systems handle citation grounding...)
+  146.3s :: A-  -> A-
+> llm-compare (compare local LLM inference with cloud APIs and gi...)
+  150.3s :: C+  -> C+
+| id | tier | target | elapsed | content | time | FINAL |
+|---|---|---|---|---|---|---|
+| date | trivial | 5s | 22.5s | D- | -6 | **F** |
+| bigmath | trivial | 5s | 0s | A | 0 | **A** |
+| rag | research-light | 60s | 150.3s | A | -3 | **B** |
+| who-dario | research-light | 60s | 44.3s | B | 0 | **B** |
+| code-read | multi-step | 150s | 101.8s | A | 0 | **A** |
+| vault-ts | multi-step | 90s | 0.2s | B | 0 | **B** |
+| rag-best | heavy | 200s | 146.3s | A- | 0 | **A-** |
+| llm-compare | heavy | 200s | 150.3s | C+ | 0 | **C+** |
+
+Summary: 3 strictly above B - 3 at B - 2 below B / total 8
+
+## Outputs
+
+### date - what's the date today
+grade: **F** (content D-, time penalty -6) - 22.5s vs 5s target
+skill: direct-answer (score 28)
+plan: 1 step(s) - research.deep=ok/13873ms
+
+```
+## Partial result
+
+The synthesis step didn't complete cleanly (`OpenRouter 429: {"error":{"message":"Provider returned error","code":429,"metadata":{"raw":"meta-lla`), so here is the raw evidence we gathered for: **(You are operating as Clawbot, the AI agent operator. Bias tool choices, output shape, and depth toward this role's conventions.)
+
+what's the date today
+
+Interpretation: intent=explain.**
+
+### What worked
+
+**Step 1 — Researching "the date today" — vault + web**
+**Today’s date is Wednesday May 20, 2026**【2】.
+
+---
+_Auto-generated rescue summary. Try the task again — the next attempt may have the model available._
+```
+
+### bigmath - what is 137 * 24
+grade: **A** (content A, time penalty 0) - 0s vs 5s target
+
+```
+137 * 24 = 3288
+```
+
+### rag - explain RAG retrieval augmented generation
+grade: **B** (content A, time penalty -3) - 150.3s vs 60s target
+skill: direct-answer (score 28)
+plan: 4 step(s) - research.deep=ok/47262ms, quality.check=ok/17793ms, security.scan=ok/0ms, peer.review=ok/15088ms
+
+```
+## Retrieval‑Augmented Generation (RAG)
+
+Retrieval‑Augmented Generation (RAG) is a hybrid architecture that couples a **retriever** with a **generator** so a language model can ground its output in up‑to‑date external knowledge rather than relying solely on pre‑training data [1].
+
+### Core Components
+| Component | Role |
+|-----------|------|
+| External knowledge source | Documents, APIs, or databases containing factual material. |
+| Text chunking & preprocessing | Splits large texts into manageable pieces and normalises them. |
+| Embedding model | Converts each chunk into a dense vector representing its semantic meaning. |
+| Vector database | Stores vectors and enables fast similarity search
+```
+
+### who-dario - who is dario amodei
+grade: **B** (content B, time penalty 0) - 44.3s vs 60s target
+plan: 1 step(s) - research.deep=ok/23210ms
+
+```
+I’m sorry, but the provided sources do not contain any information about Dario Amodei, so I can’t give a reliable answer.
+```
+
+### code-read - find the synthesize function in the clawbot server and tell me what it does
+grade: **A** (content A, time penalty 0) - 101.8s vs 150s target
+plan: 4 step(s) - research.deep=ok/15263ms, quality.check=ok/22142ms, security.scan=ok/1ms, peer.review=ok/21291ms
+
+```
+**Report: Synthesise Function in Clawbot Server**
+
+**Finding**  
+The available evidence does not contain any reference to a `synthesize` function within the Clawbot server codebase or documentation. The query result explicitly states that no sources were found that describe such a function [1].
+
+**Implication**  
+Without the actual source code or documentation, the behavior, inputs, outputs, and purpose of the `synthesize` function cannot be determined.
+
+**Requested Information to Proceed**  
+1. The file path or repository location where the `synthesize` function is defined.  
+2. The surrounding code snippet (including imports and any related class or module definitions).  
+3. A brief descri
+```
+
+### vault-ts - search my vault for notes mentioning typescript
+grade: **B** (content B, time penalty 0) - 0.2s vs 90s target
+
+```
+On it — running **Search the knowledge base** — query: *my vault for notes mentioning typescript*. I'll surface the result on the Tasks page when it's done.
+```
+
+### rag-best - research how RAG systems handle citation grounding and give me 3 best practices
+grade: **A-** (content A-, time penalty 0) - 146.3s vs 200s target
+plan: 4 step(s) - research.deep=ok/100801ms, quality.check=fail/9446ms, security.scan=ok/0ms, peer.review=ok/18719ms
+
+```
+**How RAG systems handle citation grounding and 3 best practices**
+
+1. **Attach retrieved evidence to the prompt** – For each chunk returned by the retriever, prepend a short citation tag (e.g., `[1]`) and include the full reference in a “References” block. This forces the language model to surface the supplied evidence rather than rely on its internal knowledge.
+
+2. **Post‑process and verify citations** – After generation, parse the answer to extract citation markers, then confirm that each marker maps to a retrieved chunk. If a claim lacks a source, flag it or regenerate the answer. This ensures every factual statement is traceable.
+
+3. **Use a structured, consistent prompt template** – A 
+```
+
+### llm-compare - compare local LLM inference with cloud APIs and give me 3 trade-offs each way
+grade: **C+** (content C+, time penalty 0) - 150.3s vs 200s target
+plan: 4 step(s) - research.multiperspective=ok/44116ms, quality.check=ok/21676ms, security.scan=ok/0ms, peer.review=ok/38905ms
+
+```
+## Local LLM Inference vs. Cloud‑API Inference – Three Trade‑offs Each
+
+**TL;DR:** Choose local inference when latency, data sovereignty, and predictable capital costs dominate; opt for cloud APIs when you need elastic scalability, minimal operational overhead, and a usage‑based expense model.
+
+### Trade‑offs for Local Inference
+
+| Dimension | Trade‑off |
+|---|---|
+| **Latency** | Inference runs on‑prem hardware, eliminating network round‑trip time; however, performance is limited by the installed GPU/CPU capacity, so large models may still be slow if resources are insufficient【4】. |
+| **Cost Structure** | Requires upfront capital outlay for GPUs, storage, and cooling, plus ongoing electrici
+```

@@ -1,11 +1,18 @@
-import { readFileSync, readdirSync, renameSync, statSync, writeFileSync, mkdirSync, existsSync, rmSync } from "node:fs";
+import { readFileSync, readdirSync, renameSync, statSync, writeFileSync, mkdirSync, existsSync, rmSync, copyFileSync, watch, type FSWatcher } from "node:fs";
 import { join, relative, resolve, sep } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { simpleGit } from "simple-git";
 import { config } from "../config.js";
+import { scanForSecurityRisks } from "./security.js";
+import { buildIndex, invalidateIndex, searchIndex, indexStats, isBuildInProgress } from "./vault-index.js";
 
 const VAULT = config.vaultPath;
+
+// Set CLAWBOT_VAULT_SCAN=0 to disable. Default: ON. The scanner is fast (regex
+// only) and prevents secrets that landed in an LLM response from being
+// committed + pushed to a remote. High-severity findings refuse the write.
+const VAULT_SCAN_ENABLED = process.env.CLAWBOT_VAULT_SCAN !== "0";
 
 export type VaultNode = {
   name: string;
@@ -16,7 +23,92 @@ export type VaultNode = {
 
 const HIDDEN_PREFIXES = [".obsidian", ".git", "node_modules"];
 
+// Stale-lock recovery. A `.git/index.lock` file that's older than this
+// threshold AND can be safely removed (we can't see the process holding it)
+// is treated as left over from a crashed git process. Git itself takes the
+// lock for milliseconds; anything more than 60s is almost certainly stale.
+// Tunable via env in case someone runs a slow filesystem sync on the vault.
+const STALE_LOCK_AGE_MS = Number(process.env.CLAWBOT_STALE_LOCK_AGE_MS ?? "60000");
+// Known lock files git creates. We only ever touch `index.lock` — the others
+// are rare enough that auto-removing them could mask a real concurrent op.
+// If users hit those repeatedly we can add them later.
+const VAULT_LOCK_PATH = join(VAULT, ".git", "index.lock");
+
+// Before each git operation, look for a stale `.git/index.lock` and remove
+// it. Two safety rails:
+//   (1) Only delete locks older than STALE_LOCK_AGE_MS.
+//   (2) Try the delete and tolerate EBUSY (real git op in progress).
+// If the lock is fresh, we DO NOT delete — that would race with whatever
+// real git invocation is mid-commit.
+export function clearStaleVaultLock(): { cleared: boolean; reason?: string; ageMs?: number } {
+  try {
+    if (!existsSync(VAULT_LOCK_PATH)) return { cleared: false, reason: "no lock present" };
+    const st = statSync(VAULT_LOCK_PATH);
+    const ageMs = Date.now() - st.mtimeMs;
+    if (ageMs < STALE_LOCK_AGE_MS) {
+      return { cleared: false, reason: `lock is fresh (${(ageMs / 1000).toFixed(1)}s) — leaving alone`, ageMs };
+    }
+    try {
+      rmSync(VAULT_LOCK_PATH, { force: true });
+      console.log(`[vault] removed stale .git/index.lock (age ${(ageMs / 1000).toFixed(1)}s)`);
+      return { cleared: true, ageMs };
+    } catch (e: any) {
+      const msg = String(e?.code ?? e?.message ?? e);
+      if (msg === "EBUSY" || msg.includes("ENOTEMPTY")) {
+        return { cleared: false, reason: `delete failed — real git op in progress (${msg})`, ageMs };
+      }
+      return { cleared: false, reason: msg, ageMs };
+    }
+  } catch (e: any) {
+    return { cleared: false, reason: String(e?.message ?? e) };
+  }
+}
+
+// Quick vault-health probe — used by the brain routes + /api/health to tell
+// the UI whether the vault path resolves on disk. Without this, an unmounted
+// VAULT_PATH (e.g. D: drive on Windows) made listVault silently return [],
+// which looks identical to "your vault is empty" — the user has no idea
+// the drive is just missing. This helper surfaces the truth so the
+// Knowledge page can show "vault unreachable" instead of an empty tree.
+export type VaultHealth = {
+  ok: boolean;
+  vaultPath: string;
+  exists: boolean;
+  gitRepo: boolean;
+  reason?: string;
+  index?: { ready: boolean; docs: number; ageMs: number; built: boolean };
+};
+
+export function getVaultHealth(): VaultHealth {
+  const vaultPath = VAULT;
+  let exists = false;
+  let gitRepo = false;
+  let reason: string | undefined;
+  try {
+    exists = existsSync(vaultPath);
+    if (!exists) {
+      reason = `vault path "${vaultPath}" not found (drive unmounted, path renamed, or VAULT_PATH misconfigured)`;
+    } else {
+      // Confirm it's a directory and that the .git subdirectory exists — that
+      // tells us this is a real vault repo, not just a coincidental folder
+      // with the same name.
+      const st = statSync(vaultPath);
+      if (!st.isDirectory()) {
+        exists = false;
+        reason = `vault path "${vaultPath}" exists but is not a directory`;
+      } else {
+        gitRepo = existsSync(resolve(vaultPath, ".git"));
+        if (!gitRepo) reason = "vault directory exists but contains no .git — Obsidian sync will not work until you initialise git in this folder";
+      }
+    }
+  } catch (e: any) {
+    reason = `vault health probe failed: ${e?.message ?? e}`;
+  }
+  return { ok: exists && (gitRepo || !!process.env.CLAWBOT_VAULT_ALLOW_NO_GIT), vaultPath, exists, gitRepo, reason, index: indexStats() };
+}
+
 export function listVault(rel = ""): VaultNode[] {
+  assertVaultExists();
   const full = resolve(VAULT, rel);
   ensureInsideVault(full);
   if (!existsSync(full)) return [];
@@ -32,21 +124,161 @@ export function listVault(rel = ""): VaultNode[] {
 }
 
 export function readVaultFile(rel: string): string {
+  assertVaultExists();
   const full = resolve(VAULT, rel);
   ensureInsideVault(full);
   return readFileSync(full, "utf8");
 }
 
+// Thrown by every read/write entrypoint when the vault root doesn't
+// resolve on this machine (drive unmounted, path renamed, env wrong).
+// Without this, searchVault() silently returns [] and downstream code
+// reports "No matches" — masking the real failure behind a result that
+// looks like an empty vault. Surfacing it lets the template runner,
+// the agent primitive, and brain.ts all give the user the actual cause.
+export class VaultUnreachable extends Error {
+  vaultPath: string;
+  constructor(vaultPath: string, reason?: string) {
+    super(reason ?? `vault path "${vaultPath}" is unreachable (drive unmounted, path renamed, or VAULT_PATH misconfigured)`);
+    this.vaultPath = vaultPath;
+    this.name = "VaultUnreachable";
+  }
+}
+
+// Cheap existence check. Centralised so any future change (e.g. allow a
+// secondary fallback path) lands in one place.
+function assertVaultExists(): void {
+  if (!existsSync(VAULT)) throw new VaultUnreachable(VAULT);
+}
+
+export class VaultSecurityRefusal extends Error {
+  findings: { type: string; severity: string; reason: string }[];
+  constructor(findings: { type: string; severity: string; reason: string }[]) {
+    super(`refusing vault write — ${findings.length} high-severity finding(s): ${findings.map(f => f.type).join(", ")}`);
+    this.findings = findings;
+    this.name = "VaultSecurityRefusal";
+  }
+}
+
 export function writeVaultFile(rel: string, content: string) {
+  assertVaultExists();
   const full = resolve(VAULT, rel);
   ensureInsideVault(full);
+  if (VAULT_SCAN_ENABLED) {
+    const findings = scanForSecurityRisks(content, "note");
+    const high = findings.filter(f => f.severity === "high");
+    if (high.length > 0) {
+      // Refuse — never commit a secret. The agent can call security.scan
+      // explicitly to redact and retry, but the default-on guardrail blocks
+      // the write outright.
+      throw new VaultSecurityRefusal(high.map(f => ({ type: f.type, severity: f.severity, reason: f.reason })));
+    }
+  }
   mkdirSync(resolve(full, ".."), { recursive: true });
   writeFileSync(full, content, "utf8");
+  // Vault changed — drop the search cache so the next searchVault picks up
+  // the new note instead of returning stale results from the 60s window.
+  //
+  // EXCEPT for `_neuroworks/` machine state (job journals, reflections, etc.).
+  // Those are append-only audit records, not user knowledge — and EVERY job
+  // completion writes one. Invalidating the index on each of them created a
+  // feedback loop under concurrent load: 80 jobs → 80 index busts → every
+  // in-flight searchVault fell back to the synchronous 10-15s full-vault walk,
+  // blocking the event loop (load test: search p50 went 0.2s → 20s, with the
+  // server returning "fetch failed" on dispatch). Skipping invalidation here
+  // keeps the index hot during job storms; real user-note writes still bust it.
+  if (!isMachineStatePath(rel)) invalidateSearchCache();
+}
+
+// `_neuroworks/` (and its OS path-separator variants) is NeuroWorks's own
+// audit/state tree inside the vault — not user knowledge. Writes there must not
+// disturb the user-knowledge search index.
+function isMachineStatePath(rel: string): boolean {
+  const norm = rel.replace(/\\/g, "/").replace(/^\.?\//, "");
+  return norm === "_neuroworks" || norm.startsWith("_neuroworks/");
+}
+
+// Copy a binary file INTO the vault. PDFs, DOCXs, images — anything the
+// text-based writeVaultFile can't safely scan or write. Skips the secret
+// scan (binaries aren't strings; we'd produce garbage hits) but still
+// applies the inside-vault containment check so a path-traversal arg
+// can't escape D:\Main brain.
+//
+// Returns the absolute path written so the caller can compute file size,
+// log provenance, etc.
+export function importBinaryIntoVault(rel: string, sourceAbsPath: string): { rel: string; abs: string; size: number } {
+  const full = resolve(VAULT, rel);
+  ensureInsideVault(full);
+  const st = statSync(sourceAbsPath);
+  if (!st.isFile()) throw new Error(`source is not a file: ${sourceAbsPath}`);
+  mkdirSync(resolve(full, ".."), { recursive: true });
+  // copyFileSync preserves the original — the agent's contract with the
+  // user is COPY-not-MOVE for "save to my vault" unless the user
+  // explicitly asks to remove the original.
+  copyFileSync(sourceAbsPath, full);
+  invalidateSearchCache();
+  return { rel, abs: full, size: st.size };
+}
+
+// Cheap "how many local commits haven't reached origin" probe. Useful
+// when commitAndPush silently timed out — the local commit is durable
+// but the user has no visual signal that origin is behind. Surfaced
+// via vaultCommitStats() → /api/status. Returns null when status
+// itself fails (e.g. vault is not a git repo, or a transient lock).
+export async function vaultAheadBy(): Promise<number | null> {
+  try {
+    const git = simpleGit(VAULT);
+    const status = await git.status();
+    return typeof status.ahead === "number" ? status.ahead : null;
+  } catch { return null; }
+}
+
+// Push the current HEAD without committing. Used to retry a failed push when
+// the prior commitAndPush left commits locally but couldn't reach origin (the
+// most common case: large pack history times out the first push, but a retry
+// from a now-warm git connection works). Same 15s timeout to keep the UI
+// responsive.
+export async function pushOnly(): Promise<{ pushed: boolean; error?: string; aheadBy?: number }> {
+  // Stale-lock sweep — defensive cleanup before touching the repo. Cheap;
+  // does nothing if no lock exists or the lock is recent.
+  clearStaleVaultLock();
+  const git = simpleGit(VAULT);
+  let aheadBy: number | undefined;
+  try {
+    const status = await git.status();
+    aheadBy = status.ahead;
+  } catch { /* tolerate */ }
+  try {
+    await raceTimeout(git.push("origin", "HEAD"), 15_000, "push timeout");
+    return { pushed: true, aheadBy };
+  } catch (e: any) {
+    return { pushed: false, error: String(e?.message ?? e), aheadBy };
+  }
 }
 
 export async function commitAndPush(message: string) {
+  // Stale-lock sweep — removes a left-over `.git/index.lock` from a previously
+  // crashed git process so this commit doesn't fail with the "Unable to
+  // create '.git/index.lock': File exists" error. Cheap and bounded; if the
+  // lock is fresh OR EBUSY (real git op in flight) we leave it alone.
+  clearStaleVaultLock();
   const git = simpleGit(VAULT);
-  await git.add(".");
+  // Retry once on lock-conflict — if a real git op held the lock and finished
+  // between our sweep and the .add() call, the second attempt sees no lock.
+  // Anything more aggressive than one retry risks masking real concurrent
+  // commits, so we stop there.
+  try {
+    await git.add(".");
+  } catch (e: any) {
+    const msg = String(e?.message ?? e);
+    if (/index\.lock|File exists/.test(msg)) {
+      console.warn("[vault] git.add hit lock; sweeping + retrying once");
+      clearStaleVaultLock();
+      await git.add(".");
+    } else {
+      throw e;
+    }
+  }
   const before = await git.status();
   if (before.staged.length === 0 && before.created.length === 0 && before.modified.length === 0 && before.deleted.length === 0 && before.renamed.length === 0) {
     return { committed: false };
@@ -74,7 +306,15 @@ export async function commitAndPush(message: string) {
     }
   }
 
-  // Stale-ref recovery path also bounded.
+  // Stale-ref recovery path. DEFAULT OFF — when origin/main is divergent (the
+  // common case for a private vault that hasn't been pushed yet), `pull --rebase`
+  // rewinds local commits and replays them, which can drop into a paused
+  // interactive-rebase state and cause every subsequent journal commit to
+  // re-trigger the same loop. The local commit is already durable; let the user
+  // reconcile the remote manually. Set CLAWBOT_AUTO_REBASE_RECOVERY=1 to opt in.
+  if (process.env.CLAWBOT_AUTO_REBASE_RECOVERY !== "1") {
+    return { committed: true, pushed: false, error: `push rejected; auto-rebase disabled (set CLAWBOT_AUTO_REBASE_RECOVERY=1 to enable). Original error: ${String(pushErr.message ?? pushErr).slice(0, 200)}` };
+  }
   try {
     return await raceTimeout(rebaseWithSidesteppedConflicts(git, String(pushErr.message ?? pushErr)), PUSH_TIMEOUT_MS * 2, "rebase timeout");
   } catch (e: any) {
@@ -159,9 +399,236 @@ function parseUntrackedConflicts(stderr: string): string[] {
   return paths;
 }
 
-export function searchVault(query: string, limit = 50): { path: string; line: number; preview: string }[] {
+// In-process search cache. The full disk walk + per-file read can take
+// 10-15s on a multi-thousand-note vault (measured on D:\Main brain\), and a
+// single chat task hits searchVault multiple times (triage, planner, research
+// primitives). A 60s TTL keyed by (query, limit) collapses repeat calls
+// inside one task into a single walk while still picking up new notes on
+// the next task. Bust on every vault write so a just-saved note shows up
+// on the very next search.
+type SearchHit = { path: string; line: number; preview: string };
+const SEARCH_CACHE = new Map<string, { at: number; results: SearchHit[] }>();
+const SEARCH_CACHE_TTL_MS = Number(process.env.CLAWBOT_VAULT_SEARCH_TTL_MS ?? "60000");
+const SEARCH_CACHE_MAX = 200;
+
+function invalidateSearchCache() {
+  SEARCH_CACHE.clear();
+  // Inverted index is independent of the SEARCH_CACHE; bust both on the
+  // same signal so vault.search and the MiniSearch path can't disagree
+  // about what's in the vault.
+  invalidateIndex();
+}
+
+// External-edit detection. The cache is invalidated whenever
+// writeVaultFile runs, which covers every NeuroWorks-side write — but
+// the user editing a note directly in Obsidian (or any other tool) is
+// invisible to that path. fs.watch recursively notices those edits and
+// busts the cache so the next searchVault picks up the change.
+//
+// Windows: fs.watch supports { recursive: true } natively (ReadDirectoryChangesW).
+// We catch + log any setup errors instead of crashing — a missing
+// watcher just degrades to the 60s TTL behaviour, not a server outage.
+//
+// We also coalesce: an Obsidian save typically fires multiple events
+// (write, rename for autosave, etc.) within milliseconds. A single
+// invalidation per burst is enough.
+let vaultWatcher: FSWatcher | null = null;
+let watchInvalidateTimer: NodeJS.Timeout | null = null;
+const WATCH_COALESCE_MS = 250;
+
+export function startVaultWatcher(): void {
+  if (vaultWatcher) return;
+  if (process.env.CLAWBOT_VAULT_WATCH === "0") {
+    console.log("[vault] fs.watch disabled via CLAWBOT_VAULT_WATCH=0 — search cache only busts on server-side writes");
+    return;
+  }
+  try {
+    vaultWatcher = watch(VAULT, { recursive: true, persistent: false }, (eventType, filename) => {
+      if (!filename) return;
+      const name = String(filename);
+      // Filter to .md/.canvas changes only — we don't care about images,
+      // PDFs, or .git internals for search-cache purposes.
+      if (!/\.(md|canvas)$/i.test(name)) return;
+      // Skip the .git directory — git operations (during commitAndPush
+      // / pull) fire a flood of events that would invalidate the cache
+      // for no useful reason.
+      if (name.startsWith(".git") || name.includes(`${sep}.git${sep}`) || name.includes("/.git/")) return;
+      // Skip `_neuroworks/` — our own audit/journal tree. Every job completion
+      // writes a note there; letting the watcher invalidate on those recreates
+      // the same index-bust storm writeVaultFile now avoids (see isMachineStatePath).
+      if (name.startsWith("_neuroworks") || name.includes(`${sep}_neuroworks${sep}`) || name.includes("/_neuroworks/")) return;
+      if (watchInvalidateTimer) clearTimeout(watchInvalidateTimer);
+      watchInvalidateTimer = setTimeout(() => {
+        watchInvalidateTimer = null;
+        // Skip invalidation while the index is mid-build. Subst-mapped D:
+        // on Windows fires spurious events for files we're reading, which
+        // creates an invalidation/build loop where the index never
+        // stabilises. Real external writes still come through after the
+        // build window closes — chokidar would mark them but our debounce
+        // window already coalesces near-simultaneous events.
+        if (isBuildInProgress()) return;
+        invalidateSearchCache();
+      }, WATCH_COALESCE_MS);
+    });
+    vaultWatcher.on("error", (e: any) => {
+      console.warn(`[vault] watcher error: ${e?.message ?? e}`);
+    });
+    console.log(`[vault] watching ${VAULT} for external edits`);
+    // Kick off an initial index build in the background so the FIRST
+    // search after startup doesn't pay the build cost on the request path.
+    void buildIndex(VAULT);
+  } catch (e: any) {
+    console.warn(`[vault] could not start watcher (${e?.message ?? e}) — falling back to ${SEARCH_CACHE_TTL_MS}ms TTL`);
+    vaultWatcher = null;
+  }
+}
+
+export function stopVaultWatcher(): void {
+  if (watchInvalidateTimer) { clearTimeout(watchInvalidateTimer); watchInvalidateTimer = null; }
+  if (vaultWatcher) { try { vaultWatcher.close(); } catch { /* tolerate */ } vaultWatcher = null; }
+}
+
+// Periodic pull --rebase so Obsidian edits made on ANOTHER machine (or via
+// Obsidian's git plugin pushing to the same remote) sync into the local
+// vault that clawbot reads from. Without this, clawbot only sees changes
+// that landed locally — a remote Obsidian save needs a manual git pull
+// before clawbot can search / read it.
+//
+// Defaults: every CLAWBOT_VAULT_PULL_MIN minutes (default 5). Skipped when:
+//   • CLAWBOT_VAULT_PULL=0 (opt-out)
+//   • Local has uncommitted changes (a pull would conflict with in-flight work)
+//   • A push is currently in flight (avoid racing simpleGit calls)
+//   • Vault path doesn't exist (drive unmounted)
+//
+// The pull itself is time-boxed at 10s — a stalled remote shouldn't block
+// the scheduler from running again.
+let vaultPullTimer: NodeJS.Timeout | null = null;
+let lastPullAt = 0;
+let lastPullResult: { ok: boolean; at: string; details?: string } = { ok: false, at: "never" };
+const PULL_TIMEOUT_MS = 10_000;
+
+export async function pullFromOrigin(): Promise<{ ok: boolean; reason?: string; pulled?: boolean }> {
+  if (!existsSync(VAULT)) {
+    return { ok: false, reason: `vault path ${VAULT} not present (drive unmounted?)` };
+  }
+  const git = simpleGit(VAULT);
+  try {
+    const status = await git.status();
+    if (status.modified.length + status.created.length + status.deleted.length + status.staged.length + status.renamed.length > 0) {
+      return { ok: false, reason: "local has uncommitted changes; pull skipped to avoid conflicts" };
+    }
+    await raceTimeout(git.fetch("origin"), PULL_TIMEOUT_MS, "fetch timeout");
+    const before = (await git.revparse(["HEAD"])).trim();
+    await raceTimeout(git.pull("origin", "HEAD", { "--rebase": "true" }), PULL_TIMEOUT_MS, "pull timeout");
+    const after = (await git.revparse(["HEAD"])).trim();
+    const pulled = before !== after;
+    lastPullAt = Date.now();
+    lastPullResult = { ok: true, at: new Date().toISOString(), details: pulled ? `pulled ${before.slice(0, 7)} → ${after.slice(0, 7)}` : "already up-to-date" };
+    if (pulled) invalidateSearchCache();
+    return { ok: true, pulled };
+  } catch (e: any) {
+    const msg = String(e?.message ?? e);
+    lastPullAt = Date.now();
+    lastPullResult = { ok: false, at: new Date().toISOString(), details: msg.slice(0, 200) };
+    return { ok: false, reason: msg };
+  }
+}
+
+export function startVaultPullScheduler(): void {
+  if (vaultPullTimer) return;
+  if (process.env.CLAWBOT_VAULT_PULL === "0") {
+    console.log("[vault] periodic pull disabled via CLAWBOT_VAULT_PULL=0");
+    return;
+  }
+  const minutes = Math.max(1, Number(process.env.CLAWBOT_VAULT_PULL_MIN ?? "5"));
+  const ms = minutes * 60_000;
+  vaultPullTimer = setInterval(() => {
+    void pullFromOrigin().catch((e: any) => console.warn(`[vault] pull error: ${e?.message ?? e}`));
+  }, ms);
+  vaultPullTimer.unref?.();
+  // Fire one immediately so a fresh-start server catches up before doing work.
+  void pullFromOrigin().catch(() => { /* logged inside */ });
+  console.log(`[vault] periodic pull armed (every ${minutes}m, opt out with CLAWBOT_VAULT_PULL=0)`);
+}
+
+export function stopVaultPullScheduler(): void {
+  if (vaultPullTimer) { clearInterval(vaultPullTimer); vaultPullTimer = null; }
+}
+
+export function getVaultPullStatus(): { lastPullAt: number; lastPullResult: typeof lastPullResult } {
+  return { lastPullAt, lastPullResult };
+}
+
+// Filename-only vault scan. Walks the vault tree but ONLY checks the .md
+// filename for the query — never opens the file. Fast (~50-200ms on a multi-
+// thousand-note vault) vs ~10-15s for full-content searchVault().
+//
+// Used by the triage block ("does this user already have notes on X?") where
+// we don't need real matches — we just need a yes/no signal that the topic
+// is present in the vault. Content search is overkill there; the slow walk
+// was the root cause of the 11s gap measured before this fix.
+export function searchVaultFilenames(query: string, limit = 5): SearchHit[] {
+  // Triage path — silently return [] when the vault is unreachable so we
+  // don't break the planner's "do we have notes on X?" probe. The actual
+  // search path (searchVault) still throws so the user sees the cause.
+  if (!existsSync(VAULT)) return [];
   const q = query.toLowerCase();
-  const out: { path: string; line: number; preview: string }[] = [];
+  // Normalise hyphens/underscores in filenames so "vault edit" matches
+  // "vault-edit.md" / "vault_edit.md". Multi-token queries require every
+  // token to appear in the filename.
+  const tokens = q.replace(/[-_\s]+/g, " ").split(" ").filter(Boolean);
+  if (tokens.length === 0) return [];
+  const out: SearchHit[] = [];
+  function walk(dir: string) {
+    if (out.length >= limit) return;
+    let entries: any[] = [];
+    try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      if (out.length >= limit) return;
+      if (HIDDEN_PREFIXES.some(p => e.name.startsWith(p))) continue;
+      const full = join(dir, e.name);
+      if (e.isDirectory()) { walk(full); continue; }
+      if (!e.name.endsWith(".md")) continue;
+      const normalised = e.name.slice(0, -3).toLowerCase().replace(/[-_]+/g, " ");
+      if (tokens.every(t => normalised.includes(t))) {
+        out.push({
+          path: relative(VAULT, full).split(sep).join("/"),
+          line: 0,
+          preview: e.name,
+        });
+      }
+    }
+  }
+  walk(VAULT);
+  return out;
+}
+
+export function searchVault(query: string, limit = 50): SearchHit[] {
+  assertVaultExists();
+  const q = query.toLowerCase();
+  const key = `${q}|${limit}`;
+  const hit = SEARCH_CACHE.get(key);
+  if (hit && Date.now() - hit.at < SEARCH_CACHE_TTL_MS) {
+    return hit.results;
+  }
+  // Fast path — MiniSearch inverted index. Falls back to the legacy walk
+  // when the index hasn't built yet (cold start) or when MiniSearch declines
+  // a query. Index builds lazily; first call after a cache invalidation
+  // rebuilds it before serving.
+  if (!indexStats().ready) {
+    void buildIndex(VAULT);
+  } else {
+    const indexed = searchIndex(query, VAULT, limit);
+    if (indexed && indexed.length > 0) {
+      const results = indexed.map(h => ({ path: h.path, line: h.line, preview: h.preview }));
+      SEARCH_CACHE.set(key, { at: Date.now(), results });
+      return results;
+    }
+    // Index returned [] — let the legacy walk run too, since MiniSearch's
+    // AND combiner can be stricter than substring matching. If the walk
+    // also returns nothing the user gets the same answer either way.
+  }
+  const out: SearchHit[] = [];
   function walk(dir: string) {
     if (out.length >= limit) return;
     let entries: any[] = [];
@@ -186,6 +653,13 @@ export function searchVault(query: string, limit = 50): { path: string; line: nu
     }
   }
   walk(VAULT);
+  // Cap the cache so a long-running worker doesn't bleed memory on a wide
+  // range of unique queries. Drop the oldest entry when over the cap.
+  if (SEARCH_CACHE.size >= SEARCH_CACHE_MAX) {
+    const oldest = [...SEARCH_CACHE.entries()].sort((a, b) => a[1].at - b[1].at)[0];
+    if (oldest) SEARCH_CACHE.delete(oldest[0]);
+  }
+  SEARCH_CACHE.set(key, { at: Date.now(), results: out });
   return out;
 }
 

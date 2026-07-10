@@ -1,0 +1,25 @@
+# Keep the build context small + never bake state/secrets into the image.
+node_modules
+**/node_modules
+.git
+.neuroworks
+_devlog.txt
+_weblog.txt
+**/dist
+**/.vite
+**/*.log
+
+# Local runtime state / secrets — mounted as volumes at runtime, never copied.
+.env
+*.env
+!.env.example
+
+# Test-harness artifacts + scratch output (large, not needed in the image).
+server/_*-harness*.md
+server/_*.out
+server/page1.png
+server/eng.traineddata
+reflection_dump.json
+
+# Vault is a mounted volume, never part of the image.
+data/vault

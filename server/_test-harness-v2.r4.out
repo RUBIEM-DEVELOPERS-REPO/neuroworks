@@ -1,0 +1,111 @@
+# Test harness v2 run :: v2-r4 :: 2026-05-20T16:37:05.658Z
+Server:        http://127.0.0.1:7471
+Model:         qwen2.5:3b
+OpenRouter:    enabled (openai/gpt-oss-20b:free)
+
+> date (what's the date today...)
+  0.1s :: A  -> A
+> bigmath (what is 137 * 24...)
+  0s :: A  -> A
+> rag (explain RAG retrieval augmented generation...)
+  39.4s :: A  -> A
+> who-dario (who is dario amodei...)
+  44.8s :: B  -> B
+> vault-list5 (list 5 notes from my vault inbox folder...)
+  104.2s :: A  -> A
+> vault-ts (search my vault for notes mentioning typescript...)
+  0.3s :: B+  -> B+
+> rag-best (research how RAG systems handle citation grounding...)
+  ERROR: poll timeout for 3db11284-5353-46ba-8b0c-3c6086eb22b6
+> llm-compare (compare local LLM inference with cloud APIs and gi...)
+  ERROR: poll timeout for 3303b811-0c86-4ba2-8955-f3684547e7c1
+| id | tier | target | elapsed | content | time | FINAL |
+|---|---|---|---|---|---|---|
+| date | trivial | 5s | 0.1s | A | 0 | **A** |
+| bigmath | trivial | 5s | 0s | A | 0 | **A** |
+| rag | research-light | 60s | 39.4s | A | 0 | **A** |
+| who-dario | research-light | 60s | 44.8s | B | 0 | **B** |
+| vault-list5 | multi-step | 120s | 104.2s | A | 0 | **A** |
+| vault-ts | multi-step | 90s | 0.3s | B+ | 0 | **B+** |
+| rag-best | heavy | undefineds | -1s | F | 0 | **F** |
+| llm-compare | heavy | undefineds | -1s | F | 0 | **F** |
+
+Summary: 5 strictly above B - 1 at B - 2 below B / total 8
+
+## Outputs
+
+### date - what's the date today
+grade: **A** (content A, time penalty 0) - 0.1s vs 5s target
+
+```
+Today is Wednesday, May 20, 2026.
+```
+
+### bigmath - what is 137 * 24
+grade: **A** (content A, time penalty 0) - 0s vs 5s target
+
+```
+137 * 24 = 3288
+```
+
+### rag - explain RAG retrieval augmented generation
+grade: **A** (content A, time penalty 0) - 39.4s vs 60s target
+plan: 1 step(s) - research.deep=ok/37564ms
+
+```
+**Retrieval‑Augmented Generation (RAG)** is a two‑stage architecture that makes large‑language‑model (LLM) answers more factual and up‑to‑date by first **retrieving** relevant external information and then **generating** a response that is grounded in that material.
+
+| Stage | What happens | Key components |
+|-------|--------------|----------------|
+| **Retrieval** | The user query is encoded into a vector and matched against embeddings of a pre‑indexed knowledge base (documents, APIs, databases, etc.). The most similar chunks are returned. | • External Knowledge Source  <br>• Text chunking & preprocessing  <br>• Embedding model  <br>• Vector database  <br>• Query encoder  <br>• Retriever |
+
+```
+
+### who-dario - who is dario amodei
+grade: **B** (content B, time penalty 0) - 44.8s vs 60s target
+plan: 1 step(s) - research.deep=ok/23972ms
+
+```
+I’m sorry, but the sources you provided do not contain any information about Dario Amodei. None of the listed documents or web pages mention his identity, background, or work, so I can’t give a evidence‑based answer. If you can supply relevant material that discusses him, I’ll be happy to synthesize it for you.
+```
+
+### vault-list5 - list 5 notes from my vault inbox folder
+grade: **A** (content A, time penalty 0) - 104.2s vs 120s target
+skill: list-making (score 29)
+plan: 4 step(s) - vault.list=ok/2ms, quality.check=ok/25487ms, security.scan=ok/0ms, peer.review=ok/11469ms
+
+```
+1. 1773731595_eoi_training_ai_260316_110157 (1).pdf – a PDF containing training materials for the EOI AI project dated 26 Mar 2016. [3]  
+2. 2026-04-27-aiia-pc-inventory.md – a markdown file listing the current PC inventory for AIIA as of 27 Apr 2026. [3]  
+3. 2026-05-18-clawbot-update.md – an update log for Clawbot, detailing recent feature enhancements and bug fixes. [3]  
+4. 2026-05-19-1773731595-eoi-training-ai-260316-110157-1.md – a markdown version of the EOI AI training document, refreshed on 19 May 2026. [3]  
+5. 2026-05-19-202605171116-research-check-in-my-downloads-for-aiia-referen.md – a research‑check‑in note reviewing downloaded references for AIIA, dated 19 May 2026. [3]
+```
+
+### vault-ts - search my vault for notes mentioning typescript
+grade: **B+** (content B+, time penalty 0) - 0.3s vs 90s target
+
+```
+Found **6** notes mentioning **typescript**:
+
+1. **decisions.md** (line 23) — **Decision:** The cloud-side `clawbot` is built as a small standalone TypeScript repo that runs in GitHub Actions, not as an openclaw plugin. Openclaw stays in 
+2. **_knowledge/downloads/files/Documents/dpa_system_testing_strategy_for_claude.md** (line 502) — If using **Node.js / TypeScript**:
+3. **_neuroworks/jobs/2026-05-20-search-the-knowledge-base-09a9293a.md** (line 26) — "query": "typescript"
+4. **_neuroworks/jobs/2026-05-20-search-the-knowledge-base-4f62cf7b.md** (line 26) — "query": "typescript"
+5. **_neuroworks/jobs/2026-05-20-search-the-knowledge-base-50e56c6e.md** (line 26) — "query": "typescript"
+6. **_
+```
+
+### rag-best - research how RAG systems handle citation grounding and give me 3 best practices
+grade: **F** (content F, time penalty 0) - -1s vs undefineds target
+
+```
+poll timeout for 3db11284-5353-46ba-8b0c-3c6086eb22b6
+```
+
+### llm-compare - compare local LLM inference with cloud APIs and give me 3 trade-offs each way
+grade: **F** (content F, time penalty 0) - -1s vs undefineds target
+
+```
+poll timeout for 3303b811-0c86-4ba2-8955-f3684547e7c1
+```

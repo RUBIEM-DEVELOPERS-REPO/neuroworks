@@ -1,0 +1,6 @@
+# Keep shell hooks + scripts as LF. On Windows, Git's autocrlf can rewrite them
+# to CRLF, which breaks the `#!/bin/sh` shebang and makes git silently skip the
+# hook (a secret-guard that doesn't run is worse than none). Scoped narrowly so
+# this does NOT renormalize the rest of the repo.
+tools/git-hooks/* text eol=lf
+*.sh text eol=lf

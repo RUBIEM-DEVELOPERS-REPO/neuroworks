@@ -3,37 +3,183 @@ import { existsSync } from "node:fs";
 import { resolve, basename } from "node:path";
 import { simpleGit } from "simple-git";
 import { templates, roles, type Template } from "../lib/templates.js";
-import { newJob, getJob, listJobs, runJob } from "../lib/jobs.js";
+import { newJob, getJob, listJobs, runJob, SERVER_BOOT_AT } from "../lib/jobs.js";
+import { loadJobById, loadJobsInWindow, asJob } from "../lib/job-store.js";
 import { config } from "../config.js";
 import { dispatchWorkflow, recentCommits, openPRs, openIssues, readme, octokit } from "../lib/github.js";
-import { writeVaultFile, commitAndPush, searchVault } from "../lib/vault.js";
+import { writeVaultFile, commitAndPush, searchVault, VaultUnreachable } from "../lib/vault.js";
 import { ollamaGenerate } from "../lib/ollama.js";
 import { syncDownloads } from "../lib/sync-downloads.js";
 import { planAndExecute, executePlan } from "../lib/agent.js";
+import { requireLayer, callerOf, layerOfRole } from "../lib/access.js";
+import { personaDepartment } from "./workforce.js";
 import { loadCustomTemplates, saveCustomTemplate, findCustomTemplate, bumpRunCount, slugify, type CustomTemplate } from "../lib/custom-templates.js";
-import { getActivePersona, personaSystemSuffix } from "../lib/personas.js";
+import { loadPersonas, getActivePersona, personaSystemSuffix } from "../lib/personas.js";
+import { classifyCustomTemplate, type TemplateRole } from "../lib/template-classifier.js";
+import { findPrimitive } from "../lib/primitives.js";
 
 export const templatesRouter = Router();
 
 const NEEDS_GITHUB = new Set(["summarize-repo", "run-digest", "publish-folder"]);
 
 templatesRouter.get("/", (_req, res) => {
+  // Custom templates persist with role: "Custom" because save-time didn't
+  // know which lane they belonged to. We re-classify on read so the UI
+  // shows them under Engineering / Knowledge / Operations / Insights
+  // when the id + title + description match a known lane. Unclassifiable
+  // saves still fall through to "Custom" for discoverability.
   const custom = loadCustomTemplates().map(c => ({
-    id: c.id, role: "Custom" as const, title: c.title, description: c.description,
-    icon: "saved", agent: "clawbot",
-    inputs: [], requiresApproval: false, estimateSeconds: 30,
-    runCount: c.runCount, lastRunAt: c.lastRunAt,
+    id: c.id,
+    role: classifyCustomTemplate(c),
+    title: c.title,
+    description: c.description,
+    icon: "saved",
+    agent: "clawbot",
+    inputs: [],
+    requiresApproval: false,
+    estimateSeconds: 30,
+    runCount: c.runCount,
+    lastRunAt: c.lastRunAt,
   }));
-  const allRoles = roles.map(r => r.id === "Custom" ? { ...r, count: custom.length } : r);
+  // Recount every role with the re-classified customs folded in. Built-in
+  // templates already have correct roles; we just need to add the custom
+  // contribution per bucket.
+  const customByRole: Record<TemplateRole, number> = { Engineering: 0, Knowledge: 0, Operations: 0, Insights: 0, Custom: 0 };
+  for (const c of custom) customByRole[c.role as TemplateRole]++;
+  const allRoles = roles.map(r => ({ ...r, count: (r.count ?? 0) + (customByRole[r.id as TemplateRole] ?? 0) }));
   res.json({ roles: allRoles, templates: [...templates, ...custom] });
 });
 
-templatesRouter.get("/jobs", (_req, res) => res.json({ jobs: listJobs() }));
+// Jobs feed for the Tasks / Reports pages. MERGES the in-memory jobs with the
+// persisted journal so reports SURVIVE a server restart / tsx-watch reload —
+// previously this returned only the in-memory map (RECENT cap, wiped on
+// reload), so scheduled runs and any older task had "no report" even though the
+// record was on disk. In-memory wins on id collision (it's the freshest state).
+// Staff-layer sessions see ONLY their department's work (plus org-general
+// jobs with no persona). Departments are inferred from the persona role/id via
+// the same rules the Workforce page uses, so the two views always agree.
+// Machine callers and admin+ sessions see everything.
+function filterJobsForCaller(req: any, jobs: any[]): any[] {
+  try {
+    const u = callerOf(req);
+    if (!u || layerOfRole(u.role) !== "staff") return jobs;
+    const dept = String(u.department ?? "").trim().toLowerCase();
+    if (!dept) return jobs; // staff without a department set → org-general view
+    const personas: any[] = loadPersonas().personas ?? [];
+    const byName = new Map(personas.map((p: any) => [String(p.name).toLowerCase(), p]));
+    return jobs.filter((j: any) => {
+      const pn = String(j.personaName ?? "").toLowerCase();
+      if (!pn) return true; // no persona = org-general work
+      const p = byName.get(pn);
+      const d = p ? String(personaDepartment(p.role ?? "", p.id ?? "")) : "General";
+      return d === "General" || d.toLowerCase() === dept;
+    });
+  } catch { return jobs; }
+}
+
+// Journal-read cache for the jobs feed. The Tasks page polls every 3s and
+// each poll was re-reading 30 days of JSONL from disk (security/perf sweep
+// 2026-07-04). In-memory jobs stay LIVE every poll — only the persisted slice
+// is cached, and 4s staleness on restart-survived history is invisible.
+let jobsFeedCache: { at: number; persisted: ReturnType<typeof asJob>[] } | null = null;
+const JOBS_FEED_CACHE_MS = 4000;
+
+templatesRouter.get("/jobs", (_req, res) => {
+  const mem = listJobs();
+  const seen = new Set(mem.map(j => j.id));
+  // Look back 30 days of persisted records — enough for the Reports history
+  // without scanning the whole journal. asJob() hydrates answer + plan so each
+  // row deep-links to a renderable report.
+  const windowStart = Date.now() - 30 * 24 * 60 * 60 * 1000;
+  let persisted: ReturnType<typeof asJob>[] = [];
+  try {
+    if (jobsFeedCache && Date.now() - jobsFeedCache.at < JOBS_FEED_CACHE_MS) {
+      persisted = jobsFeedCache.persisted.filter(j => !seen.has(j.id));
+    } else {
+      const fresh = loadJobsInWindow(windowStart, Date.now() + 60_000).map(asJob);
+      jobsFeedCache = { at: Date.now(), persisted: fresh };
+      persisted = fresh.filter(j => !seen.has(j.id));
+    }
+  } catch { /* tolerate — fall back to in-memory only */ }
+  // Dedup persisted-vs-persisted too (append-only journal can hold running→
+  // succeeded for one id); keep the last (latest status) per id.
+  const byId = new Map<string, ReturnType<typeof asJob>>();
+  for (const j of persisted) byId.set(j.id, j);
+  const all = [...mem, ...byId.values()].sort((a, b) => b.startedAt.localeCompare(a.startedAt));
+  // Serve only the 150 MOST RECENT to the Tasks/Reports feed — keeps the page
+  // fast and focused. Everything older still lives on disk (the job journal) and
+  // is surfaced through the vault + Knowledge (reflections + journaled notes),
+  // so nothing is lost — it's just not loaded into the live list.
+  const MAX_FEED = Number(process.env.CLAWBOT_TASKS_FEED_LIMIT ?? "150");
+  const visible = filterJobsForCaller(_req, all);
+  const jobs = visible.slice(0, MAX_FEED);
+  res.json({ jobs, total: visible.length, limit: MAX_FEED, truncated: visible.length > MAX_FEED });
+});
 
 templatesRouter.get("/jobs/:id", (req, res) => {
   const j = getJob(req.params.id);
-  if (!j) return res.status(404).json({ error: "not found" });
-  res.json(j);
+  if (j) return res.json(j);
+  // Fallback to the persisted journal — covers the Calendar's day-detail
+  // panel linking to old jobs that were evicted from the in-memory cap,
+  // server-restart cases, and direct deep-links into /results/<id> for
+  // anything older than the last few dozen jobs.
+  const rec = loadJobById(req.params.id);
+  if (rec) {
+    // asJob() hydrates the persisted record into the Job shape the UI
+    // expects, including answer + plan summary so the Result page renders
+    // the actual report. log[] is empty (we don't persist log lines) and
+    // runs[] is minimal (just tool + duration + ok flag).
+    return res.json(asJob(rec));
+  }
+  return res.status(404).json({
+    error: "not found",
+    serverBootAt: SERVER_BOOT_AT,
+    hint: "Job not found in memory or in the persisted journal. If this was a recent task, retry it — otherwise the journal may have been rotated.",
+  });
+});
+
+// Retry a failed job — replays the same task + inputs through the general-task
+// pipeline. The original failed job stays in the journal so the customer has
+// the audit trail. The new job is fully fresh — plan, execution, synth all
+// run again, so transient failures (LLM hiccup, network blip) get a clean
+// second shot. We require the original to be in a terminal state (succeeded,
+// failed, rejected); replaying a running job would create a duplicate.
+templatesRouter.post("/jobs/:id/retry", async (req, res) => {
+  const old = getJob(req.params.id);
+  if (!old) return res.status(404).json({ error: "job not found" });
+  if (old.status !== "failed" && old.status !== "rejected" && old.status !== "succeeded") {
+    return res.status(409).json({ error: `cannot retry job in status "${old.status}" — wait for it to finish first` });
+  }
+  const task = String((old.inputs as any)?.task ?? "").trim();
+  if (!task) return res.status(400).json({ error: "original job has no recorded task — cannot retry" });
+
+  // Spin up a fresh job and run the same general-task agent loop. We mark it
+  // with `retryOf: <old id>` so the UI / journal can trace the lineage.
+  const job = newJob("insights:general-task");
+  job.template = "general-task";
+  job.title = `Retry: ${task.slice(0, 60)}`;
+  job.inputs = { task, save_as_template: false, retryOf: req.params.id };
+  res.json({ jobId: job.id, retryOf: req.params.id });
+
+  void runJob(job, async (push, progress) => {
+    push(`retry of job ${req.params.id} (${old.status})`);
+    const persona = getActivePersona();
+    const suffix = personaSystemSuffix(persona);
+    const r = await planAndExecute(task, push, (patch) => progress(patch as Record<string, unknown>), { personaSystemSuffix: suffix, workMode: persona?.workMode });
+    return {
+      answer: r.answer,
+      plan: r.plan,
+      runs: r.runs,
+      review: r.review,
+      quality: r.quality,
+      security: r.security,
+      budgets: r.budgets,
+      subagentTimings: r.subagentTimings,
+      skillUsed: r.skillUsed,
+      skillScore: r.skillScore,
+      humanRequest: r.humanRequest,
+    };
+  });
 });
 
 templatesRouter.post("/run/:id", async (req, res) => {
@@ -62,6 +208,10 @@ templatesRouter.post("/run/:id", async (req, res) => {
   job.title = tpl.title;
   job.inputs = inputs;
   job.requiresApproval = tpl.requiresApproval;
+  // Schedule-fired runs carry a marker header; the tag routes their results
+  // into the vault journal (scheduled progress reports belong in the brain).
+  const scheduledBy = req.get("x-clawbot-scheduled");
+  if (scheduledBy) job.scheduledBy = scheduledBy;
 
   if (tpl.requiresApproval) {
     job.status = "awaiting-approval";
@@ -76,29 +226,106 @@ templatesRouter.post("/run/:id", async (req, res) => {
       // Persona-derived starter templates ship with an empty plan — they re-plan
       // each run against the active persona system suffix so output stays in role.
       // Saved-from-chat templates, by contrast, replay their concrete plan.
+      // Optional probe enrichment: callers (e.g. the stress harness) may pass
+      // a `contextHint` to give the run more framing than the terse origin.task
+      // carries. Absent → behaviour is unchanged. GATED TO PREPLAN BRANCH ONLY:
+      // empty-plan templates route through generalTaskRunner which re-plans
+      // every run — a longer task there expands planned scope and produced
+      // 74/84 timeouts + 4 catastrophic ~5400s outliers in the 2026-05-30
+      // sweep. The preplan branch replays a fixed plan, so richer task text
+      // there only enriches synthesis, not planning.
+      const contextHint = typeof inputs.contextHint === "string" ? inputs.contextHint.trim() : "";
       if (custom.plan.steps.length === 0 && custom.origin?.task) {
         return generalTaskRunner({ task: custom.origin.task, save_as_template: false }, push, progress);
       }
-      progress({ plan: custom.plan, runs: [], phase: "executing" });
-      const { runs } = await executePlan(custom.plan, push, (rs) => progress({ runs: [...rs] }));
-      return { fromCustom: custom.id, plan: custom.plan, runs, phase: "done" };
+      // Saved-plan customs go through planAndExecute with `preplan` so they
+      // get the same execute → synthesise → answer treatment as fresh
+      // ad-hoc tasks. Previously this branch returned raw {plan, runs, ...}
+      // JSON with no `answer` field, which surfaced to the customer as
+      // machine output.
+      const persona = getActivePersona();
+      const personaSuffix = personaSystemSuffix(persona);
+      const baseTask = custom.origin?.task ?? `Replay saved plan: ${custom.title}`;
+      const taskText = contextHint ? `${baseTask}\n\nContext: ${contextHint}` : baseTask;
+      const r = await planAndExecute(taskText, push, (patch) => progress(patch as Record<string, unknown>), {
+        personaSystemSuffix: personaSuffix,
+        preplan: custom.plan,
+        workMode: persona?.workMode,
+      });
+      return { ...r, fromCustom: custom.id };
     }
     return runner(tpl.id, inputs, push, progress);
   });
 });
 
-templatesRouter.post("/jobs/:id/approve", async (req, res) => {
+// Grade an arbitrary (task, answer) with the deliverable-aware quality grader.
+// Used by the all-templates stress harness: template replays go through the
+// `preplan` path which skips the in-line QA gate, so we score their output
+// here instead. Thin wrapper over the quality.check primitive.
+templatesRouter.post("/grade", async (req, res) => {
+  try {
+    const task = String(req.body?.task ?? "");
+    const answer = String(req.body?.answer ?? "");
+    const sources = req.body?.sources ? String(req.body.sources) : "";
+    const context = req.body?.context ? String(req.body.context) : "";
+    if (!task || !answer) return res.status(400).json({ error: "task and answer required" });
+    const prim = findPrimitive("quality.check");
+    if (!prim) return res.status(500).json({ error: "quality.check primitive not found" });
+    const r = await prim.handler({ task, answer, sources, context });
+    res.json(r);
+  } catch (e: any) {
+    res.status(500).json({ error: String(e?.message ?? e) });
+  }
+});
+
+templatesRouter.post("/jobs/:id/approve", requireLayer("admin"), async (req, res) => {
   const j = getJob(req.params.id);
   if (!j) return res.status(404).json({ error: "not found" });
   if (j.status !== "awaiting-approval") return res.status(409).json({ error: `cannot approve job in state '${j.status}'` });
   j.approvedAt = new Date().toISOString();
   j.log.push(`[${j.approvedAt}] approved`);
   res.json({ jobId: j.id, status: "approved" });
+
+  // Agent-requested Paynow payment: money moves ONLY here, after the operator
+  // clicked approve. The primitive queued the amount/description; approval
+  // executes the real gateway call and the pay link lands in the job result
+  // (visible on Reports + pollable via payment.paynow_poll).
+  if (j.kind === "payments:paynow-approval") {
+    void runJob(j, async (push) => {
+      const inputs: any = j.inputs ?? {};
+      push(`Approved — creating Paynow payment: ${Number(inputs.amount).toFixed(2)} (${String(inputs.description ?? "")})`);
+      const { createPaynowPayment } = await import("../lib/paynow.js");
+      const p = await createPaynowPayment({
+        amount: Number(inputs.amount),
+        description: String(inputs.description ?? ""),
+        reference: inputs.reference ? String(inputs.reference) : undefined,
+        email: inputs.email ? String(inputs.email) : undefined,
+      });
+      push(`Payment created — reference ${p.reference}.`);
+      return {
+        answer: `**Paynow payment created** (approved by operator)\n\n- Pay link (send to the client): ${p.browserUrl}\n- Reference: \`${p.reference}\`\n- Amount: ${p.amount.toFixed(2)}\n\nStatus can be checked any time with payment.paynow_poll or the Payments page.`,
+        payment: p,
+      };
+    });
+    return;
+  }
+  // Plan-approval job: execute the EXACT plan the user reviewed (no re-planning),
+  // then let planAndExecute finish the loop (synthesise → answer). Empty plans
+  // fall through to the normal plan/synth path.
+  if (j.plan) {
+    const task = j.task ?? j.title ?? "";
+    void runJob(j, async (push, progress) =>
+      planAndExecute(task, push, (patch) => progress(patch as Record<string, unknown>), {
+        personaSystemSuffix: j.personaSuffix,
+        preplan: j.plan && j.plan.steps.length > 0 ? j.plan : undefined,
+      }));
+    return;
+  }
   if (!j.template) return;
   void runJob(j, async (push) => runner(j.template!, j.inputs ?? {}, push));
 });
 
-templatesRouter.post("/jobs/:id/reject", async (req, res) => {
+templatesRouter.post("/jobs/:id/reject", requireLayer("admin"), async (req, res) => {
   const j = getJob(req.params.id);
   if (!j) return res.status(404).json({ error: "not found" });
   if (j.status !== "awaiting-approval") return res.status(409).json({ error: `cannot reject job in state '${j.status}'` });
@@ -130,16 +357,36 @@ templatesRouter.post("/intent", async (req, res) => {
   res.json({ source: "keyword", templateId: fallback?.id ?? null, inputs: {} });
 });
 
+// Lightweight stopword set so generic words ("the", "and", "is") don't
+// produce false-positive template matches. Without this, "compare X vs Y"
+// scored 1 hit against search-brain (because "the" is in "Search the
+// knowledge base") and got mis-routed to vault search.
+const KEYWORD_STOPWORDS = new Set([
+  "the", "and", "for", "with", "but", "not", "you", "this", "that", "from",
+  "into", "over", "under", "than", "then", "have", "has", "had", "was", "were",
+  "are", "all", "any", "some", "out", "off", "now", "new", "old", "one", "two",
+  "what", "when", "where", "why", "how", "who", "which", "let", "let's", "lets",
+  "can", "could", "would", "should", "will", "may", "might", "must", "shall",
+  "between", "without", "within", "about", "above", "below", "after", "before",
+]);
+
 function keywordMatch(text: string): Template | null {
   const q = text.toLowerCase();
   let best: { t: Template; s: number } | null = null;
   for (const t of templates) {
     const hay = (t.title + " " + t.description + " " + t.role).toLowerCase();
     let s = 0;
-    for (const w of q.split(/\s+/)) if (w.length > 2 && hay.includes(w)) s++;
+    for (const w of q.split(/\s+/)) {
+      if (w.length > 2 && !KEYWORD_STOPWORDS.has(w) && hay.includes(w)) s++;
+    }
     if (!best || s > best.s) best = { t, s };
   }
-  return best && best.s > 0 ? best.t : null;
+  // Require at least 2 substantive hits before claiming a match — single-word
+  // overlaps (e.g. just "files" hitting summarize-repo's description) are
+  // too weak to confidently route. The caller treats null as "let chat fall
+  // through to general-task", which is the correct behaviour for ad-hoc
+  // questions that don't fit a built-in template.
+  return best && best.s >= 2 ? best.t : null;
 }
 
 // Exported for chat router (avoids circular re-fetch)
@@ -156,6 +403,7 @@ async function runner(templateId: string, inputs: Record<string, unknown>, push:
     case "add-note":       return addNoteRunner(inputs, push);
     case "browse-vault":   return { redirect: "/knowledge" };
     case "sync-downloads": return syncDownloadsRunner(inputs, push);
+    case "daily-briefing": return dailyBriefingRunner(inputs, push, progress);
     case "general-task":   return generalTaskRunner(inputs, push, progress);
     default: throw new Error(`no runner for ${templateId}`);
   }
@@ -250,9 +498,36 @@ async function publishFolderRunner(inputs: Record<string, unknown>, push: (m: st
 async function searchBrainRunner(inputs: Record<string, unknown>, push: (m: string) => void) {
   const q = String(inputs.query);
   push(`searching vault for "${q}"`);
-  const results = searchVault(q);
+  let results;
+  try {
+    results = searchVault(q);
+  } catch (e: any) {
+    if (e instanceof VaultUnreachable) {
+      push(`vault unreachable: ${e.vaultPath}`);
+      const answer = `I couldn't search your vault — the configured path **${e.vaultPath}** doesn't resolve on this machine. Common causes: the drive is unmounted (e.g. D: was unplugged on Windows), the folder was renamed, or \`VAULT_PATH\` in \`.env\` doesn't match your actual vault. Mount the drive (or fix the path) and try again.`;
+      return { query: q, results: [], count: 0, vaultUnreachable: true, vaultPath: e.vaultPath, answer };
+    }
+    throw e;
+  }
   push(`${results.length} match${results.length === 1 ? "" : "es"}`);
-  return { query: q, results };
+  // Build a human-readable `answer` so consumers (chat UI, harness, journal)
+  // get a real summary instead of just a raw results array. Without this,
+  // anything that read `result.answer` saw `undefined` and fell back to the
+  // "On it — running..." chat ack.
+  let answer: string;
+  if (results.length === 0) {
+    answer = `No notes in your vault match **${q}**. Try a broader term, check the spelling, or add a note on this topic and search again.`;
+  } else {
+    const top = results.slice(0, 8);
+    const list = top.map((r, i) => {
+      const preview = r.preview.replace(/\s+/g, " ").trim().slice(0, 160);
+      return `${i + 1}. **${r.path}**${r.line ? ` (line ${r.line})` : ""} — ${preview}`;
+    }).join("\n");
+    const remaining = results.length - top.length;
+    const more = remaining > 0 ? `\n\n_… and ${remaining} more match${remaining === 1 ? "" : "es"}._` : "";
+    answer = `Found **${results.length}** note${results.length === 1 ? "" : "s"} mentioning **${q}**:\n\n${list}${more}`;
+  }
+  return { query: q, results, answer };
 }
 
 async function addNoteRunner(inputs: Record<string, unknown>, push: (m: string) => void) {
@@ -270,22 +545,23 @@ async function addNoteRunner(inputs: Record<string, unknown>, push: (m: string) 
   return { path: rel, ...r };
 }
 
-async function generalTaskRunner(inputs: Record<string, unknown>, push: (m: string) => void, progress?: (p: Record<string, unknown>) => void) {
+export async function generalTaskRunner(inputs: Record<string, unknown>, push: (m: string) => void, progress?: (p: Record<string, unknown>) => void) {
   const task = String(inputs.task ?? "").trim();
   if (!task) throw new Error("missing 'task' input");
   const saveAs = inputs.save_as_template !== false;
+  const testMode = inputs.testMode === true;
   const persona = getActivePersona();
   const personaSuffix = personaSystemSuffix(persona);
-  if (persona) push(`active persona: ${persona.name} (${persona.role})`);
-  const r = await planAndExecute(task, push, (patch) => progress?.(patch as Record<string, unknown>), { personaSystemSuffix: personaSuffix });
+  if (persona) push(`Working as ${persona.name} — ${persona.role}.`);
+  const r = await planAndExecute(task, push, (patch) => progress?.(patch as Record<string, unknown>), { personaSystemSuffix: personaSuffix, workMode: persona?.workMode, testMode });
 
   // If the agent wrote anything to the vault, also commit + push
   if (r.hadWrites) {
-    push("agent wrote to vault — committing");
+    push("Wrote to your second brain — committing the changes.");
     try {
       const c = await commitAndPush(`clawbot: agent task — ${task.slice(0, 60)}`);
-      push(`vault commit: ${JSON.stringify(c)}`);
-    } catch (e: any) { push(`commit failed (non-fatal): ${e.message ?? e}`); }
+      push(`Vault commit: ${(c as any)?.ok === false ? "failed" : "done"}${(c as any)?.sha ? ` (${String((c as any).sha).slice(0, 7)})` : ""}.`);
+    } catch (e: any) { push(`Commit didn't go through (non-fatal): ${e.message ?? e}.`); }
   }
 
   let savedTemplateId: string | undefined;
@@ -302,7 +578,7 @@ async function generalTaskRunner(inputs: Record<string, unknown>, push: (m: stri
     };
     saveCustomTemplate(tpl);
     savedTemplateId = id;
-    push(`saved as template: ${id}`);
+    push(`Saved this workflow as a reusable template: ${id}.`);
   }
 
   return {
@@ -321,8 +597,36 @@ async function generalTaskRunner(inputs: Record<string, unknown>, push: (m: stri
       startedAt: x.startedAt,
       modelUsed: x.modelUsed,
     })),
+    review: r.review,
+    quality: r.quality,
+    security: r.security,
+    skillUsed: r.skillUsed,
+    skillScore: r.skillScore,
     savedTemplateId,
+    // Must survive this re-shape: runJob keys the waiting_on_human status off
+    // result.humanRequest — dropping it here silently marked paused tasks as
+    // succeeded (the bug the first live test caught).
+    humanRequest: r.humanRequest,
   };
+}
+
+// Daily briefing — a thin wrapper over the general-task agent with a fixed,
+// briefing-shaped prompt. Runs against the active persona so a hired EA (Evie)
+// gives an EA-flavoured briefing. Doesn't auto-save as a template (it's already
+// a built-in) and never re-asks for clarification — it's a scheduled, headless
+// run. The optional `focus` input narrows the briefing to one area.
+async function dailyBriefingRunner(inputs: Record<string, unknown>, push: (m: string) => void, progress?: (p: Record<string, unknown>) => void) {
+  const focus = String(inputs.focus ?? "").trim();
+  const today = new Date().toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric" });
+  const task =
+    `Produce my briefing for ${today}.${focus ? ` Focus area: ${focus}.` : ""}\n\n` +
+    `Look at the last 5 days of activity in my vault (recent notes in _neuroworks/jobs/ and anything in 0-Inbox/), plus any items flagged for follow-up. ` +
+    `Then write a short, scannable briefing with these sections:\n` +
+    `## Focus today — the 3-5 things that matter most, each one line with WHY it matters\n` +
+    `## Open loops — anything waiting on me or flagged for follow-up\n` +
+    `## Worth knowing — short notes on recent changes or context\n\n` +
+    `Keep it tight — this is a morning glance, not a report. If the vault is quiet, say so honestly rather than padding.`;
+  return generalTaskRunner({ task, save_as_template: false }, push, progress);
 }
 
 async function syncDownloadsRunner(inputs: Record<string, unknown>, push: (m: string) => void) {

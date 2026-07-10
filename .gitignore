@@ -11,3 +11,30 @@ web/dist/
 
 # NeuroWorks runtime state (custom templates, future caches) — per-machine
 .neuroworks/
+
+# User-fetched skill .md files (skill.fetch_remote drops them here, gated by
+# CLAWBOT_REMOTE_SKILLS=1). Per-machine, not shared.
+server/src/skills/_user/
+
+# Tunnel binary (downloaded per-machine) + operational logs
+.tools/
+_devlog.txt
+_weblog.txt
+_tunnel.log
+# Test/scratch harness artifacts
+server/_*-harness*
+server/_*.out
+server/eng.traineddata
+server/page1.png
+
+# Scratch / one-off outputs (root + server) — never version these
+_*.out
+_*.err
+server/_*.json
+server/_desk/
+# Stray experimental static export (not the web/ app). Un-ignore to track it.
+server/neuroworks_site/
+
+# env backups (may contain secrets)
+.env.bak*
+.env.*.bak
