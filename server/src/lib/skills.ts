@@ -34,7 +34,14 @@ export type Skill = {
 // list/load call. Bust an entry when its mtime advances.
 const cache = new Map<string, { mtime: number; skill: Skill }>();
 
-function parseFrontmatter(raw: string): { meta: Record<string, any>; body: string } {
+function parseFrontmatter(rawIn: string): { meta: Record<string, any>; body: string } {
+  // Normalize CRLF first — core.autocrlf on Windows checks these .md files
+  // out with \r\n, and the frontmatter regex below requires bare \n. Without
+  // this, every skill's applies_to silently comes back empty after any fresh
+  // Windows checkout (intent-based matching goes dark; keyword matching still
+  // partly works since it falls back to the filename, which masked this for
+  // a while).
+  const raw = rawIn.replace(/\r\n/g, "\n");
   const m = raw.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
   if (!m) return { meta: {}, body: raw };
   const metaRaw = m[1];

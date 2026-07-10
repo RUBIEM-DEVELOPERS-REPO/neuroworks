@@ -4,3 +4,9 @@
 # this does NOT renormalize the rest of the repo.
 tools/git-hooks/* text eol=lf
 *.sh text eol=lf
+
+# Skill playbooks are parsed with a frontmatter regex that requires bare \n
+# (server/src/lib/skills.ts). CRLF from a Windows checkout silently zeroes
+# out every skill's applies_to intent matching (parser also normalizes CRLF
+# now as defense in depth, but keep the checkout itself clean).
+server/src/skills/*.md text eol=lf
