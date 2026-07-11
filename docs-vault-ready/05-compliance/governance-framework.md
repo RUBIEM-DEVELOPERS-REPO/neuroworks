@@ -1,7 +1,7 @@
 ---
 title: Compliance & governance framework
 audience: security + ops + compliance
-version: 0.2.0
+version: 0.3.0
 tags: [compliance, governance, audit, rollback, data-boundaries, risk-scoring]
 ---
 
@@ -95,6 +95,83 @@ that removes anything past TTL. The TTL is hard-enforced — there's no
 
 ## 3. Action gates
 
+### Governance policy gate (accepted org constraints)
+
+Distinct from the QA gates below — this is org-defined policy, not
+built-in quality checking, and it's the only gate that can be
+customized without touching code.
+
+**How a policy becomes enforcement:**
+
+1. Admin drops a markdown doc into `<vault>/_governance/` (or uploads via
+   the `/governance` page). Every `.md` file there is a policy.
+2. `POST /api/governance/:name/extract` sends the doc to the LLM, which
+   extracts structured rules: `rule` (one sentence), `severity`
+   (`hard` if the text uses MUST/MUST NOT/REQUIRED/PROHIBITED/NEVER-type
+   language, `soft` for SHOULD/RECOMMENDED/PREFER-type language),
+   `category` (data-privacy, security, brand-voice, compliance, ethical,
+   operational, access-control, communication, quality, other).
+3. An admin reviews each extracted constraint and accepts or rejects it
+   (`PUT /api/governance/:name/constraints/:id`). **Only constraints that
+   are `reviewed && accepted && severity === "hard"` are ever enforced** —
+   an extracted-but-unreviewed rule is a draft, and soft constraints are
+   preferences the synth is nudged toward, not blocked over.
+4. Every policy doc's full text (excluding reference-only docs, see
+   below) is also concatenated into a system-prompt prefix injected
+   ahead of every general-task/synth call, labelled `=== GOVERNANCE
+   POLICIES ===` — so even constraints not yet promoted to "hard +
+   accepted" still bias the model's behavior, they just aren't a hard
+   block. A doc can opt out of this prefix with frontmatter `reference:
+   true` (useful for reference material an agent should be able to pull
+   on demand without it bloating every single prompt).
+
+**Two real enforcement points, not just a review-UI checkbox:**
+
+- **Pre-execution, per plan step** (`checkStepAgainstGovernance`,
+  wired into `executePlan` in `agent.ts`) — before any step on a fixed,
+  explicit allowlist of 20 consequential tools runs (`email.send`,
+  every `vault.write`/`vault.edit`/`vault.create_zettel`/`vault.append`/
+  `vault.write_pdf`, `fs.import_to_vault`, the `github.*` write actions,
+  every chat/webhook poster, `connector.call`, `payment.*`, `db.write`,
+  `code.exec`), the step's resolved args are checked against every
+  accepted hard constraint. A match blocks the step before it runs —
+  the run record carries `ok: false` with the specific rule + policy
+  name quoted. Read-only tools (`vault.read`, `web.fetch`,
+  `research.*`) are deliberately NOT on this list — they can't violate
+  a policy by running, only by what the synth does with the result,
+  which the next gate catches.
+- **Post-synth, on the drafted answer** (`checkContentAgainstGovernance`,
+  wired alongside `quality.check`/`security.scan` in the same Phase-A
+  QA pass) — the final answer text is checked the same way before it's
+  surfaced or captured to the vault.
+- Matching is keyword-overlap between the constraint's rule text and
+  the step's resolved args / answer text (≥ 2 shared significant words)
+  — a blunt but fast, dependency-free check; it undershoots on
+  paraphrase and overshoots on generic constraints, so treat it as a
+  backstop, not a substitute for careful constraint wording.
+- **Fails open, deliberately**: any internal error in the governance
+  path (bad JSON, missing file, LLM extraction failure) is caught and
+  treated as "not blocked" — governance must never be the reason an
+  unrelated task breaks. This is a legibility trade-off: a broken
+  governance config degrades to "not enforced," not "everything stops."
+
+**Before this existed** (fixed 2026-07-09): the review workbench above
+was the whole feature — an admin could accept a hard "never email
+outside the finance domain" constraint and it would sit accepted while
+`email.send` fired anyway. Nothing read `getConstraints()` during real
+execution. The two enforcement points above close that gap.
+
+- **API:** `GET /api/governance` (list), `GET /api/governance/:name`,
+  `GET /api/governance/:name/download`, `DELETE /api/governance/:name`,
+  `POST /api/governance/:name/extract`, `GET /api/governance/constraints`,
+  `PUT /api/governance/:name/constraints/:id` (accept/reject/edit),
+  `POST /api/governance/check-action` (manual test box — paste a
+  hypothetical action, see which accepted constraints it would trip),
+  `POST /api/governance/invalidate` (bust the 60s policy-list/prefix
+  cache early — the vault watcher already does this automatically on
+  file changes).
+- **Page:** `/governance`
+
 ### Approval gate (human-in-the-loop)
 
 Templates carrying side effects beyond the vault boundary mark
@@ -163,7 +240,8 @@ admin guide for the operational details. Compliance-relevant points:
   new jobs with `retryOf: <originalJobId>` linkage.
 - **Every gate decision logged:** routing reason, lane refusal, quality
   score + issues, security findings, peer review verdict, rescue path
-  taken, attachment fold, persona auto-route.
+  taken, attachment fold, persona auto-route, governance policy blocks
+  (which rule, which policy, step vs. post-synth).
 - **Git history is the source of truth** — every vault write goes
   through `commitAndPush` so the vault repo's git log is a tamper-
   evident audit trail (signed commits if configured).
@@ -229,6 +307,19 @@ If a managed worker peer ends up in a bad state, `POST
 will auto-respawn one via `ensureWorker({ waitForReady: true })`.
 There's no persistent worker state to leak between instances.
 
+### Governance policy rollback
+
+Un-accepting a constraint (`PUT /api/governance/:name/constraints/:id`
+with `accepted: false`) takes effect on the NEXT gate check — the
+60s policy cache is busted by the same write path, no restart needed.
+Deleting a policy doc entirely (`DELETE /api/governance/:name`) removes
+both its prompt-prefix contribution and every constraint extracted from
+it. Because extraction is idempotent per-doc (`extractConstraints`
+short-circuits if constraints already exist for that policy name),
+re-uploading an edited version of a policy after deleting the old one
+requires re-running extract — edits to an existing doc's body do NOT
+auto-re-extract.
+
 ## 6. Risk scoring (per-job)
 
 Each job carries an implicit risk score via the QA gates:
@@ -242,6 +333,7 @@ Each job carries an implicit risk score via the QA gates:
 | `review.verdict` | good/needs-work/bad | Peer second opinion |
 | `rooted.pass` | bool | Citations + URLs + vault refs present |
 | `requiresApproval` | bool | Human-in-the-loop required |
+| `governance.blocked` | bool | Hit an accepted hard org constraint — step or answer blocked outright, not just scored |
 
 A job that scored ≥ 0.75 on quality, passed security, got a `good`
 peer review, and was context-rooted is "low risk" — eligible for
@@ -271,6 +363,7 @@ Bundled templates for typical compliance asks:
 | Web private IPs | blocked | `NEUROWORKS_WEB_ALLOW_PRIVATE=1` |
 | Sensitive paths | blocked | `NEUROWORKS_FS_UNRESTRICTED=1` |
 | Context upload TTL | 1 h | `NEUROWORKS_CONTEXT_UPLOAD_TTL_MS` |
+| Governance policy gate | OFF until a policy has ≥1 reviewed+accepted hard constraint | admin uploads to `_governance/` + accepts via `/governance` (no env flag — presence-driven) |
 | Approval gate | per-template `requiresApproval` | (not bypassable) |
 | Reflection | nightly @ 02:00 | `NEUROWORKS_REFLECTION=0` to disable |
 | Worker auto-spawn | ON | `NEUROWORKS_AUTO_SPAWN_WORKER=0` |
