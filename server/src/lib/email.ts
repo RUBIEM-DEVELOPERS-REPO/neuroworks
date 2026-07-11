@@ -179,14 +179,29 @@ async function sendViaMailjet(env: EmailEnv, opts: {
   }
 
   const authHeader = "Basic " + Buffer.from(`${env.mailjetApiKey}:${env.mailjetApiSecret}`).toString("base64");
-  const res = await fetch("https://api.mailjet.com/v3.1/send", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: authHeader,
-    },
-    body: JSON.stringify({ Messages: [message] }),
-  });
+  // 30s cap per attempt. Without it, a wedged Mailjet gateway holds the
+  // request open until IT gives up (observed 2026-07-10: two sends hung
+  // 103-105s before coming back 502/408), which burns the whole step
+  // duration on one dead attempt. Aborting at 30s surfaces "timeout" —
+  // which the step-level transient-retry matcher recognises — so the
+  // retry fires while there's still time budget left.
+  let res: Response;
+  try {
+    res = await fetch("https://api.mailjet.com/v3.1/send", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: authHeader,
+      },
+      body: JSON.stringify({ Messages: [message] }),
+      signal: AbortSignal.timeout(30_000),
+    });
+  } catch (e: any) {
+    if (e?.name === "TimeoutError" || e?.name === "AbortError") {
+      throw new Error("mailjet send timeout after 30s — the API did not respond (transient gateway issue; the send was aborted before completing)");
+    }
+    throw e;
+  }
   const text = await res.text();
   if (res.status === 401 || res.status === 403) {
     throw new Error(`mailjet auth failed (${res.status}) — check NEUROWORKS_MAILJET_API_KEY + NEUROWORKS_MAILJET_API_SECRET`);

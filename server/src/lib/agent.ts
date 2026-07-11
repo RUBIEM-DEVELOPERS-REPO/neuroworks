@@ -608,6 +608,30 @@ export async function executePlan(p: Plan, push: (msg: string) => void, onProgre
     onProgress?.([...runs]);
     const t0 = Date.now();
 
+    // Unresolved-reference gate. A whole-string "$step_N..." arg that
+    // resolveValue couldn't substitute passes through as the LITERAL
+    // placeholder — which downstream tools then treat as a real value
+    // (2026-07-10: email.send tried to attach the file
+    // "$step_0.matches.0.path" and vault.read tried to open
+    // "D:\Main brain\$step_0.matches.0.path"; 6 of that day's 8 tool
+    // failures trace to this). Fail the step here with a diagnosis of WHY
+    // the reference didn't resolve instead of letting a garbage arg hit an
+    // external service.
+    for (const [argName, argVal] of Object.entries(args)) {
+      const m = typeof argVal === "string" ? argVal.match(/^\$step_(\d+)(\..+)?$/) : null;
+      if (!m) continue;
+      const refIdx = Number(m[1]);
+      const ref = runs[refIdx];
+      const why = !ref ? `step ${refIdx + 1} does not exist in this plan`
+        : ref.ok !== true ? `step ${refIdx + 1} (${ref.step?.tool ?? "?"}) ${ref.error ? `failed: ${String(ref.error).slice(0, 140)}` : "has not produced a result"}`
+        : `step ${refIdx + 1} (${ref.step?.tool ?? "?"}) succeeded but has no value at "${(m[2] ?? "").replace(/^\./, "") || "(root)"}" — likely an empty result (e.g. a search with no matches) or a wrong field name`;
+      const msg = `arg "${argName}" references ${argVal} which could not be resolved: ${why}`;
+      runs[i] = { step, ok: false, error: msg, durationMs: Date.now() - t0, startedAt: t0 };
+      push(`  ✗ ${step.label ?? step.tool}: ${msg.slice(0, 200)}`);
+      onProgress?.([...runs]);
+      return;
+    }
+
     // Governance gate — runs BEFORE the tool call, only for side-effecting
     // tools (email.send, vault.write, github.*, webhook/chat posts, payments,
     // db.write, code.exec — see CONSEQUENTIAL_TOOLS). Checks the step's
