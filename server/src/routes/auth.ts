@@ -1,5 +1,6 @@
 import { Router, type Request } from "express";
 import { login, logout, sessionUser, listLoginEvents, signupUser, listPendingUsers } from "../lib/users.js";
+import { requireLayer } from "../lib/access.js";
 
 // Auth API — login / logout / current session, plus the login-event audit feed
 // the admin Users page renders. Sessions are bearer tokens; the web client
@@ -99,8 +100,10 @@ authRouter.get("/session", (req, res) => {
   res.json({ user: sessionUser(tokenFrom(req)) });
 });
 
-// Login activity feed (admin view). ?limit= default 50.
-authRouter.get("/login-events", (req, res) => {
+// Login activity feed (admin view — carries every user's email/IP/user-agent,
+// so this was previously reachable by any logged-in staff session; gated
+// 2026-07-11). ?limit= default 50.
+authRouter.get("/login-events", requireLayer("admin"), (req, res) => {
   const limit = Number(req.query.limit ?? 50);
   res.json({ events: listLoginEvents(limit) });
 });

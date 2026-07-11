@@ -47,6 +47,18 @@ RUN pnpm -F clawbot-web build
 RUN mkdir -p /app/.neuroworks /data/vault
 VOLUME ["/app/.neuroworks", "/data/vault"]
 
+# Run as non-root. Everything up to here ran as root only because it needs to
+# (install deps, build the SPA, create mount points) — the actual server
+# process shouldn't. A compromised Node process, or the agent's own
+# intentionally-unsandboxed code.exec primitive (see risk-note.md), having
+# root inside the container is unnecessary blast radius. The Playwright base
+# image ships a `pwuser` account (browsers are readable by any user in this
+# image) for exactly this; fall back to creating one if a future base image
+# doesn't have it.
+RUN (id -u pwuser >/dev/null 2>&1 || useradd -m -u 1000 pwuser) \
+ && chown -R pwuser:pwuser /app /data
+USER pwuser
+
 EXPOSE 7471
 
 # Container-level liveness/readiness: hit /api/health (exempt from auth) and

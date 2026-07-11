@@ -243,14 +243,21 @@ export function login(email: string, password: string, meta: { ip?: string; user
     saveEvents(events);
   };
 
-  if (!u) { recordEvent(false, "no such user"); return { ok: false, reason: "No account with that email." }; }
+  // "No account with that email" vs "incorrect password" used to be two
+  // distinct messages — a classic user-enumeration oracle (an attacker can
+  // probe arbitrary addresses and learn which ones have an account). Both
+  // now return the same generic message to the caller; the real reason is
+  // still recorded in the (now admin-gated) login-event audit trail. Found
+  // during the 2026-07-11 hardening pass.
+  const INVALID_CREDENTIALS = "Invalid email or password.";
+  if (!u) { recordEvent(false, "no such user"); return { ok: false, reason: INVALID_CREDENTIALS }; }
   if (u.status === "disabled") { recordEvent(false, "disabled"); return { ok: false, reason: "This account is disabled." }; }
   if (u.status === "pending") { recordEvent(false, "pending approval"); return { ok: false, reason: "Your sign-up is awaiting approval by an administrator." }; }
 
   if (u.passwordHash) {
     if (!password || !verifyPassword(password, u.passwordHash)) {
       recordEvent(false, "bad password");
-      return { ok: false, reason: "Incorrect password." };
+      return { ok: false, reason: INVALID_CREDENTIALS };
     }
   } else {
     // No password set yet — claim-on-first-login: if one is supplied, set it.

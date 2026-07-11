@@ -36,16 +36,26 @@ import { verifyApiKey, keyHasScope } from "./api-keys.js";
 // carry their own strictly-stronger auth (dispatch API keys, finance sync
 // token, Stripe/Paynow signature checks) or that must stay reachable to log
 // in at all.
+//
+// IMPORTANT: only the specific auth endpoints needed to OBTAIN a session are
+// exempt (login/signup/session-check/logout) — NOT the whole /api/auth/
+// prefix. That used to include /api/auth/login-events, which returns the
+// full login audit trail (emails, IPs, user-agents, success/failure reasons)
+// with zero auth in enterprise mode — exactly the exposure this guard exists
+// to close. Found + fixed during the 2026-07-11 hardening pass.
 const EXEMPT_PATHS = new Set<string>([
   "/api/health",
   "/api/peers/self",
   "/api/payments/webhook",
   "/api/payments/paynow/result",
+  "/api/auth/login",
+  "/api/auth/signup",
+  "/api/auth/session",
+  "/api/auth/logout",
 ]);
 const EXEMPT_PREFIXES = [
   "/api/v1/",       // external dispatch — own bearer-key auth (routes/dispatch.ts)
   "/api/public/",    // Finance System ingest — own token gate (routes/public-finance.ts)
-  "/api/auth/",      // must stay reachable to obtain a session token in the first place
 ];
 
 function isLoopback(addr: string | undefined): boolean {
