@@ -191,7 +191,17 @@ const SKILL_KEYWORDS: { skill: string; patterns: RegExp[] }[] = [
   // specific skills like contract-summary or local-doc-summary. tl;dr is fine.
   { skill: "summarization",          patterns: [/\btl;?dr\b/i] },
   { skill: "research-deep",          patterns: [/\bresearch\b/i, /\bdig\s+into\b/i, /\bdeep\s+dive\b/i] },
-  { skill: "vault-organization",     patterns: [/\bvault\b/i, /\bsecond\s+brain\b/i, /\bobsidian\b/i] },
+  // 2026-07-09 reflection: bare /\bvault\b/i matched ANY mention of the word
+  // (including "what's the vault path", "check my bank vault") and always
+  // scored the flat keyword floor (15) — the picker was guessing, not
+  // matching. Require an organize-shaped verb near "vault" instead; keep
+  // "second brain" / "obsidian" as standalone triggers since those two
+  // terms are distinctive enough on their own.
+  { skill: "vault-organization",     patterns: [
+    /\b(?:organi[sz]e|clean(?:[\s-]?up)?|tidy(?:\s+up)?|sweep|consolidate|restructure|reorgani[sz]e|file|place|structure|index)\w*\b[\s\S]{0,30}\b(?:vault|second[\s-]?brain|obsidian|knowledge\s*base|zettelkasten)\b/i,
+    /\bsecond[\s-]?brain\b/i,
+    /\bobsidian\b/i,
+  ] },
   { skill: "list-making",            patterns: [/\b(?:make|give|write)\s+(?:me\s+)?(?:a\s+)?(?:bulleted?\s+|numbered\s+|checklist|to[\s-]?do)\b/i] },
   { skill: "table-making",           patterns: [/\b(?:make|build|create|give)\s+(?:me\s+)?(?:a\s+)?(?:comparison\s+)?table\b/i, /\b(?:as|in)\s+a\s+table\b/i] },
   // ─── 2026-05-23: role-specific deliverable skills ───

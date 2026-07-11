@@ -6,7 +6,7 @@ import { ollamaGenerate, ollamaGenerateWithMeta } from "./ollama.js";
 import { listVault, readVaultFile, searchVault, writeVaultFile, importBinaryIntoVault } from "./vault.js";
 import { extractDocText, extractDocsParallel } from "./doc-extractor.js";
 import { listOwnedRepos, recentCommits, openPRs, openIssues, readme, octokit } from "./github.js";
-import { getSourceByLabel, runQuery, describeSource, listSources } from "./data-sources.js";
+import { getSourceByLabel, getSource, runQuery, describeSource, listSources } from "./data-sources.js";
 import { publishDataset, listDatasets } from "./adrs.js";
 import { acquire as omniAcquire, acquireAndPublish as omniAcquirePublish, type OmniSpec } from "./omnisignal.js";
 import { getConnectionByProvider } from "./integrations.js";
@@ -155,6 +155,18 @@ function parseFlexibleList(raw: any): string[] {
     }
   }
   return items.map((x: any) => String(x ?? "").trim()).filter(Boolean);
+}
+
+// db.* error helper — distinguishes "nothing registered at all" from "wrong
+// label" so the synth (and the operator reading the run log) doesn't read a
+// bad-label typo and a genuinely-unconfigured system as the same failure.
+// 2026-07-09 reflection: db.query/db.describe_table failed 6/6 combined runs
+// instantly (0s) with a bare "not found" message that didn't say WHY.
+function noSourceError(label: string): string {
+  if (listSources().length === 0) {
+    return `db: no data sources are registered at all (asked for "${label}"). Connect one on the Data Sources page, or via connector.call for an external API — db.* has nothing to query yet.`;
+  }
+  return `Data source "${label}" not found — use db.list_sources to see available sources`;
 }
 
 export const primitives: Primitive[] = [
@@ -500,7 +512,7 @@ export const primitives: Primitive[] = [
     ],
     handler: async (args) => {
       const source = getSourceByLabel(String(args.source));
-      if (!source) throw new Error(`Data source "${args.source}" not found — use db.list_sources to see available sources`);
+      if (!source) throw new Error(noSourceError(String(args.source)));
       const info = await describeSource(source);
       const tables = info.tables.map(t => ({
         name: t.name,
@@ -520,7 +532,7 @@ export const primitives: Primitive[] = [
     ],
     handler: async (args) => {
       const source = getSourceByLabel(String(args.source));
-      if (!source) throw new Error(`Data source "${args.source}" not found`);
+      if (!source) throw new Error(noSourceError(String(args.source)));
       const info = await describeSource(source);
       const table = info.tables.find(t => t.name.toLowerCase() === String(args.table).toLowerCase());
       if (!table) throw new Error(`Table "${args.table}" not found in "${args.source}". Available: ${info.tables.map(t => t.name).join(", ")}`);
@@ -538,7 +550,7 @@ export const primitives: Primitive[] = [
     ],
     handler: async (args) => {
       const source = getSourceByLabel(String(args.source));
-      if (!source) throw new Error(`Data source "${args.source}" not found`);
+      if (!source) throw new Error(noSourceError(String(args.source)));
       const limit = Math.max(1, Math.min(5000, Number(args.limit ?? 200)));
       const result = await runQuery(source, String(args.query), limit);
       return {
@@ -1832,40 +1844,20 @@ ${vaultHits.slice(0, 8).map(h => `- [[${h.path}]] (line ${h.line})`).join("\n") 
     },
   },
   {
-    name: "db.list_sources",
-    description: "List company database connections the operator has registered. Returns { id, label, kind, notes } — pass the id to db.schema or db.query. Use this first to find out what databases the user has connected.",
-    readonly: true,
-    args: [],
-    handler: async () => {
-      const { listSources } = await import("./data-sources.js");
-      return { sources: listSources().map(s => ({ id: s.id, label: s.label, kind: s.kind, notes: s.notes, readonly: s.readonly })) };
-    },
-  },
-  {
+    // NOTE: NOT "db.schema" by source_id via db.list_sources' id field —
+    // this is intentionally kept distinct from the primary db.list_sources
+    // (line ~478) / db.query (line ~531) / db.describe_table family, which
+    // are all label-based (source: string). This one accepts either a
+    // source_id OR a label so existing callers using either shape work.
     name: "db.schema",
-    description: "Get the schema (tables + columns) for a registered company database. Pass source_id from db.list_sources. Returns { tables: [{ name, columns: [{ name, type }] }] }.",
+    description: "Get the schema (tables + columns) for a registered company database. Pass sourceId (id) OR source (label) from db.list_sources. Returns { tables: [{ name, columns: [{ name, type }] }] }.",
     readonly: true,
-    args: [{ name: "source_id", type: "string", required: true, description: "id from db.list_sources" }],
+    args: [{ name: "sourceId", type: "string", required: true, description: "id or label from db.list_sources" }],
     handler: async (args) => {
-      const { getSource, describeSource } = await import("./data-sources.js");
-      const src = getSource(String(args.source_id));
-      if (!src) throw new Error(`unknown source id: ${args.source_id}`);
+      const key = String(args.sourceId ?? "");
+      const src = getSource(key) ?? getSourceByLabel(key);
+      if (!src) throw new Error(`db.schema: no data source matches id/label "${key}". Call db.list_sources first — if that returns an empty array, no company database is registered yet (ask the operator to connect one on the Data Sources page).`);
       return await describeSource(src);
-    },
-  },
-  {
-    name: "db.query",
-    description: "Run a read-only query against a registered company database. Pass source_id from db.list_sources. For SQL engines (postgres/mysql/sqlite/mssql) pass a SELECT/WITH/SHOW/EXPLAIN/DESCRIBE/PRAGMA statement. For MongoDB pass a JSON document instead of SQL — e.g. {\"collection\":\"orders\",\"filter\":{\"status\":\"open\"},\"limit\":50}, or {\"collection\":\"x\",\"aggregate\":[...]}, or {\"collection\":\"x\",\"count\":true,\"filter\":{...}}. Returns { rows, columns, rowCount, truncated } — first 200 rows.",
-    readonly: true,
-    args: [
-      { name: "source_id", type: "string", required: true, description: "id from db.list_sources" },
-      { name: "sql", type: "string", required: true, description: "Read-only SQL statement, OR a MongoDB JSON query document for mongodb sources" },
-    ],
-    handler: async (args) => {
-      const { getSource, runQuery } = await import("./data-sources.js");
-      const src = getSource(String(args.source_id));
-      if (!src) throw new Error(`unknown source id: ${args.source_id}`);
-      return await runQuery(src, String(args.sql), 200);
     },
   },
   {

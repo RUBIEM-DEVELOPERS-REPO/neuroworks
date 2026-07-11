@@ -304,7 +304,16 @@ Rules:
 - Be terse. The customer reads this in 60 seconds.
 - Numbers always. "Failed 4 of 6 runs" beats "often failed".
 - No filler ("Overall, today was…"). No emoji.
-- If the stats are thin, say so honestly — don't pad.`;
+- If the stats are thin, say so honestly — don't pad.
+- avgDurationSec near 0 is NOT automatically suspicious: security.scan and
+  governance.check are synchronous local pattern-matching (regex over the
+  text), not network/LLM calls — sub-millisecond is their CORRECT, expected
+  speed. Only flag near-zero duration as a possible no-op for tools that
+  normally do I/O or an LLM call (db.*, research.*, web.*, ollama.generate,
+  connector.call, email.send, etc.) where near-0s means something skipped
+  the real work. (2026-07-09 reflection flagged security.scan as a possible
+  no-op purely on its 0s average — verified against the source, it's a
+  correctly-fast synchronous scanner, not a bug.)`;
 
   const prompt = `Date: ${stats.date}
 Window: ${stats.windowStart} → ${stats.windowEnd}

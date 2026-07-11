@@ -2821,8 +2821,20 @@ async function synthesize(
       }
     }
   } catch { /* skill lookup failure shouldn't block synthesis */ }
+  // Escalate failed data-fetch tools into the prompt so the synth can't
+  // silently answer around a broken data path. 2026-07-09 reflection:
+  // db.query/db.describe_table failed 6/6 combined runs, yet every task
+  // still reported "succeeded" — nothing told the synth the data path was
+  // down, so it just answered from whatever else it had (or fabricated a
+  // plausible-sounding gap-fill) without flagging the missing data. Scoped
+  // to db.* per the reflection's ask; the pattern generalizes to any tool
+  // prefix worth escalating the same way.
+  const criticalFailures = failed.filter(r => /^db\./.test(r.step.tool));
+  const gapsNote = criticalFailures.length > 0
+    ? `\n\nDATA GAP — the following database quer${criticalFailures.length === 1 ? "y" : "ies"} FAILED and returned NO data: ${criticalFailures.map(r => `${r.step.tool} (${String(r.error ?? "").slice(0, 120)})`).join("; ")}. State plainly that this data could not be retrieved instead of answering as if it were available — do not paper over the gap with a plausible-sounding but ungrounded figure.\n`
+    : "";
   const sys = (personaSystemSuffix ? personaSystemSuffix + "\n\n" : "") + POLISHED_SYNTH + skillBlock;
-  const prompt = `Task: ${task}\n\nNumbered evidence:\n${evidence.map(e => `[${e.ref}] (${e.tool} — ${e.from})\n${e.body}`).join("\n\n")}\n\nWrite the report:`;
+  const prompt = `Task: ${task}\n\nNumbered evidence:\n${evidence.map(e => `[${e.ref}] (${e.tool} — ${e.from})\n${e.body}`).join("\n\n")}${gapsNote}\n\nWrite the report:`;
 
   // Stream tokens as they arrive so the UI can show the answer materialising.
   // Empty/very-short outputs (LLM returned blank, "ok", or a single sentence)
