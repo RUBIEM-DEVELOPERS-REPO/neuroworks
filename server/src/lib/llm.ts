@@ -266,13 +266,13 @@ async function callOllamaStream(prompt: string, system: string | undefined, mode
 // Public entry — wraps the dispatcher to record cost for EVERY call (this is
 // how the Cost monitor page gets its data; recording is best-effort and never
 // blocks or breaks the actual generation).
-export async function llmGenerateWithMeta(prompt: string, system?: string, opts: LLMCallOptions = {}): Promise<{ text: string; model: string }> {
+export async function llmGenerateWithMeta(prompt: string, system?: string, opts: LLMCallOptions = {}): Promise<{ text: string; model: string; usage?: { inputTokens: number; outputTokens: number } }> {
   const result = await generateWithMetaInner(prompt, system, opts);
-  try { recordLlmCost(result.model, result.text, prompt, system, opts.profile ?? "none"); } catch { /* best-effort */ }
+  try { recordLlmCost(result.model, result.text, prompt, system, opts.profile ?? "none", "adhoc", result.usage); } catch { /* best-effort */ }
   return result;
 }
 
-async function generateWithMetaInner(prompt: string, system?: string, opts: LLMCallOptions = {}): Promise<{ text: string; model: string }> {
+async function generateWithMetaInner(prompt: string, system?: string, opts: LLMCallOptions = {}): Promise<{ text: string; model: string; usage?: { inputTokens: number; outputTokens: number } }> {
   const { backend, model, reason } = await chooseBackendAndModel(opts, prompt, system);
   const tokenEstimate = estimateTokens(prompt) + estimateTokens(system);
   // Customer-facing notification: caller decides whether to push the

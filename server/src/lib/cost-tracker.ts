@@ -93,10 +93,19 @@ export function recordCost(record: CostRecord): void {
 // model call is counted. Only appends a JSONL line (the summary aggregates on
 // read), so it's safe on the hot path. Was previously dead: trackLlmCall
 // existed but nothing called it, so the Cost page always showed zero.
-export function recordLlmCost(model: string, outputText: string, inputText: string, systemText?: string, profile = "none", jobId = "adhoc"): void {
+export function recordLlmCost(model: string, outputText: string, inputText: string, systemText?: string, profile = "none", jobId = "adhoc", usage?: { inputTokens: number; outputTokens: number }): void {
   try {
-    const inputTokens = Math.ceil(((inputText?.length ?? 0) + (systemText?.length ?? 0)) / 4);
-    const outputTokens = Math.ceil((outputText?.length ?? 0) / 4);
+    // Prefer REAL billed token counts (from the provider's usage response)
+    // over the chars/4 estimate. The estimate can't see tokens that are
+    // billed but never returned as text — e.g. Claude Fable's always-on
+    // extended thinking is billed as output but the thinking content is
+    // omitted from the response, so estimating from outputText alone
+    // systematically undercounted fable-5 calls (2026-07-11: Cost page
+    // showed $8.30 against $9.87 actually billed — ~89% of the tracked
+    // total was fable-5, which is exactly the model with invisible billed
+    // output tokens the old estimate-only path couldn't see).
+    const inputTokens = usage?.inputTokens ?? Math.ceil(((inputText?.length ?? 0) + (systemText?.length ?? 0)) / 4);
+    const outputTokens = usage?.outputTokens ?? Math.ceil((outputText?.length ?? 0) / 4);
     const lc = (model ?? "").toLowerCase();
     // Native Claude ids ("claude-fable-5") have NO slash — without this branch
     // they were misfiled as "ollama" and recorded at $0 (the bug that hid all

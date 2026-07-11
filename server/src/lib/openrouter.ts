@@ -101,7 +101,7 @@ export async function openrouterGenerateWithMeta(
   prompt: string,
   system: string | undefined,
   opts: OpenRouterCallOptions = {},
-): Promise<{ text: string; model: string }> {
+): Promise<{ text: string; model: string; usage?: { inputTokens: number; outputTokens: number } }> {
   if (!config.openrouterApiKey) throw new Error("OpenRouter: OPENROUTER_API_KEY not set");
   // Circuit open → fail fast so the llm-router uses local immediately instead of
   // re-discovering the outage with a full retry cycle on every call.
@@ -135,6 +135,13 @@ export async function openrouterGenerateWithMeta(
             model,
             messages,
             stream: true,
+            // Ask for a final usage chunk even in streaming mode (OpenAI-
+            // compatible spec) so cost-tracker.ts can record REAL billed
+            // tokens instead of a chars/4 estimate. Without this, models
+            // with invisible billed tokens the estimate can't see (e.g.
+            // Claude Fable's always-on extended thinking, billed as output
+            // but never returned as text) silently under-report cost.
+            stream_options: { include_usage: true },
             // Claude Fable models REJECT the temperature param outright
             // (400 "`temperature` is deprecated for this model") — omit it
             // there; every other provider/model keeps the explicit value.
@@ -188,6 +195,7 @@ export async function openrouterGenerateWithMeta(
     let buffer = "";
     let response = "";
     let resolvedModel = model;
+    let usage: { inputTokens: number; outputTokens: number } | undefined;
 
     // SSE format — each event is "data: { ... }\n\n" with a final "data: [DONE]".
     while (true) {
@@ -206,6 +214,7 @@ export async function openrouterGenerateWithMeta(
             choices?: { delta?: { content?: string }; finish_reason?: string }[];
             model?: string;
             error?: { message: string };
+            usage?: { prompt_tokens?: number; completion_tokens?: number };
           };
           if (evt.error) {
             // Free models sometimes 200 then stream a rate-limit error object.
@@ -215,6 +224,14 @@ export async function openrouterGenerateWithMeta(
             throw e;
           }
           if (evt.model) resolvedModel = evt.model;
+          // Usage chunk (requested via stream_options.include_usage) arrives on
+          // its own SSE event, typically after the final content delta, with an
+          // empty/absent choices array — real billed counts, including any
+          // invisible tokens (e.g. Fable's extended thinking) the text-length
+          // estimate can't see.
+          if (evt.usage && typeof evt.usage.prompt_tokens === "number" && typeof evt.usage.completion_tokens === "number") {
+            usage = { inputTokens: evt.usage.prompt_tokens, outputTokens: evt.usage.completion_tokens };
+          }
           const delta = evt.choices?.[0]?.delta?.content;
           if (delta) {
             response += delta;
@@ -228,7 +245,7 @@ export async function openrouterGenerateWithMeta(
         }
       }
     }
-    return { text: response.trim(), model: resolvedModel };
+    return { text: response.trim(), model: resolvedModel, usage };
   } finally {
     clearTimeout(timer);
   }
