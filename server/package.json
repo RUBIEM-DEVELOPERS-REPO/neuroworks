@@ -25,6 +25,7 @@
     "nodemailer": "^8.0.9",
     "pdf-parse-fork": "^1.2.0",
     "pdfjs-dist": "^6.0.227",
+    "pg": "^8.22.0",
     "playwright": "^1.59.1",
     "simple-git": "^3.27.0",
     "tesseract.js": "^7.0.0",
