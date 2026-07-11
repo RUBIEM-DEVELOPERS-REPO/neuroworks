@@ -320,16 +320,33 @@ export async function plan(task: string, _personaSystemSuffix?: string, push?: (
   if (LOCAL_FS_HINT_RE.test(task)) {
     localFsContext = `\n\nLocal filesystem context: the task mentions a file on the operator's PC (Downloads / Desktop / Documents / "my PC"). The FIRST step MUST be fs.find_in with folder='downloads'|'desktop'|'documents'|'all' and the filename substring. Do NOT use research.deep — it cannot see the operator's local filesystem. Chain fs.read_external (for the absolute path returned) or fs.import_to_vault afterward as the task requires.\n`;
   }
+  // GitHub-activity hint — when the task asks about the operator's OWN
+  // repos/commits/PRs/issues ("summarize my recent commits", "what's open
+  // across my repos"), route to the github.* primitives, not research.deep
+  // (which can only search the public web + vault and has no way to see
+  // private repo activity). 2026-07-11: "summarize recent commits across
+  // my repos and email me" fell through heuristicPlan's explainer bail
+  // into this LLM path with no hint at all and no primitive nudge —
+  // adding the hint here so the planner reliably composes list+read+send
+  // instead of guessing.
+  let githubContext = "";
+  if (/\b(?:my|our)\s+(?:repos?|repositories|commits?|pull\s+requests?|prs?|issues?)\b/i.test(task) || /\bcommits?\b.{0,25}\b(?:repos?|repositories)\b/i.test(task)) {
+    githubContext = `\n\nGitHub-activity context: the task asks about the operator's own GitHub repos/commits/PRs/issues. Use github.list_repos to enumerate them, then github.read_repo (owner+name) per repo of interest for README/recent commits/open PRs/issues — NOT research.deep, which cannot see private repo activity. If the task also asks to summarize across MULTIPLE repos, chain an ollama.generate synthesis step over the github.read_repo results before any final email/notify step.\n`;
+  }
   // Email-send hint — when the task is about sending email, use the
   // dedicated email.send primitive that routes through Mailjet. Without
   // this nudge, small planners reach for web.interact and try to drive
   // Gmail's UI in a headless browser that isn't logged in — the step
   // returns ok but no actual email is sent, leaving the synth to
   // fabricate a "looks delivered" response. email.send returns a real
-  // delivery confirmation the synth can quote.
+  // delivery confirmation the synth can quote. Also matches self-reference
+  // ("email me", "send it to me", "notify me") — previously ONLY an
+  // explicit @address or "send an email" phrasing matched, so "email me"
+  // (the single most natural way to ask this) got no hint at all.
   let emailContext = "";
-  if (/\b(send\s+(an?\s+)?email|email\s+\S+@|reply\s+(to|via)\s+email|mail\s+\S+@|send.*to\s+\S+@)\b/i.test(task)) {
-    emailContext = `\n\nEmail-send context: the task asks for an actual email to be sent. The plan MUST use email.send (NOT web.interact, NOT fs.* — those don't send mail). Required args: to (the @ address), subject, body (markdown ok). The body should be drafted INLINE in the args.body string, not as a separate ollama.generate step unless the body needs evidence-gathering first. Chain pattern when the body needs evidence: research/vault step → ollama.generate to draft the body → email.send with {body: "$step_N.text"}. When the body is self-contained from the task, ONE email.send step is the whole plan.\n`;
+  if (/\b(send\s+(an?\s+)?email|email\s+\S+@|reply\s+(to|via)\s+email|mail\s+\S+@|send.*to\s+\S+@|email\s+me\b|send\s+(?:it|that|this|me)\s+(?:to\s+me\b|(?:an?\s+)?email\b)|notify\s+me\b)\b/i.test(task)) {
+    const selfRef = /\b(?:email\s+me\b|send\s+(?:it|that|this)\s+to\s+me\b|notify\s+me\b)\b/i.test(task) && !/\S+@\S+/.test(task);
+    emailContext = `\n\nEmail-send context: the task asks for an actual email to be sent. The plan MUST use email.send (NOT web.interact, NOT fs.* — those don't send mail). Required args: to (the @ address), subject, body (markdown ok). The body should be drafted INLINE in the args.body string, not as a separate ollama.generate step unless the body needs evidence-gathering first. Chain pattern when the body needs evidence: research/vault step → ollama.generate to draft the body → email.send with {body: "$step_N.text"}. When the body is self-contained from the task, ONE email.send step is the whole plan.${selfRef ? ` The task says "email/notify ME" with no address given — resolve the operator's own address with users.lookup / users.list first (do NOT invent an address or use a placeholder).` : ""}\n`;
   }
   // Activity-report hint — when the task asks about the agent's OWN completed
   // work/tasks over a time window ("report on the tasks I did yesterday", "what
@@ -409,7 +426,7 @@ export async function plan(task: string, _personaSystemSuffix?: string, push?: (
     ? `\n\nHybrid role context: this hire is part agent, part human. Split the work deliberately — plan agent steps for everything the catalog can do, and add ONE human.request step (with typed items) for the parts that genuinely need the person: internal figures not in the vault/connectors/databases, judgment calls, sign-offs, offline actions, or documents only they hold. Do NOT fabricate content to avoid asking.\n`
     : "";
   // Compact catalog: ~40% smaller prompt → faster planning on small models.
-  const sys = injectLanguagePrompt(PLAN_SYSTEM, "plan") + primitivesPromptCatalog({ compact: true }) + vaultContext + researchContext + companyDataContext + localFsContext + emailContext + activityContext + memoryContext + financeContext + explicitToolContext + workModeContext + fanOutContext;
+  const sys = injectLanguagePrompt(PLAN_SYSTEM, "plan") + primitivesPromptCatalog({ compact: true }) + vaultContext + researchContext + companyDataContext + localFsContext + githubContext + emailContext + activityContext + memoryContext + financeContext + explicitToolContext + workModeContext + fanOutContext;
 
 
   // Race the planner LLM call against PLAN_TIMEOUT_MS. If the LLM stalls,
@@ -2249,7 +2266,26 @@ export function heuristicPlan(task: string, opts: { hasAttachments?: boolean } =
   // virus'" came from. Longer / open-ended explanations keep depth=3 and
   // still capture, because they tend to be non-trivial research notes.
   const aboutMatch = t.match(/^\s*(?:tell\s+me\s+about|explain|what(?:'?s|\s+is|\s+are|\s+does)|describe|how\s+does|how\s+do|summari[sz]e|recap|brief\s+me\s+on|tldr)\s+(.+?)[?.!]?\s*$/i);
-  if (aboutMatch && !hasAttachments && aboutMatch[1].length >= 2 && aboutMatch[1].length <= 80) {
+  // Bail when the "explainer" verb is actually wrapping an action task —
+  // research.deep can only answer from web/vault evidence, so it has no
+  // way to see the operator's own GitHub activity, and its single-step
+  // passthrough skips persona synthesis entirely, producing a raw,
+  // unbranded refusal ("I operate as a synthesiser... I cannot connect to
+  // your GitHub account") instead of composing github.list_repos/read_repo
+  // + email.send like the task actually needs. 2026-07-11: "summarize
+  // recent commits across my repos and email me" reproduced this exactly.
+  // Two tells: (a) the query names the operator's OWN repos/commits/PRs/
+  // issues — that needs a live github.* call, not a web search; (b) the
+  // task chains a completion action ("...and email/send/notify/post it")
+  // after the informational part — that's a multi-step compose the LLM
+  // planner (plan()) should build from the full primitive catalog, not a
+  // single-shot guess. Falls through instead of returning.
+  const explainerNeedsLiveTools = aboutMatch && (
+    /\b(?:my|our)\s+(?:repos?|repositories|commits?|pull\s+requests?|prs?|issues?)\b/i.test(aboutMatch[1])
+    || /\bcommits?\b.{0,25}\b(?:repos?|repositories)\b/i.test(aboutMatch[1])
+    || /\b(?:and|then)\s+(?:email|send|notify|message|post|dm|text)\b/i.test(t)
+  );
+  if (aboutMatch && !explainerNeedsLiveTools && !hasAttachments && aboutMatch[1].length >= 2 && aboutMatch[1].length <= 80) {
     const query = aboutMatch[1].trim();
     const isQuickLookup = query.length <= 40;
     const depth = isQuickLookup ? 2 : 3;
