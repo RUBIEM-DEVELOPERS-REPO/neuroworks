@@ -1,0 +1,39 @@
+NeuroWorks — All Rights Reserved, with Grand Challenge Evaluation Licence
+Copyright (c) 2026 the NeuroWorks authors
+
+All source code, documentation, and other original works in this
+repository are proprietary and all rights are reserved by the authors,
+except as explicitly granted below.
+
+## AI Grand Challenge 2026 evaluation licence
+
+For the purposes of the AI Grand Challenge 2026 (POTRAZ), the authors
+grant POTRAZ and its designated adjudicators a non-exclusive,
+royalty-free, revocable licence to:
+
+  - evaluate this submission;
+  - demonstrate this submission for public-interest purposes related to
+    the Grand Challenge; and
+  - pilot this submission with named participants, for the purposes of
+    the Grand Challenge process.
+
+This licence does not grant any right to redistribute, sublicense,
+modify, or commercially exploit the software, in whole or in part,
+outside of the evaluation, demonstration, and pilot activities described
+above.
+
+## Commercial use, procurement, and institutional adoption
+
+Any use of this software beyond the Grand Challenge evaluation licence
+above — including commercial use, government procurement, or
+institutional adoption at production scale — requires a separate written
+agreement with the authors.
+
+## Third-party components
+
+This software incorporates third-party open-source libraries under their
+own licences (predominantly MIT, BSD, ISC, and Apache-2.0; no
+copyleft/GPL-only dependency was found in a production-dependency audit
+run 2026-07-11). See docs-vault-ready/06-grand-challenge-2026/
+asset-and-licence-register.md in this repository for the full list and
+how to reproduce the audit.
