@@ -2992,7 +2992,7 @@ When you're uncertain about citation_coverage, lean higher when you see [N] or [
   },
   {
     name: "users.lookup",
-    description: "Look up ONE person in the organization's Users directory by name or email, and return their details (name, email, role, title, department). Use to resolve 'what's Jane's email?', 'who is Mr. Khumalo?', or to confirm someone is part of the org before acting. Returns null when there's no match.",
+    description: "Look up ONE person in the organization's Users directory by name or email, and return their details (name, email, role, title, department). Use to resolve 'what's Jane's email?', 'who is Mr. Khumalo?', or to confirm someone is part of the org before acting. Self-referential queries ('me', 'the operator', 'owner') resolve to the operator who runs this install. Returns null when there's no match.",
     readonly: true,
     args: [{ name: "query", type: "string", required: true, description: "A name or email (partial name allowed)" }],
     handler: async (args) => {

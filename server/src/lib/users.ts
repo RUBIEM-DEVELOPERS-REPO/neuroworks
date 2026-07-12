@@ -330,9 +330,25 @@ export function directory(): { name: string; email: string; role: Role; title?: 
     .map(u => ({ name: u.name, email: u.email, role: u.role, title: u.title, department: u.department, status: u.status, workMode: u.workMode }));
 }
 
+// Self-referential queries the planner emits when the task says "email me" /
+// "send it to the operator" — there's no directory entry literally named
+// "me", so these used to return null, the $step_N.user.email reference then
+// failed to resolve, and email.send got the literal placeholder string as its
+// recipient (job 6b8b5adf, 2026-07-11). Resolve them to the operator instead:
+// the oldest superadmin, i.e. the person this local install belongs to.
+const SELF_QUERY = /^(?:me|myself|self|my\s+email(?:\s+address)?|(?:the\s+)?operator|(?:the\s+)?owner|account\s+owner|(?:the\s+)?requester|current\s+user|the\s+user)$/i;
+export function isSelfReferentialQuery(query: string): boolean {
+  return SELF_QUERY.test(String(query ?? "").trim());
+}
+
 export function lookupUser(query: string): { name: string; email: string; role: Role; title?: string; department?: string } | null {
   const q = String(query ?? "").trim().toLowerCase();
   if (!q) return null;
+  if (isSelfReferentialQuery(q)) {
+    const list = loadUsers();
+    const operator = list.filter(u => u.role === "superadmin").sort((a, b) => a.createdAt.localeCompare(b.createdAt))[0] ?? list[0];
+    if (operator) return { name: operator.name, email: operator.email, role: operator.role, title: operator.title, department: operator.department };
+  }
   // Rank by match QUALITY, not store order. A bare "Arthur" must resolve to the
   // person whose name IS "Arthur" (arthur@aiinstituteafrica.com), not merely the
   // first record that happens to contain the substring "arthur" (e.g. "Arthur
