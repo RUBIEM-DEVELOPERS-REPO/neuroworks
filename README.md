@@ -208,6 +208,3 @@ pnpm install
 GITHUB_TOKEN=ghp_... GITHUB_OWNER=arthurmagaya pnpm publish-folder "D:\some\folder"
 ```
 
-## Why this isn't an openclaw plugin
-
-Openclaw is local-first by design — it expects a long-running gateway, channel sockets, and `~/.openclaw/` credentials state. None of that fits a cron job in GitHub Actions. The clawbot is intentionally slim (~200 LOC on the cron side) and joined to the rest of the system via the vault git repo. Openclaw, running locally, will read that vault as memory and surface clawbot output through whatever channel (Telegram/Slack/etc.) you configure it for.
