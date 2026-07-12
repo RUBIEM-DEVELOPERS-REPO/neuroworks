@@ -32,7 +32,11 @@ export default {
         leaf: { 400: "#3fb3a0", 500: "#269684" },                    // Cipher Mint
       },
       fontFamily: {
-        display: ["'Space Grotesk'", "system-ui", "sans-serif"],
+        // Warmer, rounder display face (2026-07-12) — replaces Space
+        // Grotesk's geometric/crypto-adjacent letterforms for headings and
+        // the wordmark, without touching body copy (Inter) or the
+        // legitimate monospace uses (JetBrains Mono — code, tabular data).
+        display: ["'Plus Jakarta Sans'", "system-ui", "sans-serif"],
         sans: ["Inter", "system-ui", "sans-serif"],
         mono: ["'JetBrains Mono'", "ui-monospace", "monospace"],
       },

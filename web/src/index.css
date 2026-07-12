@@ -43,7 +43,9 @@
 
 :root {
   font-family: Inter, system-ui, sans-serif;
-  letter-spacing: -0.01em;
+  /* Was -0.01em (dense/technical). Normal tracking reads more open and
+     approachable at body sizes — 2026-07-12 readability pass. */
+  letter-spacing: normal;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
 }
@@ -73,17 +75,25 @@ body::after {                               /* blueprint glow — light from abo
   background: radial-gradient(60% 42% at 50% -6%, var(--bg-glow), transparent 70%);
 }
 
-/* Display face — geometric, wider proportions; reserved for the wordmark,
-   page titles, and section headlines (never body copy). */
+/* Display face — warm, rounded terminals; reserved for the wordmark, page
+   titles, and section headlines (never body copy). Was Space Grotesk
+   (geometric, reads crypto/tech-startup) — swapped 2026-07-12 for something
+   friendlier without losing weight/presence at heading sizes. */
 .font-display {
-  font-family: 'Space Grotesk', system-ui, sans-serif;
+  font-family: 'Plus Jakarta Sans', system-ui, sans-serif;
   letter-spacing: normal;
 }
-/* Eyebrow labels — quiet structural markers above headings. */
+/* Eyebrow labels — quiet structural markers above headings. Was set in
+   JetBrains Mono (the single biggest "terminal UI" signal in the old
+   system) — moved to Inter, same uppercase/tracked treatment, so labels
+   read as quiet typography instead of a code/log readout. JetBrains Mono
+   stays in the stack for its 200+ legitimate uses elsewhere (code blocks,
+   tabular numbers in cost/data tables). */
 .nw-eyebrow {
-  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-family: Inter, system-ui, sans-serif;
   font-size: 12px;
-  letter-spacing: 0.1em;
+  font-weight: 600;
+  letter-spacing: 0.08em;
   text-transform: uppercase;
   font-feature-settings: "tnum";
   color: var(--c-cream-300);
