@@ -1,46 +1,71 @@
 import { Routes, Route, Navigate } from "react-router-dom";
+import { lazy, Suspense } from "react";
 import { Layout } from "./components/Layout";
-import { Dashboard } from "./pages/Dashboard";
-import { Tasks } from "./pages/Tasks";
-import { Templates } from "./pages/Templates";
-import { Approvals } from "./pages/Approvals";
-import { Activity } from "./pages/Activity";
-import { Knowledge } from "./pages/Knowledge";
-import { Admin } from "./pages/Admin";
-import { Settings } from "./pages/Settings";
-import { Chat } from "./pages/Chat";
-import { Personas } from "./pages/Personas";
-import { Team } from "./pages/Team";
-import { Results, ResultsIndex } from "./pages/Results";
-import { Skills } from "./pages/Skills";
-import { Schedules } from "./pages/Schedules";
-import { Governance } from "./pages/Governance";
-import { CalendarPage } from "./pages/CalendarPage";
-import { DocEditor } from "./pages/DocEditor";
-import { DataSources } from "./pages/DataSources";
-import { Terminal } from "./pages/Terminal";
-import { Integrations } from "./pages/Integrations";
-import { Connectors } from "./pages/Connectors";
-import { Payments } from "./pages/Payments";
-import { Presets } from "./pages/Presets";
-import { Users } from "./pages/Users";
-import { Workforce } from "./pages/Workforce";
-import { Departments } from "./pages/Departments";
-import { KnowledgePacks } from "./pages/KnowledgePacks";
-import { DataPipeline } from "./pages/DataPipeline";
-import { Models } from "./pages/Models";
-import { Quality } from "./pages/Quality";
-import { Cost } from "./pages/Cost";
-import { AuditLog } from "./pages/AuditLog";
-import { SkillForge } from "./pages/SkillForge";
-import { Orchestrate } from "./pages/Orchestrate";
+import { Skeleton } from "./components/Card";
+
+// Route-level code splitting. Login/Onboarding load eagerly (they're the
+// first thing an unauthenticated visitor sees); everything behind the app
+// shell is fetched on demand — a user opening the app to check one page
+// shouldn't download all 30+ pages' worth of JS up front. Each page becomes
+// its own fingerprinted chunk (see vite.config.ts's manualChunks for the
+// vendor split that pairs with this), so a change to one page doesn't bust
+// the cache for the others either.
 import { Login } from "./pages/Login";
 import { Onboarding } from "./pages/Onboarding";
-import { DailyReports } from "./pages/DailyReports";
+const Dashboard = lazy(() => import("./pages/Dashboard").then(m => ({ default: m.Dashboard })));
+const Tasks = lazy(() => import("./pages/Tasks").then(m => ({ default: m.Tasks })));
+const Templates = lazy(() => import("./pages/Templates").then(m => ({ default: m.Templates })));
+const Approvals = lazy(() => import("./pages/Approvals").then(m => ({ default: m.Approvals })));
+const Activity = lazy(() => import("./pages/Activity").then(m => ({ default: m.Activity })));
+const Knowledge = lazy(() => import("./pages/Knowledge").then(m => ({ default: m.Knowledge })));
+const Admin = lazy(() => import("./pages/Admin").then(m => ({ default: m.Admin })));
+const Settings = lazy(() => import("./pages/Settings").then(m => ({ default: m.Settings })));
+const Chat = lazy(() => import("./pages/Chat").then(m => ({ default: m.Chat })));
+const Personas = lazy(() => import("./pages/Personas").then(m => ({ default: m.Personas })));
+const Team = lazy(() => import("./pages/Team").then(m => ({ default: m.Team })));
+const ResultsIndex = lazy(() => import("./pages/Results").then(m => ({ default: m.ResultsIndex })));
+const Results = lazy(() => import("./pages/Results").then(m => ({ default: m.Results })));
+const Skills = lazy(() => import("./pages/Skills").then(m => ({ default: m.Skills })));
+const Schedules = lazy(() => import("./pages/Schedules").then(m => ({ default: m.Schedules })));
+const Governance = lazy(() => import("./pages/Governance").then(m => ({ default: m.Governance })));
+const CalendarPage = lazy(() => import("./pages/CalendarPage").then(m => ({ default: m.CalendarPage })));
+const DocEditor = lazy(() => import("./pages/DocEditor").then(m => ({ default: m.DocEditor })));
+const DataSources = lazy(() => import("./pages/DataSources").then(m => ({ default: m.DataSources })));
+const Terminal = lazy(() => import("./pages/Terminal").then(m => ({ default: m.Terminal })));
+const Integrations = lazy(() => import("./pages/Integrations").then(m => ({ default: m.Integrations })));
+const Connectors = lazy(() => import("./pages/Connectors").then(m => ({ default: m.Connectors })));
+const Payments = lazy(() => import("./pages/Payments").then(m => ({ default: m.Payments })));
+const Presets = lazy(() => import("./pages/Presets").then(m => ({ default: m.Presets })));
+const Users = lazy(() => import("./pages/Users").then(m => ({ default: m.Users })));
+const Workforce = lazy(() => import("./pages/Workforce").then(m => ({ default: m.Workforce })));
+const Departments = lazy(() => import("./pages/Departments").then(m => ({ default: m.Departments })));
+const KnowledgePacks = lazy(() => import("./pages/KnowledgePacks").then(m => ({ default: m.KnowledgePacks })));
+const DataPipeline = lazy(() => import("./pages/DataPipeline").then(m => ({ default: m.DataPipeline })));
+const Models = lazy(() => import("./pages/Models").then(m => ({ default: m.Models })));
+const Quality = lazy(() => import("./pages/Quality").then(m => ({ default: m.Quality })));
+const Cost = lazy(() => import("./pages/Cost").then(m => ({ default: m.Cost })));
+const AuditLog = lazy(() => import("./pages/AuditLog").then(m => ({ default: m.AuditLog })));
+const SkillForge = lazy(() => import("./pages/SkillForge").then(m => ({ default: m.SkillForge })));
+const Orchestrate = lazy(() => import("./pages/Orchestrate").then(m => ({ default: m.Orchestrate })));
+const DailyReports = lazy(() => import("./pages/DailyReports").then(m => ({ default: m.DailyReports })));
+
+// Lightweight, layout-shift-free placeholder while a route chunk downloads —
+// on a warm cache this never has time to paint; on a cold load it beats a
+// blank white flash.
+function RouteFallback() {
+  return (
+    <div className="space-y-3">
+      <Skeleton className="h-8 w-48" />
+      <Skeleton className="h-32 w-full" />
+      <Skeleton className="h-32 w-full" />
+    </div>
+  );
+}
 
 function AppShell() {
   return (
     <Layout>
+      <Suspense fallback={<RouteFallback />}>
       <Routes>
         <Route path="/" element={<Navigate to="/dashboard" />} />
         <Route path="/dashboard" element={<Dashboard />} />
@@ -82,6 +107,7 @@ function AppShell() {
         <Route path="/settings" element={<Settings />} />
         <Route path="*" element={<Navigate to="/dashboard" />} />
       </Routes>
+      </Suspense>
     </Layout>
   );
 }

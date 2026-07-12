@@ -1,4 +1,5 @@
 import express from "express";
+import compression from "compression";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { config, validateConfig } from "./config.js";
@@ -71,6 +72,13 @@ import { enterpriseAuthGuard } from "./lib/enterprise-auth.js";
 validateConfig();
 
 const app = express();
+// Gzip/brotli every compressible response — the built SPA's JS/CSS, JSON API
+// responses, markdown. Only touches the OUTGOING body so it's safe ahead of
+// the raw-body webhook parsers below (those need the raw REQUEST body,
+// unaffected by response compression). Real transfer-size win on every
+// request, not just the initial page load, and stateless per-request so it
+// doesn't interact with horizontal scale-out at all.
+app.use(compression());
 // Stripe webhook needs the RAW request body to verify the signature — mount a
 // raw parser for that ONE path BEFORE the JSON parser (body-parser sets
 // req._body once read, so the JSON parser below then skips it).
