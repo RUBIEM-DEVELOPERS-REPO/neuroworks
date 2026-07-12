@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import { BrandMark } from "./BrandMark";
 import { GlitterBackground } from "./GlitterBackground";
+import { PixelDriftText } from "./PixelDriftText";
 import { CommandPalette } from "./CommandPalette";
 import { Kbd, MetaKey } from "./Kbd";
 import { api, setToken, type User } from "../lib/api";
@@ -191,7 +192,9 @@ export function Layout({ children }: { children: ReactNode }) {
           <Link to="/dashboard" className="flex items-center gap-2.5">
             <BrandMark size={26} />
             <div>
-              <div className="font-display font-semibold text-cream-50 text-xl leading-none tracking-tight">NeuroWorks</div>
+              <div className="w-[168px] h-8">
+                <PixelDriftText text="NeuroWorks" />
+              </div>
               <div className="text-[10px] text-cream-300/70 mt-1 tracking-[0.18em] uppercase">The Intelligent Organization</div>
             </div>
           </Link>
