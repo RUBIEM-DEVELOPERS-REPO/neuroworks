@@ -215,7 +215,16 @@ function aggregate(jobs: Job[], windowStartMs: number, windowEndMs: number): Dai
       failureBuckets[norm].templates.add(tpl);
     }
 
-    const runs = Array.isArray(r.runs) ? r.runs : [];
+    // Count tool runs where they EXECUTED. A delegated task produces two job
+    // records carrying the SAME runs array: the delegating side's job (which
+    // mirrors the peer's runs back and sets r.peer) and the peer's own
+    // peer:delegate record. Aggregating both doubled every delegated step —
+    // 2026-07-11's reflection reported 2 × 124s research.deep runs (248s of
+    // "wall time") for what was a single call, and flagged the tool's latency
+    // off inflated numbers. Skip the mirrored copy (r.peer set); the peer's
+    // own record — read from local disk for a managed worker, or fetched via
+    // /api/peers/jobs for a remote one — supplies the single true count.
+    const runs = !r.peer && Array.isArray(r.runs) ? r.runs : [];
     for (const run of runs) {
       const tool = run?.step?.tool ?? "unknown";
       toolBuckets[tool] = toolBuckets[tool] ?? { runs: 0, ok: 0, failed: 0, totalSec: 0 };
