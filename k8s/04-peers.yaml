@@ -37,12 +37,14 @@ metadata:
     role: peer
 spec:
   serviceName: neuroworks-peer
-  # 3 peers + 1 primary = 4 pods. Bump to 4 for 5 total — and add the
-  # matching neuroworks-peer-3 entry to the primary's NEUROWORKS_PEERS
-  # (03-primary.yaml), since that list is static, not auto-discovered.
-  # Start with 1 while you confirm the primary can actually reach a peer
-  # end-to-end, THEN scale up.
-  replicas: 3
+  # 5 peers + 1 primary = 6 pods (the "3-5 always running, for scale" ask,
+  # applied to the part of this app that's actually safe to scale — see the
+  # top of 01-configmap.yaml for why the primary stays at 1). Static list,
+  # not auto-discovered: if you change this number, update the primary's
+  # NEUROWORKS_PEERS in 03-primary.yaml to match (peer-0..peer-4) and roll
+  # it. Started this at 3 and validated end-to-end before bumping to 5 —
+  # don't jump straight to 5 on a cluster you haven't tested this on yet.
+  replicas: 5
   updateStrategy:
     type: RollingUpdate
   selector:
@@ -57,6 +59,20 @@ spec:
     spec:
       securityContext:
         runAsNonRoot: true
+      # Stability: prefer spreading peer pods across different nodes so one
+      # node going down doesn't take out the whole execution pool at once.
+      # Soft (preferred, not required) — on a small/single-node cluster this
+      # just gets ignored rather than leaving pods unschedulable.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: neuroworks
+                    role: peer
+                topologyKey: kubernetes.io/hostname
       containers:
         - name: neuroworks
           image: neuroworks:latest   # same image as the primary — see 03-primary.yaml
@@ -113,3 +129,20 @@ spec:
         accessModes: ["ReadWriteOnce"]
         resources:
           requests: { storage: 5Gi }
+---
+# Stability: cap how many peers a voluntary disruption (node drain, cluster
+# upgrade) can take down at once, so a rollout never drops the primary's
+# entire delegation pool to zero mid-task. Doesn't apply to involuntary
+# disruption (a node crashing) — that's what replicas: 5 + anti-affinity
+# above are for.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: neuroworks-peer
+  namespace: neuroworks
+spec:
+  minAvailable: 60%
+  selector:
+    matchLabels:
+      app: neuroworks
+      role: peer

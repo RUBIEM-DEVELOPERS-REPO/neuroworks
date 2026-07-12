@@ -10,11 +10,15 @@
 #   • ONE primary (StatefulSet, replicas: 1) — owns users/sessions/jobs/the
 #     web UI/API that end users and browsers talk to. This is the only thing
 #     an Ingress or external Service should point at.
-#   • THREE-to-FIVE peers (StatefulSet, replicas: 3 by default) — API-only
-#     execution capacity the primary delegates work to (lib/peers.ts). No web
-#     UI, no end-user traffic, invisible outside the cluster. This is where
-#     your "3-5 containers running" actually comes from: 1 primary + 3 peers
-#     = 4 pods; bump peer replicas to 4 for 5 total.
+#   • FIVE peers (StatefulSet, replicas: 5, spread across nodes via a soft
+#     anti-affinity rule + a PodDisruptionBudget so a drain/upgrade never
+#     drops the whole pool at once) — API-only execution capacity the
+#     primary delegates work to (lib/peers.ts). No web UI, no end-user
+#     traffic, invisible outside the cluster. 1 primary + 5 peers = 6 pods
+#     always running — this is where "3-5 containers, always up, for scale"
+#     actually comes from. Dial peer replicas down (e.g. to 3) in
+#     04-peers.yaml if 5 is more than your cluster/inference capacity needs
+#     — just keep 03-primary.yaml's NEUROWORKS_PEERS list in sync.
 #
 # Each pod gets its OWN state + vault volume (never shared across pods — RWO
 # block storage can't multi-attach across nodes anyway). The vault stays in

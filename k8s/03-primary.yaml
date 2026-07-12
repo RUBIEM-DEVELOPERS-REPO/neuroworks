@@ -54,17 +54,19 @@ spec:
             # Static peer list — matches how NEUROWORKS_PEERS already works
             # for real multi-host setups (docker-compose.scale.yml), just
             # pointed at the peer StatefulSet's stable per-pod DNS names via
-            # the headless Service in 04-peers.yaml. Default here is 3 peers
-            # (peer-replicas default in 04-peers.yaml); if you scale peer
-            # replicas up to 4 or 5, add the matching neuroworks-peer-3 /
-            # -4 entries here and roll the primary (kubectl rollout restart
-            # statefulset/neuroworks-primary -n neuroworks) — this list is
-            # NOT auto-discovered across pods, by design (see peer-registry.ts).
+            # the headless Service in 04-peers.yaml. 5 entries here to match
+            # 04-peers.yaml's replicas: 5 — this list is NOT auto-discovered
+            # across pods, by design (see peer-registry.ts), so the two files
+            # have to be kept in sync by hand. If you change peer replica
+            # count, update both and roll the primary (kubectl rollout
+            # restart statefulset/neuroworks-primary -n neuroworks).
             - name: NEUROWORKS_PEERS
               value: >-
                 http://neuroworks-peer-0.neuroworks-peer.neuroworks.svc.cluster.local:7471,
                 http://neuroworks-peer-1.neuroworks-peer.neuroworks.svc.cluster.local:7471,
-                http://neuroworks-peer-2.neuroworks-peer.neuroworks.svc.cluster.local:7471
+                http://neuroworks-peer-2.neuroworks-peer.neuroworks.svc.cluster.local:7471,
+                http://neuroworks-peer-3.neuroworks-peer.neuroworks.svc.cluster.local:7471,
+                http://neuroworks-peer-4.neuroworks-peer.neuroworks.svc.cluster.local:7471
           ports:
             - containerPort: 7471
               name: http
