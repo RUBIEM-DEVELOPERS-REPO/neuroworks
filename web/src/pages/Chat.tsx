@@ -203,17 +203,36 @@ export function Chat() {
   // below and defaults to true so the initial mount still lands at the
   // bottom. Sending a message always scrolls (the user just acted, they
   // want to see it go out) — tracked via justSentRef.
+  //
+  // This is deliberately NOT keyed off `messages`/`busy` (that was the first
+  // pass at this fix, and it wasn't enough): each assistant bubble with a
+  // jobId mounts its own InlineJob, which fetches the job's report
+  // ASYNCHRONOUSLY and can add a lot of height (trace steps, the full
+  // ResultPanel) well after Chat's own state has already settled. A
+  // messages-keyed effect fires once, before that content exists, and never
+  // re-fires when it lands — verified live: loading a session with a
+  // completed-job report card left scrollTop stuck at 0 for 8+ seconds while
+  // the pane kept growing underneath it. A ResizeObserver on the message
+  // list's content wrapper catches ANY height change regardless of source
+  // (React state, async job data, images, fonts) and re-applies the same
+  // "stick to bottom if I was there" rule.
   const wasNearBottomRef = useRef(true);
   const justSentRef = useRef(false);
   const NEAR_BOTTOM_PX = 120;
+  const messageListRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    const el = scrollRef.current;
-    if (!el) return;
-    if (justSentRef.current || wasNearBottomRef.current) {
-      el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
-    }
-    justSentRef.current = false;
-  }, [messages, busy]);
+    const container = scrollRef.current;
+    const content = messageListRef.current;
+    if (!container || !content) return;
+    const ro = new ResizeObserver(() => {
+      if (justSentRef.current || wasNearBottomRef.current) {
+        container.scrollTop = container.scrollHeight;
+      }
+      justSentRef.current = false;
+    });
+    ro.observe(content);
+    return () => ro.disconnect();
+  }, []);
   useEffect(() => { api.health().then(h => setModel(h.model)).catch(() => {}); }, []);
 
   // Poll the active persona + its templates. Re-runs every 5s so swapping
@@ -610,7 +629,7 @@ export function Chat() {
           </div>
         )}
 
-        <div className="max-w-3xl mx-auto space-y-5">
+        <div ref={messageListRef} className="max-w-3xl mx-auto space-y-5">
           {messages.map((m, i) => (
             <Bubble
               key={i}
