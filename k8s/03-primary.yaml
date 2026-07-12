@@ -1,0 +1,126 @@
+# The primary — the ONLY pod that should receive end-user/browser traffic.
+# Owns users.json/sessions.json/the jobs journal; replicas is deliberately 1
+# (see 01-configmap.yaml for why this isn't a naive scale-out). A
+# StatefulSet (not a Deployment) so a rolling update terminates the old pod
+# before creating the new one — two pods briefly racing for the same RWO PVC
+# would leave the second stuck Pending.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: neuroworks-primary
+  namespace: neuroworks
+  labels:
+    app: neuroworks
+    role: primary
+spec:
+  serviceName: neuroworks-primary
+  replicas: 1
+  updateStrategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      app: neuroworks
+      role: primary
+  template:
+    metadata:
+      labels:
+        app: neuroworks
+        role: primary
+    spec:
+      securityContext:
+        runAsNonRoot: true
+      containers:
+        - name: neuroworks
+          # CHANGEME — build + push this image to a registry your cluster can
+          # pull from, e.g.:
+          #   docker build -t YOUR_REGISTRY/neuroworks:v0.2.0 .
+          #   docker push YOUR_REGISTRY/neuroworks:v0.2.0
+          # Pin an explicit tag in real deployments — ":latest" makes rollouts
+          # non-reproducible (you can't tell what's actually running).
+          image: neuroworks:latest
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef:
+                name: neuroworks-config
+            - secretRef:
+                name: neuroworks-secrets
+          env:
+            - name: SERVE_WEB
+              value: "1"
+            - name: NEUROWORKS_ROLE
+              value: "primary"
+            - name: NEUROWORKS_NAME
+              value: "primary"
+            # Static peer list — matches how NEUROWORKS_PEERS already works
+            # for real multi-host setups (docker-compose.scale.yml), just
+            # pointed at the peer StatefulSet's stable per-pod DNS names via
+            # the headless Service in 04-peers.yaml. Default here is 3 peers
+            # (peer-replicas default in 04-peers.yaml); if you scale peer
+            # replicas up to 4 or 5, add the matching neuroworks-peer-3 /
+            # -4 entries here and roll the primary (kubectl rollout restart
+            # statefulset/neuroworks-primary -n neuroworks) — this list is
+            # NOT auto-discovered across pods, by design (see peer-registry.ts).
+            - name: NEUROWORKS_PEERS
+              value: >-
+                http://neuroworks-peer-0.neuroworks-peer.neuroworks.svc.cluster.local:7471,
+                http://neuroworks-peer-1.neuroworks-peer.neuroworks.svc.cluster.local:7471,
+                http://neuroworks-peer-2.neuroworks-peer.neuroworks.svc.cluster.local:7471
+          ports:
+            - containerPort: 7471
+              name: http
+          readinessProbe:
+            httpGet: { path: /api/health, port: 7471 }
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /api/health, port: 7471 }
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            failureThreshold: 3
+          # Starting point, not a measured number — this session had no load
+          # test against a live cluster. Watch `kubectl top pod` under real
+          # traffic and adjust; Playwright + tesseract native deps push
+          # baseline memory up versus a plain Node image.
+          resources:
+            requests: { cpu: "250m", memory: "512Mi" }
+            limits: { cpu: "1", memory: "2Gi" }
+          volumeMounts:
+            - name: state
+              mountPath: /app/.neuroworks
+            - name: vault
+              mountPath: /data/vault
+  volumeClaimTemplates:
+    - metadata:
+        name: state
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        # storageClassName omitted — uses the cluster default. Set one
+        # explicitly if your cluster doesn't have a sensible default.
+        resources:
+          requests: { storage: 2Gi }
+    - metadata:
+        name: vault
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests: { storage: 5Gi }
+---
+# Internal DNS name for the primary. This is the ONLY Service an Ingress (see
+# 05-ingress.example.yaml) or a port-forward should target.
+apiVersion: v1
+kind: Service
+metadata:
+  name: neuroworks-primary
+  namespace: neuroworks
+  labels:
+    app: neuroworks
+    role: primary
+spec:
+  selector:
+    app: neuroworks
+    role: primary
+  ports:
+    - port: 7471
+      targetPort: 7471
+      name: http

@@ -1,0 +1,79 @@
+# NeuroWorks on Kubernetes.
+#
+# READ THIS BEFORE APPLYING — this is NOT "5 identical stateless replicas
+# behind a load balancer." Users/sessions/jobs live in a local JSON store per
+# pod (server/src/lib/users.ts, jobs.ts) — round-robining browser traffic
+# across identical pods would log people out and lose job-status polling at
+# random. docker-compose.scale.yml already documents the model that actually
+# works, and these manifests are that same model translated to k8s:
+#
+#   • ONE primary (StatefulSet, replicas: 1) — owns users/sessions/jobs/the
+#     web UI/API that end users and browsers talk to. This is the only thing
+#     an Ingress or external Service should point at.
+#   • THREE-to-FIVE peers (StatefulSet, replicas: 3 by default) — API-only
+#     execution capacity the primary delegates work to (lib/peers.ts). No web
+#     UI, no end-user traffic, invisible outside the cluster. This is where
+#     your "3-5 containers running" actually comes from: 1 primary + 3 peers
+#     = 4 pods; bump peer replicas to 4 for 5 total.
+#
+# Each pod gets its OWN state + vault volume (never shared across pods — RWO
+# block storage can't multi-attach across nodes anyway). The vault stays in
+# sync via VAULT_REPO git pull/push (server/src/lib/vault.ts's existing
+# scheduler), the same mechanism the repo already uses for real multi-host
+# secondaries — NOT a shared PVC.
+#
+# What you MUST fill in before this works (search for CHANGEME below and in
+# 02-secret.example.yaml):
+#   • OLLAMA_HOST — nothing in here runs Ollama for you. Point it at an
+#     in-cluster Ollama Service, a reachable external host, or switch to a
+#     cloud provider (OPENROUTER_API_KEY / ANTHROPIC_* in the Secret) instead.
+#     docker-compose.scale.yml's own warning applies here too: peers sharing
+#     ONE Ollama just queue behind it — extra pods add zero throughput unless
+#     inference itself scales (OLLAMA_NUM_PARALLEL, multiple Ollama replicas,
+#     or a paid cloud tier).
+#   • VAULT_REPO / GITHUB_OWNER — your vault's git remote.
+#   • NEUROWORKS_ALLOWED_HOSTS — the real hostname you'll reach this through
+#     (Ingress host, LoadBalancer DNS, etc.) — the origin-guard 403s anything
+#     not on this list.
+#   • Everything in 02-secret.example.yaml, especially NEUROWORKS_SECRET_KEY
+#     (see the comment there — this one is not optional in a real deployment).
+#
+# NOT verified against a live cluster in this session (no docker/kubectl
+# daemon available here) — syntactically valid, follows the app's own
+# documented multi-host model, but treat the first `kubectl apply` as the
+# real test. Start with peer replicas: 1 and confirm end-to-end before
+# scaling to 3-5.
+#
+# Apply order: kubectl apply -k k8s/   (kustomization.yaml sets the order)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: neuroworks-config
+  namespace: neuroworks
+data:
+  NEUROWORKS_PORT: "7471"
+  NEUROWORKS_BIND_HOST: "0.0.0.0"
+  VAULT_PATH: "/data/vault"
+  # Enterprise auth gate — OFF by default in the app because a loopback-bound
+  # single instance doesn't need it. A multi-pod cluster reachable over the
+  # pod network from anywhere else in the cluster (and possibly outside it
+  # via Ingress) is exactly the "reachable from a wider network" case
+  # enterprise-auth.ts exists for. Must be "1" here — see risk-note.md and
+  # server/src/lib/enterprise-auth.ts.
+  NEUROWORKS_ENTERPRISE_MODE: "1"
+  # CHANGEME — the hostname you'll actually reach the primary through
+  # (Ingress host / LoadBalancer external DNS / port-forward host). Comma-
+  # separated for more than one. The origin-guard 403s any Host header not
+  # on this list — see server/src/lib/origin-guard.ts.
+  NEUROWORKS_ALLOWED_HOSTS: "neuroworks.CHANGEME.example.com"
+  # CHANGEME — point at a real Ollama. Nothing in these manifests deploys one.
+  OLLAMA_HOST: "http://ollama.CHANGEME.svc.cluster.local:11434"
+  OLLAMA_MODEL: "qwen2.5:3b"
+  # CHANGEME — your vault's git remote (owner/repo). Each pod git-pulls this
+  # into its own local /data/vault instead of sharing a volume.
+  VAULT_REPO: "CHANGEME/main-brain"
+  GITHUB_OWNER: "CHANGEME"
+  # In-cluster scale-out replaces the single-host managed-worker pool and
+  # localhost auto-discovery — both are meaningless/wasteful across pods.
+  NEUROWORKS_AUTO_SPAWN_WORKER: "0"
+  NEUROWORKS_NO_AUTODISCOVER: "1"

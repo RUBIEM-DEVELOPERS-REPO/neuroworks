@@ -1,0 +1,115 @@
+# API-only execution capacity the primary delegates work to (lib/peers.ts).
+# No SERVE_WEB, no web UI, never targeted by an Ingress or external Service —
+# reached only by the primary, over the headless Service below. Headless
+# (clusterIP: None) so each pod gets a stable, individually-addressable DNS
+# name (neuroworks-peer-0.neuroworks-peer…, -1, -2…) — the primary's
+# NEUROWORKS_PEERS list in 03-primary.yaml depends on these exact names.
+#
+# Mirrors docker-compose.scale.yml's own warning: extra peer pods only add
+# throughput if inference doesn't bottleneck on one shared Ollama. Confirm
+# OLLAMA_HOST actually scales (multiple Ollama replicas, OLLAMA_NUM_PARALLEL,
+# or cloud escalation) before assuming more peer replicas = more throughput.
+apiVersion: v1
+kind: Service
+metadata:
+  name: neuroworks-peer
+  namespace: neuroworks
+  labels:
+    app: neuroworks
+    role: peer
+spec:
+  clusterIP: None
+  selector:
+    app: neuroworks
+    role: peer
+  ports:
+    - port: 7471
+      targetPort: 7471
+      name: http
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: neuroworks-peer
+  namespace: neuroworks
+  labels:
+    app: neuroworks
+    role: peer
+spec:
+  serviceName: neuroworks-peer
+  # 3 peers + 1 primary = 4 pods. Bump to 4 for 5 total — and add the
+  # matching neuroworks-peer-3 entry to the primary's NEUROWORKS_PEERS
+  # (03-primary.yaml), since that list is static, not auto-discovered.
+  # Start with 1 while you confirm the primary can actually reach a peer
+  # end-to-end, THEN scale up.
+  replicas: 3
+  updateStrategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      app: neuroworks
+      role: peer
+  template:
+    metadata:
+      labels:
+        app: neuroworks
+        role: peer
+    spec:
+      securityContext:
+        runAsNonRoot: true
+      containers:
+        - name: neuroworks
+          image: neuroworks:latest   # same image as the primary — see 03-primary.yaml
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef:
+                name: neuroworks-config
+            - secretRef:
+                name: neuroworks-secrets
+          env:
+            - name: SERVE_WEB
+              value: "0"
+            - name: NEUROWORKS_ROLE
+              value: "persona-shifter"
+            # Stable, human-legible identity per pod (shows up in /api/health
+            # and logs) — the StatefulSet pod name is already unique and
+            # ordinal, so just reuse it via the downward API instead of a
+            # wrapper script.
+            - name: NEUROWORKS_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          ports:
+            - containerPort: 7471
+              name: http
+          readinessProbe:
+            httpGet: { path: /api/health, port: 7471 }
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /api/health, port: 7471 }
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            failureThreshold: 3
+          resources:
+            requests: { cpu: "250m", memory: "512Mi" }
+            limits: { cpu: "1", memory: "2Gi" }
+          volumeMounts:
+            - name: state
+              mountPath: /app/.neuroworks
+            - name: vault
+              mountPath: /data/vault
+  volumeClaimTemplates:
+    - metadata:
+        name: state
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests: { storage: 1Gi }
+    - metadata:
+        name: vault
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests: { storage: 5Gi }

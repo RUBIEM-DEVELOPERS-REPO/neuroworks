@@ -1,0 +1,15 @@
+# kubectl apply -k k8s/
+#
+# 02-secret.example.yaml is deliberately NOT listed here — it's a template
+# with CHANGEME placeholders, not something to apply as-is. Create the real
+# secret out-of-band (see the comment at the top of that file) before
+# applying this kustomization, or the primary/peer pods will crash-loop on
+# a missing NEUROWORKS_SECRET_KEY.
+#
+# 05-ingress.example.yaml is also excluded — fill in your real domain/
+# ingress-controller details first, then add it here or apply it separately.
+resources:
+  - 00-namespace.yaml
+  - 01-configmap.yaml
+  - 03-primary.yaml
+  - 04-peers.yaml

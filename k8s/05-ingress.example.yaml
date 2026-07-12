@@ -1,0 +1,47 @@
+# OPTIONAL, template only — not in kustomization.yaml's default resource
+# list (see the comment there). Fill in the CHANGEME lines for your actual
+# ingress controller + domain + TLS setup before applying, then either add it
+# to kustomization.yaml or `kubectl apply -f 05-ingress.yaml` directly.
+#
+# Without this: reach the primary via `kubectl port-forward
+# svc/neuroworks-primary -n neuroworks 7471:7471` for testing, or change
+# 03-primary.yaml's Service `type` to LoadBalancer for a quick external IP
+# (fine for a demo; a real Ingress gets you TLS termination + a stable
+# hostname, which NEUROWORKS_ALLOWED_HOSTS also needs to match).
+#
+# This example assumes ingress-nginx + cert-manager (the common combo). If
+# your cluster uses something else (Traefik, an AWS/GCP/Azure-native
+# ingress, etc.) the annotations and apiVersion specifics will differ.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: neuroworks
+  namespace: neuroworks
+  annotations:
+    # CHANGEME — swap for your cluster's actual ingress class / controller.
+    kubernetes.io/ingress.class: nginx
+    # Drop this if you're not running cert-manager — you'll need to bring
+    # your own TLS secret instead.
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    # The web UI streams/polls fairly often (task status, chat) — raise the
+    # proxy timeout past nginx's 60s default so a longer-running task
+    # request doesn't get cut off mid-flight.
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+spec:
+  tls:
+    - hosts:
+        # CHANGEME — must match NEUROWORKS_ALLOWED_HOSTS in 01-configmap.yaml
+        - neuroworks.CHANGEME.example.com
+      secretName: neuroworks-tls
+  rules:
+    - host: neuroworks.CHANGEME.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: neuroworks-primary
+                port:
+                  number: 7471

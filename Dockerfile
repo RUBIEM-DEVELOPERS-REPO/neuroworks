@@ -40,7 +40,7 @@ RUN pnpm install --frozen-lockfile || pnpm install
 COPY . .
 
 # Build the web SPA to web/dist (minified, fingerprinted). The API serves it.
-RUN pnpm -F clawbot-web build
+RUN pnpm -F neuroworks-web build
 
 # State + vault mount points. Declared as volumes so an operator gets durable,
 # separately-managed storage by default even without compose.
@@ -67,4 +67,4 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
   CMD node -e "require('http').get('http://127.0.0.1:'+(process.env.NEUROWORKS_PORT||7471)+'/api/health',r=>process.exit(r.statusCode<400?0:1)).on('error',()=>process.exit(1))"
 
 # Single production process: the API server, which also serves the built SPA.
-CMD ["pnpm", "-F", "clawbot-server", "start"]
+CMD ["pnpm", "-F", "neuroworks-server", "start"]
