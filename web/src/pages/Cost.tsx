@@ -188,8 +188,13 @@ function RecentCallsBlock({ summary }: { summary: any }) {
     <div className="bg-ink-900 rounded-lg border p-4">
       <h2 className="font-semibold mb-3">Recent Calls</h2>
       <div className="space-y-1 text-sm">
-        {summary.recentCalls.slice(0, 20).map((c: any) => (
-          <div key={`${c.jobId}-${c.ts}`} className="flex items-center justify-between border-b last:border-0 py-1">
+        {summary.recentCalls.slice(0, 20).map((c: any, i: number) => (
+          // jobId+ts alone can collide — most calls are jobId:"adhoc" (not
+          // tied to a tracked job), and two calls landing in the same
+          // millisecond isn't rare under concurrent requests. Index as a
+          // tiebreaker is safe here since this list is a static slice, not
+          // reordered/filtered independently between renders.
+          <div key={`${c.jobId}-${c.ts}-${i}`} className="flex items-center justify-between border-b last:border-0 py-1">
             <div className="flex-1 min-w-0">
               <span className="font-mono text-xs truncate block">{c.model}</span>
               <span className="text-xs text-cream-300/50">{c.profile}</span>

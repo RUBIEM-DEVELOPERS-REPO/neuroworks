@@ -195,7 +195,25 @@ export function Chat() {
     snapshotRecentSession(sessionId, messages);
     setRecentSessions(loadRecentSessions());
   }, [messages, sessionId]);
-  useEffect(() => { scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" }); }, [messages, busy]);
+  // Auto-scroll to the newest message, but ONLY if the user was already near
+  // the bottom before this update — otherwise a response arriving while
+  // they've scrolled up to reread something yanks them back down mid-read,
+  // which is exactly the "can't read the chat, it keeps auto-adjusting" bug.
+  // wasNearBottomRef is updated by the onScroll handler on the message list
+  // below and defaults to true so the initial mount still lands at the
+  // bottom. Sending a message always scrolls (the user just acted, they
+  // want to see it go out) — tracked via justSentRef.
+  const wasNearBottomRef = useRef(true);
+  const justSentRef = useRef(false);
+  const NEAR_BOTTOM_PX = 120;
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    if (justSentRef.current || wasNearBottomRef.current) {
+      el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+    }
+    justSentRef.current = false;
+  }, [messages, busy]);
   useEffect(() => { api.health().then(h => setModel(h.model)).catch(() => {}); }, []);
 
   // Poll the active persona + its templates. Re-runs every 5s so swapping
@@ -298,6 +316,9 @@ export function Chat() {
     if (s.id === sessionId && messages.length === s.messages.length) return;
     // Snapshot the CURRENT session before swapping so it stays in recents.
     if (messages.length > 0 && sessionId !== s.id) snapshotRecentSession(sessionId, messages);
+    // Switching threads entirely — always land on the newest message of the
+    // resumed session, not wherever the previous thread happened to scroll.
+    justSentRef.current = true;
     setSessionId(s.id);
     try { localStorage.setItem(SESSION_ID_KEY, s.id); } catch {}
     setMessages(s.messages);
@@ -315,6 +336,9 @@ export function Chat() {
     // "Summarize this for me" can be implied by just attaching a doc.
     if (busy) return;
     if (!topic && pendingAttachments.length === 0) return;
+    // The user just acted — always scroll to show their message going out
+    // and the response arriving, regardless of prior scroll position.
+    justSentRef.current = true;
     // If a template is pinned, the customer's typed text is the TOPIC. We
     // splice it into the template prompt server-side so the planner sees
     // the full instruction ("research.multiperspective: <topic>") while the
@@ -545,7 +569,13 @@ export function Chat() {
         </div>
       )}
 
-      <div ref={scrollRef} className="flex-1 overflow-auto scrollbar-thin px-8 py-6">
+      <div
+        ref={scrollRef}
+        onScroll={e => {
+          const el = e.currentTarget;
+          wasNearBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < NEAR_BOTTOM_PX;
+        }}
+        className="flex-1 overflow-auto scrollbar-thin px-8 py-6">
         {messages.length === 0 && (
           <div className="max-w-2xl mx-auto text-center py-16">
             <div className="grid place-items-center mb-4"><BrandMark size={56} /></div>
