@@ -3,6 +3,20 @@ import { config } from "../config.js";
 
 export const octokit = new Octokit({ auth: config.githubToken });
 
+// The per-repo readers below swallow errors so a missing README / empty repo /
+// 404 degrades to an empty result instead of failing the step. But swallowing
+// an AUTH failure the same way turns a dead token into a fake success: on
+// 2026-07-11 github.read_repo returned {readme:null, commits:[], prs:[],
+// issues:[]} on a revoked token and reported ok — the job then "summarized"
+// nothing, and the nightly reflection concluded the token had partial scope
+// when it was invalid for everything. Rethrow 401 so a bad token fails the
+// step loudly with the actual cause.
+function rethrowIfAuthError(e: any): void {
+  if (e?.status === 401) {
+    throw new Error("GitHub auth failed (401 Bad credentials) — GITHUB_TOKEN in .env is invalid, expired, or revoked");
+  }
+}
+
 export async function listOwnedRepos() {
   const out: any[] = [];
   let page = 1;
@@ -39,28 +53,28 @@ export async function recentCommits(owner: string, repo: string, sinceIso: strin
       date: c.commit.author?.date ?? "",
       url: c.html_url,
     }));
-  } catch { return []; }
+  } catch (e) { rethrowIfAuthError(e); return []; }
 }
 
 export async function openPRs(owner: string, repo: string) {
   try {
     const { data } = await octokit.pulls.list({ owner, repo, state: "open", per_page: 30 });
     return data.map(p => ({ number: p.number, title: p.title, author: p.user?.login ?? "?", url: p.html_url, draft: p.draft }));
-  } catch { return []; }
+  } catch (e) { rethrowIfAuthError(e); return []; }
 }
 
 export async function openIssues(owner: string, repo: string) {
   try {
     const { data } = await octokit.issues.listForRepo({ owner, repo, state: "open", per_page: 30 });
     return data.filter(i => !i.pull_request).map(i => ({ number: i.number, title: i.title, author: i.user?.login ?? "?", url: i.html_url }));
-  } catch { return []; }
+  } catch (e) { rethrowIfAuthError(e); return []; }
 }
 
 export async function readme(owner: string, repo: string): Promise<string | null> {
   try {
     const { data } = await octokit.repos.getReadme({ owner, repo, mediaType: { format: "raw" } as any });
     return typeof data === "string" ? data : null;
-  } catch { return null; }
+  } catch (e) { rethrowIfAuthError(e); return null; }
 }
 
 export async function dispatchWorkflow(owner: string, repo: string, workflowFile: string, ref = "main", inputs: Record<string, string> = {}) {
