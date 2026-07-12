@@ -541,25 +541,108 @@ export const primitives: Primitive[] = [
   },
   {
     name: "db.query",
-    description: "Run SQL (or query document) on a connected data source. Source is identified by label (case-insensitive). For SQL databases: pass standard SQL — SELECT / WITH / EXPLAIN / DESCRIBE. For MongoDB: pass a JSON document like {\"collection\":\"users\",\"filter\":{\"active\":true},\"limit\":50}. For Excel/CSV: pass a JSON like {\"sheet\":\"Sheet1\",\"filter\":{\"col\":\"Status\",\"op\":\"eq\",\"val\":\"Active\"},\"limit\":100}. Respects the source's read-only setting — writes are blocked unless the source was configured with writes enabled.",
+    description: "Run SQL (or query document) on a connected data source. Source is identified by label (case-insensitive). For SQL databases: pass standard SQL — SELECT / WITH / EXPLAIN / DESCRIBE. For MongoDB: pass a JSON document like {\"collection\":\"users\",\"filter\":{\"active\":true},\"limit\":50}. For Excel/CSV: pass a JSON like {\"sheet\":\"Sheet1\",\"filter\":{\"col\":\"Status\",\"op\":\"eq\",\"val\":\"Active\"},\"limit\":100}. ALTERNATIVELY pass `question` (natural language) instead of `query` for SQL sources — the schema is fetched automatically, SQL is generated from the question, executed, and each query's rows come back labeled. Use question-mode when the task describes WHAT to find out rather than the exact SQL. Respects the source's read-only setting — writes are blocked unless the source was configured with writes enabled.",
     readonly: true,
     args: [
       { name: "source", type: "string", required: true, description: "Source label (case-insensitive)" },
-      { name: "query", type: "string", required: true, description: "SQL statement or JSON query document" },
+      { name: "query", type: "string", required: false, description: "SQL statement or JSON query document. Omit when using `question`." },
+      { name: "question", type: "string", required: false, description: "Natural-language question about the data (SQL sources only) — e.g. 'how many requisitions are there and what is the total requested amount'. SQL is generated from the live schema and executed; multiple sub-questions become multiple queries." },
       { name: "limit", type: "number", required: false, description: "Max rows to return (default 200)" },
     ],
     handler: async (args) => {
       const source = getSourceByLabel(String(args.source));
       if (!source) throw new Error(noSourceError(String(args.source)));
       const limit = Math.max(1, Math.min(5000, Number(args.limit ?? 200)));
-      const result = await runQuery(source, String(args.query), limit);
+      const rawQuery = String(args.query ?? "").trim();
+      const question = String(args.question ?? "").trim();
+      if (rawQuery) {
+        const result = await runQuery(source, rawQuery, limit);
+        return {
+          source: source.label,
+          kind: source.kind,
+          columns: result.columns,
+          rows: result.rows,
+          rowCount: result.rowCount,
+          truncated: result.truncated,
+        };
+      }
+      if (!question) throw new Error("db.query: pass either 'query' (SQL / JSON document) or 'question' (natural language)");
+      if (!["postgres", "mysql", "sqlite", "mssql"].includes(source.kind)) {
+        throw new Error(`db.query question-mode only supports SQL sources (this source is ${source.kind}) — pass an explicit 'query' document instead`);
+      }
+      // Question-mode: schema → LLM-generated SQL → execute. Exists because
+      // the free-tier planner reliably FAILS to write correct SQL against a
+      // schema it has never seen (2026-07-12: "query the Neon DB and
+      // summarize" degenerated to a WEB search three runs straight). Doing
+      // schema-fetch + SQL generation inside the primitive means a plan just
+      // needs ONE deterministic step with the user's question in it.
+      const { describeSource } = await import("./data-sources.js");
+      const { llmGenerate } = await import("./llm.js");
+      const schema = await describeSource(source);
+      const schemaText = schema.tables
+        .map(t => `${t.name}(${t.columns.map(c => `${c.name} ${c.type}`).join(", ")})`)
+        .join("\n");
+      const sys = `You translate questions into ${source.kind} SQL. Output ONLY a JSON array of 1-4 objects, each {"label": "<short description>", "sql": "<one SELECT/WITH statement>"}. Read-only SELECT/WITH only — never INSERT/UPDATE/DELETE/DROP. Use only tables/columns from the schema. No markdown fences, no prose.`;
+      const prompt = `Schema:\n${schemaText}\n\nQuestion: ${question}\n\nJSON array:`;
+      const raw = await llmGenerate(prompt, sys, { profile: "extraction", complexity: "high", temperature: 0 });
+      const jsonMatch = raw.match(/\[[\s\S]*\]/);
+      if (!jsonMatch) throw new Error(`db.query: SQL generation returned no JSON array (got: ${raw.slice(0, 160)})`);
+      let specs: { label?: string; sql?: string }[];
+      try { specs = JSON.parse(jsonMatch[0]); } catch (e: any) { throw new Error(`db.query: generated SQL spec is invalid JSON — ${e?.message}`); }
+      const results: { label: string; sql: string; columns?: string[]; rows?: any[]; rowCount?: number; error?: string }[] = [];
+      const { isReadOnlySql } = await import("./data-sources.js");
+      for (const spec of specs.slice(0, 4)) {
+        const sql = String(spec.sql ?? "").trim();
+        if (!sql) continue;
+        const label = String(spec.label ?? sql.slice(0, 60));
+        // HARD read-only guard for question-mode, independent of the source's
+        // readonly flag. Question-mode turns a natural-language QUESTION into
+        // SQL — it must never write, even on a writable source, or a
+        // prompt-injected question ("...and delete all rows") could execute a
+        // generated DML statement. Writes only ever go through db.write's
+        // explicit HITL path. The system prompt already asks for SELECT-only;
+        // this enforces it structurally.
+        if (!isReadOnlySql(sql)) {
+          results.push({ label, sql, error: "refused: question-mode is read-only (SELECT/WITH only) — use db.write for writes" });
+          continue;
+        }
+        try {
+          const r = await runQuery(source, sql, limit);
+          results.push({ label, sql, columns: r.columns, rows: r.rows, rowCount: r.rowCount });
+        } catch (e: any) {
+          // One repair attempt per failed query — feed the DB error back.
+          try {
+            const fixRaw = await llmGenerate(
+              `Schema:\n${schemaText}\n\nThis ${source.kind} query failed:\n${sql}\nError: ${String(e?.message).slice(0, 300)}\n\nOutput ONLY the corrected SQL statement, nothing else.`,
+              `You fix ${source.kind} SQL. Output only the corrected SELECT/WITH statement.`,
+              { profile: "extraction", complexity: "high", temperature: 0 },
+            );
+            const fixed = fixRaw.replace(/^```[a-z]*\n?|```$/gm, "").trim();
+            const r2 = await runQuery(source, fixed, limit);
+            results.push({ label, sql: fixed, columns: r2.columns, rows: r2.rows, rowCount: r2.rowCount });
+          } catch (e2: any) {
+            results.push({ label, sql, error: String(e2?.message ?? e2).slice(0, 300) });
+          }
+        }
+      }
+      if (results.length === 0) throw new Error("db.query: no executable SQL was generated from the question");
+      const failed = results.filter(r => r.error).length;
+      // Single-row aggregates (counts, sums) flattened to explicit prose the
+      // synth can quote verbatim. A free-tier synth reading raw JSON rows
+      // misattributed a SUM once (reported $5,447.95 when the row said
+      // $126,795.62 — live 2026-07-12); an unambiguous "label: col = value"
+      // line removes the misread surface.
+      const keyFigures = results
+        .filter(r => !r.error && r.rowCount === 1 && r.columns && r.columns.length <= 3 && r.rows?.[0])
+        .map(r => `${r.label}: ${Object.entries(r.rows![0]).map(([k, v]) => `${k} = ${v}`).join(", ")}`);
       return {
         source: source.label,
         kind: source.kind,
-        columns: result.columns,
-        rows: result.rows,
-        rowCount: result.rowCount,
-        truncated: result.truncated,
+        question,
+        keyFigures: keyFigures.length > 0 ? keyFigures : undefined,
+        queries: results,
+        rowCount: results.reduce((sum, r) => sum + (r.rowCount ?? 0), 0),
+        note: failed > 0 ? `${failed} of ${results.length} generated queries failed — their errors are included` : undefined,
       };
     },
   },
@@ -1000,7 +1083,10 @@ export const primitives: Primitive[] = [
         "from", "on", "at", "by", "as", "into", "about",
         // file-meta words
         "called", "named", "titled", "labelled", "labeled",
-        "file", "doc", "document", "pdf", "docx", "xlsx", "pptx", "txt", "markdown", "md",
+        // singular AND plural — "all the documentS that refer to X" left
+        // "documents" alive as a required token (2026-07-12 live failure)
+        "file", "files", "doc", "docs", "document", "documents",
+        "pdf", "pdfs", "docx", "xlsx", "pptx", "txt", "markdown", "md",
         // pronouns / fillers
         "my", "your", "this", "that", "those", "these", "any", "some",
         "please", "kindly", "just", "also", "then", "now",
@@ -1009,6 +1095,15 @@ export const primitives: Primitive[] = [
         "list", "check", "view", "browse", "open", "read", "give", "send",
         "share", "summarize", "summarise", "summary", "summarized", "summarise",
         "review", "scan", "tell", "describe", "analyze", "analyse",
+        // relational words from "documents that refer to X" phrasings —
+        // the 2026-07-12 live failure passed the whole clause "all the
+        // documents that refer to Nueroworks" as the needle, leaving
+        // tokens [all, refer, nueroworks] that no filename could ever
+        // contain together. NOTE: "reference" is deliberately NOT here —
+        // it's a real filename word ("Aiia Reference Letter.pdf").
+        "all", "every", "everything", "which",
+        "refer", "refers", "referring", "mention", "mentions", "mentioning",
+        "regarding", "related", "relating", "contain", "contains", "containing",
       ]);
       const rawTokens = needle.replace(/[-_\s]+/g, " ").split(" ").filter(Boolean);
       const filtered = rawTokens.filter(t => !NOISE_WORDS.has(t));
@@ -1110,6 +1205,46 @@ export const primitives: Primitive[] = [
       if (hits.length === 0 && needleTokens.length >= 4) {
         const minMatch = Math.max(2, Math.ceil(needleTokens.length * 0.7));
         hits = fuzzyHits(allFiles, minMatch);
+      }
+      // Typo-tolerant last resort. Voice-dictated tasks misspell brand and
+      // proper names ("Nueroworks" for files named "NeuroWorks" — live
+      // 2026-07-12, 4 identical failures), and substring matching can never
+      // recover from a transposition. When everything above found nothing
+      // and the needle is short (≤3 content tokens), accept filenames whose
+      // tokens are within a small edit distance of each needle token.
+      // Distance budget scales with token length (5-8 chars → 1 edit,
+      // 9+ → 2) and only tokens ≥5 chars participate, so short tokens
+      // can't false-positive their way in.
+      if (hits.length === 0 && needleTokens.length > 0 && needleTokens.length <= 3) {
+        const editDistance = (a: string, b: string, cap: number): number => {
+          if (Math.abs(a.length - b.length) > cap) return cap + 1;
+          let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
+          for (let i = 1; i <= a.length; i++) {
+            const cur = [i];
+            let rowMin = i;
+            for (let j = 1; j <= b.length; j++) {
+              cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+              if (cur[j] < rowMin) rowMin = cur[j];
+            }
+            if (rowMin > cap) return cap + 1;
+            prev = cur;
+          }
+          return prev[b.length];
+        };
+        const fuzzables = needleTokens.filter(t => t.length >= 5);
+        if (fuzzables.length > 0) {
+          const scored: { h: Hit; mtime: string }[] = [];
+          for (const h of allFiles) {
+            const fileTokens = asciifyForSearch(h.name).toLowerCase().replace(/\.[a-z0-9]+$/, "").split(/[-_\s.]+/).filter(Boolean);
+            const allNear = fuzzables.every(nt => {
+              const cap = nt.length >= 9 ? 2 : 1;
+              return fileTokens.some(ft => editDistance(nt, ft, cap) <= cap);
+            });
+            if (allNear) scored.push({ h, mtime: h.modified });
+          }
+          scored.sort((a, b) => (a.mtime < b.mtime ? 1 : -1));
+          hits = scored.slice(0, limit).map(s => s.h);
+        }
       }
       // Directory-aware expansion. If the strongest matches are DIRECTORIES
       // (e.g. "Master Tender" is a folder, not a file), expand each into the

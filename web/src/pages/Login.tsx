@@ -4,6 +4,7 @@ import { LogIn, Loader2, AlertTriangle, UserPlus, CheckCircle2 } from "lucide-re
 import { api, setToken } from "../lib/api";
 import { BrandMark } from "../components/BrandMark";
 import { Button, showToast } from "../components/Card";
+import { KineticGridBackground } from "../components/KineticGridBackground";
 
 // Login page — the identity layer. Signing in attributes activity to a person
 // and is tracked (login history on the Users page). The app itself is loopback-
@@ -48,8 +49,9 @@ export function Login() {
   const FIELD = "w-full bg-ink-950 border border-ink-800 text-sm text-cream-100 rounded-lg px-3 py-2.5 focus:outline-none focus:border-violet-500/60 placeholder:text-cream-300/30";
 
   return (
-    <div className="min-h-screen grid place-items-center bg-ink-950 px-4">
-      <div className="w-full max-w-sm">
+    <div className="relative min-h-screen grid place-items-center bg-ink-950 px-4 overflow-hidden">
+      <KineticGridBackground />
+      <div className="relative z-10 w-full max-w-sm">
         <div className="flex flex-col items-center mb-6">
           <BrandMark size={40} />
           <div className="mt-3 text-xl font-semibold text-cream-50 tracking-tight">NeuroWorks</div>

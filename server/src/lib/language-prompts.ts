@@ -82,10 +82,33 @@ export function getLanguagePrompt(context: "plan" | "direct" | "synth"): string 
   return LANGUAGE_PROMPTS[lang][context];
 }
 
+// Org-wide "caveman" answer style — radically terse output with all
+// technical substance intact. Injected for synth/direct only: the planner
+// emits JSON and must never be style-shifted. Toggled in Settings
+// (OnboardingState.responseStyle).
+const CAVEMAN_STYLE_PROMPT = `RESPONSE STYLE — TERSE MODE (org-wide setting):
+- Drop articles (a/an/the) where the sentence survives without them, filler words (just/really/basically/actually), pleasantries (certainly/happy to help), and hedging (perhaps/might possibly).
+- Sentence fragments are fine. Short words beat long ones ("big" not "extensive", "fix" not "implement a solution for").
+- KEEP every piece of technical substance: numbers, names, dates, amounts, file paths, links, code, error messages (verbatim), and [N] citations. Compress the prose, never the facts.
+- Keep document structure (headings, bullets, tables) when the deliverable calls for it — terse applies to sentences, not to completeness.
+- Write normal full prose ONLY for: security warnings, irreversible-action confirmations, and legal/compliance language.`;
+
+function getCavemanPrompt(context: "plan" | "direct" | "synth"): string {
+  if (context === "plan") return "";
+  try {
+    return getOnboardingState().responseStyle === "caveman" ? CAVEMAN_STYLE_PROMPT : "";
+  } catch {
+    return "";
+  }
+}
+
 export function injectLanguagePrompt(basePrompt: string, context: "plan" | "direct" | "synth"): string {
   const langPrompt = getLanguagePrompt(context);
-  if (!langPrompt) return basePrompt;
-  return basePrompt + "\n\n" + langPrompt;
+  const stylePrompt = getCavemanPrompt(context);
+  let out = basePrompt;
+  if (langPrompt) out += "\n\n" + langPrompt;
+  if (stylePrompt) out += "\n\n" + stylePrompt;
+  return out;
 }
 
 // Per-agent language override — a persona/department agent can be pinned to

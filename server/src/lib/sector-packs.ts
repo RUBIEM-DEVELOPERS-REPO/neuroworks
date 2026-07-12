@@ -36,6 +36,11 @@ export type OnboardingState = {
   customSectorName?: string;
   language: Language;
   orgName?: string;
+  // Org-wide answer style. "caveman" = radically terse: drop filler,
+  // pleasantries, and hedging from every agent answer while keeping ALL
+  // technical substance (numbers, names, code, links). Applied to synth and
+  // direct-answer prompts only — never the planner (it emits JSON).
+  responseStyle?: "standard" | "caveman";
   completedAt?: string;
 };
 

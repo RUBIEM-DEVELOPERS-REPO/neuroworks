@@ -27,18 +27,23 @@
 }
 [data-theme="light"] {
   color-scheme: light;
-  --c-ink-950: #f6f8fc;
-  --c-ink-900: #eef2f9;
-  --c-ink-850: #e4eaf4;
-  --c-ink-800: #d5deec;
-  --c-ink-700: #b2bfd4;
-  --c-ink-600: #7e8aa0;
+  /* Toned down 2026-07-12 ("bright mode is too bright"): the old base was
+     #f6f8fc — essentially a white screen. Whole ramp shifted one step
+     toward warm grey-blue paper so large surfaces stop glaring, and the
+     blue glow is halved. Text ramp unchanged (contrast was fine; the
+     background was the problem). */
+  --c-ink-950: #e8ecf4;
+  --c-ink-900: #dfe5f0;
+  --c-ink-850: #d3dbe9;
+  --c-ink-800: #c2cddf;
+  --c-ink-700: #a2b1c9;
+  --c-ink-600: #74809a;
   --c-cream-50:  #0d1320;
   --c-cream-100: #232c3d;
   --c-cream-200: #47536a;
   --c-cream-300: #67748c;
-  --bg-glow: rgba(2, 125, 234, 0.07);
-  --bg-grid: rgba(63, 73, 89, 0.06);
+  --bg-glow: rgba(2, 125, 234, 0.035);
+  --bg-grid: rgba(63, 73, 89, 0.05);
 }
 
 :root {
@@ -272,13 +277,33 @@ body::after {                               /* blueprint glow — light from abo
 /* Avatar breathing — applied to the wrapper of an active agent avatar. */
 .nw-avatar-active { animation: nw-avatar-breath 2.2s ease-in-out infinite; border-radius: 9999px; }
 
+/* Shiny pill — a specular highlight sweeps across a pill-shaped badge every
+   few seconds (header status + persona pills). The sweep occupies only the
+   first third of the keyframe timeline so the pill rests between passes
+   instead of strobing. */
+@keyframes nw-pill-shine {
+  0%   { transform: translateX(-130%) skewX(-18deg); }
+  32%  { transform: translateX(280%)  skewX(-18deg); }
+  100% { transform: translateX(280%)  skewX(-18deg); }
+}
+.nw-shiny-pill { position: relative; overflow: hidden; }
+.nw-shiny-pill::after {
+  content: "";
+  position: absolute;
+  top: 0; bottom: 0; left: 0;
+  width: 45%;
+  background: linear-gradient(105deg, transparent 0%, rgba(255, 255, 255, 0.16) 50%, transparent 100%);
+  animation: nw-pill-shine 3.4s ease-in-out infinite;
+  pointer-events: none;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .skeleton,
   .nw-fade-up, .nw-scale-in, .nw-page-enter,
   .nw-status-dot.is-running, .nw-status-dot.is-succeeded,
   .nw-toast, .nw-copy-flash, .nw-card-hover, .nw-press,
   .nw-thinking-dots > span, .nw-thinking-bar::before,
-  .nw-avatar-active {
+  .nw-avatar-active, .nw-shiny-pill::after {
     animation: none !important;
     transition: none !important;
   }

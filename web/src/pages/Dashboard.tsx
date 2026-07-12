@@ -4,6 +4,14 @@ import { api, Template } from "../lib/api";
 import { Card, RoleIcon } from "../components/Card";
 import { TaskRunner } from "../components/TaskRunner";
 import { AgentVisualizer } from "../components/AgentVisualizer";
+import { DynamicWeightText } from "../components/DynamicWeightText";
+import { TextMorph } from "../components/TextMorph";
+import { MagneticRow } from "../components/MagneticRow";
+import { lazy, Suspense } from "react";
+
+// three.js is ~600KB — the globe loads as its own chunk only when the
+// Workforce card actually renders, so the dashboard's initial JS stays flat.
+const WorkforceGlobe = lazy(() => import("../components/WorkforceGlobe").then(m => ({ default: m.WorkforceGlobe })));
 import { t, loadSavedLanguage } from "../lib/i18n";
 import { MapPin, Building2, Globe, BookOpen, Plug, Zap, ShieldCheck, Server, Flag } from "lucide-react";
 import type { SectorInfo, KnowledgePack } from "../lib/api";
@@ -132,7 +140,9 @@ export function Dashboard() {
         ) : (
           <div className="text-xs uppercase tracking-[0.3em] text-cream-300/50">{t("dashboard.welcome")}</div>
         )}
-        <h1 className="font-display text-6xl text-cream-50 mt-2">{t("app.title")}</h1>
+        <h1 className="mt-2 flex justify-center">
+          <DynamicWeightText text={t("app.title")} fontSize={60} />
+        </h1>
         <p className="text-cream-300/70 mt-2 text-sm">
           {sectorLabel && <span className="inline-flex items-center gap-1.5 text-violet-400 mr-1.5"><Building2 size={14} />{sectorLabel}</span>}
           {t("app.subtitle")}
@@ -157,7 +167,9 @@ export function Dashboard() {
       {orgStatus && (
         <section>
           <div className="flex items-baseline justify-between mb-3 px-1">
-            <div className="text-xs uppercase tracking-[0.25em] text-cream-300/60">Mission Control</div>
+            <div className="text-xs uppercase tracking-[0.25em] text-cream-300/60">
+              <TextMorph words={["Mission Control", "Org at a Glance", "Live Status"]} />
+            </div>
             <Link to="/quality" className="text-xs text-cream-300 hover:text-cream-50 inline-flex items-center gap-1"><Flag size={11} /> Flag an output →</Link>
           </div>
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
@@ -230,18 +242,24 @@ export function Dashboard() {
           </div>
           <Link to="/templates" className="text-xs text-cream-300 hover:text-cream-50">View all templates →</Link>
         </div>
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-          {(quickStart.length ? quickStart : Array(4).fill(null)).map((t: Template | null, i) => t ? (
-            <button key={t.id} onClick={() => setActive(t)} className={`text-left bg-ink-900 hover:bg-ink-850 border border-ink-800 hover:border-violet-500/40 rounded-xl p-4 transition-colors nw-card-hover nw-fade-up nw-delay-${Math.min(7, i + 1)}`}>
-              <RoleIcon role={t.role} className="mb-3" />
-              <div className="text-xs text-cream-300/60 uppercase tracking-wider">{t.role}</div>
-              <div className="font-display text-lg text-cream-50 mt-0.5 leading-tight">{t.title}</div>
-              <div className="text-xs text-cream-300/70 mt-2 line-clamp-2">{t.description}</div>
-            </button>
-          ) : (
-            <div key={i} className="bg-ink-900 border border-ink-800 rounded-xl p-4 h-32 skeleton" />
-          ))}
-        </div>
+        {quickStart.length ? (
+          <MagneticRow gap={12}>
+            {quickStart.map((t: Template, i) => (
+              <button key={t.id} onClick={() => setActive(t)} className={`w-full text-left bg-ink-900 hover:bg-ink-850 border border-ink-800 hover:border-violet-500/40 rounded-xl p-4 transition-colors nw-fade-up nw-delay-${Math.min(7, i + 1)}`}>
+                <RoleIcon role={t.role} className="mb-3" />
+                <div className="text-xs text-cream-300/60 uppercase tracking-wider">{t.role}</div>
+                <div className="font-display text-lg text-cream-50 mt-0.5 leading-tight">{t.title}</div>
+                <div className="text-xs text-cream-300/70 mt-2 line-clamp-2">{t.description}</div>
+              </button>
+            ))}
+          </MagneticRow>
+        ) : (
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+            {Array(4).fill(null).map((_, i) => (
+              <div key={i} className="bg-ink-900 border border-ink-800 rounded-xl p-4 h-32 skeleton" />
+            ))}
+          </div>
+        )}
       </section>
 
       <section>
@@ -394,8 +412,26 @@ function ClawbotFleet({ fleet, externalAgents, running, templatesCount, tasksTod
     });
   }
   const activeCount = bots.filter(b => b.ok && b.ready).length;
+  // The fleet has no real geo data (every neuro runs on the operator's own
+  // machines) — markers are REPRESENTATIVE: one distinct Zimbabwe city per
+  // neuro, primary pinned to Harare, so each worker reads as a live dot on
+  // the map rather than all stacking invisibly on one point.
+  const ZIM_CITIES: { lat: number; lng: number }[] = [
+    { lat: -17.83, lng: 31.05 }, // Harare — primary
+    { lat: -20.16, lng: 28.58 }, // Bulawayo
+    { lat: -18.97, lng: 32.67 }, // Mutare
+    { lat: -19.45, lng: 29.82 }, // Gweru
+    { lat: -20.07, lng: 30.83 }, // Masvingo
+    { lat: -18.93, lng: 29.81 }, // Kwekwe
+    { lat: -18.33, lng: 29.91 }, // Kadoma
+    { lat: -17.37, lng: 30.19 }, // Chinhoyi
+  ];
+  const markers = bots.filter(b => b.ok).map((b, i) => ({ ...ZIM_CITIES[i % ZIM_CITIES.length], label: b.name }));
   return (
     <div className="space-y-3 text-sm">
+      <Suspense fallback={<div className="h-[220px] grid place-items-center text-xs text-cream-300/40">loading globe…</div>}>
+        <WorkforceGlobe markers={markers} height={220} />
+      </Suspense>
       <div className="space-y-1.5">
         {bots.length === 0 && <div className="text-cream-300/60">No neuros reachable.</div>}
         {bots.map((b, i) => (

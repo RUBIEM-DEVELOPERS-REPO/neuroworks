@@ -13,8 +13,14 @@
          blocks, tabular numbers in cost/data tables — 200+ real uses across
          the app) — no longer used for eyebrow/label text, which was the
          biggest "terminal UI" signal in the old system. -->
+    <!-- Plus Jakarta Sans requested as a wght@200..800 RANGE (not a
+         discrete list) so the browser gets the actual variable-font file —
+         needed for the Dashboard headline's cursor-proximity weight morph
+         (DynamicWeightText), which animates font-variation-settings live.
+         Static usages (font-weight: 500/600/700) render identically either
+         way, so this is a strict upgrade, not a tradeoff. -->
     <link
-      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@200..800&family=JetBrains+Mono:wght@400;500&display=swap"
       rel="stylesheet" />
     <title>NeuroWorks · The AI Workforce</title>
   </head>

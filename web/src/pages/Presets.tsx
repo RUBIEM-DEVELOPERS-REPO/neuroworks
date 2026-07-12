@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { Sparkles, Calendar, Plug, Check, Loader2 } from "lucide-react";
 import { Card, Button, showToast } from "../components/Card";
 import { api, type Preset, type PresetApplyResult } from "../lib/api";
+import { MagneticRow } from "../components/MagneticRow";
 
 // Role Presets — one-click "hire a worker" bundles. Picking one activates the
 // persona, ensures its templates, optionally stands up a morning schedule
@@ -65,31 +66,37 @@ export function Presets() {
           <p className="text-cream-300/70">{loadErr}</p>
         </div>
       ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {presets.map(p => {
-            const isActive = active === p.id;
-            return (
-              <button
-                key={p.id}
-                onClick={() => { setActive(p.id); setResult(null); }}
-                className={`text-left rounded-xl border p-4 transition-colors ${isActive ? "border-violet-500/60 bg-violet-500/5" : "border-ink-800 bg-ink-900 hover:border-ink-700"}`}
-              >
-                <div className="flex items-center justify-between">
-                  <div className="font-semibold text-cream-50">{p.name}</div>
-                  {isActive && <Check size={16} className="text-violet-400" />}
-                </div>
-                <div className="text-sm text-cream-300/70 mt-1">{p.tagline}</div>
-                <div className="flex flex-wrap gap-1.5 mt-3">
-                  {p.recommendedSkills.slice(0, 3).map(s => (
-                    <span key={s} className="text-[10px] px-1.5 py-0.5 rounded bg-ink-800 text-cream-300/70 font-mono">{s}</span>
-                  ))}
-                  {p.schedules?.length ? (
-                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-leaf-500/10 text-leaf-400 font-mono flex items-center gap-1"><Calendar size={10} /> {p.schedules.length} schedule</span>
-                  ) : null}
-                </div>
-              </button>
-            );
-          })}
+        <div className="space-y-4">
+          {/* Rows of 3 with dock-style magnify (MagneticRow) — the preset
+              under the cursor widens, neighbors taper off. */}
+          {Array.from({ length: Math.ceil(presets.length / 3) }, (_, row) => presets.slice(row * 3, row * 3 + 3)).map((rowPresets, ri) => (
+            <MagneticRow key={ri} gap={16} growMax={0.35}>
+              {rowPresets.map(p => {
+                const isActive = active === p.id;
+                return (
+                  <button
+                    key={p.id}
+                    onClick={() => { setActive(p.id); setResult(null); }}
+                    className={`w-full text-left rounded-xl border p-4 transition-colors ${isActive ? "border-violet-500/60 bg-violet-500/5" : "border-ink-800 bg-ink-900 hover:border-ink-700"}`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <div className="font-semibold text-cream-50">{p.name}</div>
+                      {isActive && <Check size={16} className="text-violet-400" />}
+                    </div>
+                    <div className="text-sm text-cream-300/70 mt-1">{p.tagline}</div>
+                    <div className="flex flex-wrap gap-1.5 mt-3">
+                      {p.recommendedSkills.slice(0, 3).map(s => (
+                        <span key={s} className="text-[10px] px-1.5 py-0.5 rounded bg-ink-800 text-cream-300/70 font-mono">{s}</span>
+                      ))}
+                      {p.schedules?.length ? (
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-leaf-500/10 text-leaf-400 font-mono flex items-center gap-1"><Calendar size={10} /> {p.schedules.length} schedule</span>
+                      ) : null}
+                    </div>
+                  </button>
+                );
+              })}
+            </MagneticRow>
+          ))}
         </div>
       )}
 

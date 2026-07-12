@@ -52,9 +52,17 @@ const DailyReports = lazy(() => import("./pages/DailyReports").then(m => ({ defa
 // Lightweight, layout-shift-free placeholder while a route chunk downloads —
 // on a warm cache this never has time to paint; on a cold load it beats a
 // blank white flash.
+// Shown only in the gap between a route's chunk being requested and resolving.
+// With hover-prefetch (routePreload.ts) that gap is usually zero — this exists
+// for a cold click on a not-yet-warmed route. Fades in (nw-fade-up) so a
+// sub-frame flash doesn't strobe, and the skeletons shimmer (`.skeleton`).
 function RouteFallback() {
   return (
-    <div className="space-y-3">
+    <div className="space-y-3 nw-fade-up">
+      <div className="flex items-center gap-2 text-xs text-cream-300/50">
+        <span className="nw-thinking-dots" aria-hidden><span /><span /><span /></span>
+        Loading…
+      </div>
       <Skeleton className="h-8 w-48" />
       <Skeleton className="h-32 w-full" />
       <Skeleton className="h-32 w-full" />

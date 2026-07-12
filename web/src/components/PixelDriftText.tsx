@@ -83,12 +83,15 @@ type PixelDriftTextProps = {
 
 export function PixelDriftText({
   text,
-  // Glacier / Electric Iris / Glacier — matches GlitterBackground's palette
-  // and the app's own violet accent, instead of the demo's white/blue/white.
-  colors = ["#d8ecf8", "#7d57f6", "#d8ecf8"],
+  // No explicit colors = follow the theme: particles take --c-cream-50 (the
+  // heading color), which is near-white in dark mode and near-black in light
+  // mode. A hardcoded white default made the wordmark INVISIBLE the moment
+  // the operator flipped to light mode (found 2026-07-12 during the
+  // bright-mode pass). Pass explicit colors to opt out of theme-following.
+  colors,
   fontFamily = "'Plus Jakarta Sans', system-ui, sans-serif",
   fontSize = 22,
-  particleSize = 5,
+  particleSize = 4,
   // Maxed out (the sampling stride formula caps useful density at 50) — a
   // ~20px glyph has thin enough strokes that anything sparser under-samples
   // it into scattered dots instead of a readable word shape.
@@ -116,7 +119,19 @@ export function PixelDriftText({
     if (!ctx) return;
 
     const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    const palette = colors.length > 0 ? colors : ["#ffffff"];
+    const themeColor = () =>
+      getComputedStyle(document.documentElement).getPropertyValue("--c-cream-50").trim() || "#ffffff";
+    let palette = colors && colors.length > 0 ? colors : [themeColor()];
+    // Follow live theme flips — the draw loop reads `palette` every frame,
+    // so reassigning it recolors the settled particles on the next frame.
+    // redrawSettled is bound after staticDraw is defined below; only the
+    // reduced-motion path needs an explicit repaint (no running loop).
+    let redrawSettled: (() => void) | null = null;
+    const themeObserver = colors && colors.length > 0 ? null : new MutationObserver(() => {
+      palette = [themeColor()];
+      redrawSettled?.();
+    });
+    themeObserver?.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
 
     let count = 0;
     let ox = new Float32Array(0), oy = new Float32Array(0);
@@ -165,7 +180,11 @@ export function PixelDriftText({
       const data = img.data;
 
       const pCount = Math.max(1, Math.min(50, particleCount));
-      const stride = Math.max(2, Math.round(150 / pCount));
+      // 150/count (Framer original) gave stride 3 at max density — too coarse
+      // for a ~22px sidebar glyph once the dots shrank to 1px (letters read
+      // as disconnected speckle). 100/count → stride 2 at count 50: ~2.25x
+      // the particles on a tiny canvas, still trivial to animate.
+      const stride = Math.max(2, Math.round(100 / pCount));
 
       let candidates = 0;
       for (let y = 0; y < H; y += stride) {
@@ -376,9 +395,11 @@ export function PixelDriftText({
       reverseRef.current = false;
       for (let i = 0; i < count; i++) { px[i] = ox[i]; py[i] = oy[i]; }
       drawFrame();
+      redrawSettled = () => drawFrame(); // theme flip repaints the settled frame
       return () => {
         cancelled = true;
         ro.disconnect();
+        themeObserver?.disconnect();
         document.removeEventListener("visibilitychange", onVisibility);
         canvas.removeEventListener("pointermove", onMove);
         canvas.removeEventListener("pointerleave", onLeave);
@@ -396,13 +417,14 @@ export function PixelDriftText({
       cancelled = true;
       if (rafRef.current != null) cancelAnimationFrame(rafRef.current);
       ro.disconnect();
+      themeObserver?.disconnect();
       document.removeEventListener("visibilitychange", onVisibility);
       canvas.removeEventListener("pointermove", onMove);
       canvas.removeEventListener("pointerleave", onLeave);
       canvas.removeEventListener("pointercancel", onLeave);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [text, colors.join("|"), fontFamily, fontSize, particleSize, particleCount, mouseEnabled, mouseRadius, mouseForce, transition.duration, transition.ease]);
+  }, [text, (colors ?? []).join("|"), fontFamily, fontSize, particleSize, particleCount, mouseEnabled, mouseRadius, mouseForce, transition.duration, transition.ease]);
 
   return (
     <div ref={containerRef} className={className} style={{ position: "relative", width: "100%", height: "100%", overflow: "visible" }}>

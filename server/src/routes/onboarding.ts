@@ -31,10 +31,14 @@ onboardingRouter.put("/", (req, res) => {
   if (body.language !== undefined && !["en", "sn", "nd"].includes(body.language)) {
     return res.status(400).json({ error: "language must be en, sn, or nd" });
   }
+  if (body.responseStyle !== undefined && !["standard", "caveman"].includes(body.responseStyle)) {
+    return res.status(400).json({ error: "responseStyle must be standard or caveman" });
+  }
   const patch: Partial<import("../lib/sector-packs.js").OnboardingState> & { completed: boolean } = { completed: body.completed };
   if (body.sector !== undefined) patch.sector = String(body.sector);
   if (body.language !== undefined) patch.language = body.language;
   if (body.orgName !== undefined) patch.orgName = String(body.orgName);
+  if (body.responseStyle !== undefined) patch.responseStyle = body.responseStyle;
   // customSectorName only makes sense alongside sector "custom" — sent with
   // a non-custom sector (or with sector omitted while a custom one is
   // already active) it's ignored rather than silently persisted as stale.

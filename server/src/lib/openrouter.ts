@@ -5,6 +5,13 @@ export type OpenRouterCallOptions = {
   onToken?: (chunk: string, accumulated: string) => void;
   temperature?: number;
   maxTokens?: number;
+  // Point this ONE call at a different OpenAI-compatible endpoint (the
+  // provider-pool fallback chain in llm.ts — OpenAI / Anthropic secondary
+  // when OpenRouter is down). When set, the OpenRouter circuit breaker is
+  // neither consulted nor updated: a fallback provider's failure must not
+  // trip OR's breaker, and OR's open circuit is exactly when these calls
+  // need to run.
+  endpoint?: { baseUrl: string; apiKey: string };
 };
 
 // Transient = worth retrying / falling back, NOT a config problem. 429 is the
@@ -102,10 +109,15 @@ export async function openrouterGenerateWithMeta(
   system: string | undefined,
   opts: OpenRouterCallOptions = {},
 ): Promise<{ text: string; model: string; usage?: { inputTokens: number; outputTokens: number } }> {
-  if (!config.openrouterApiKey) throw new Error("OpenRouter: OPENROUTER_API_KEY not set");
+  const endpointBase = opts.endpoint?.baseUrl ?? config.openrouterBaseUrl;
+  const endpointKey = opts.endpoint?.apiKey ?? config.openrouterApiKey;
+  // Fallback-endpoint calls (opts.endpoint set) bypass the OR circuit breaker
+  // entirely — see the OpenRouterCallOptions.endpoint comment.
+  const isFallbackEndpoint = !!opts.endpoint;
+  if (!endpointKey) throw new Error("OpenRouter: OPENROUTER_API_KEY not set");
   // Circuit open → fail fast so the llm-router uses local immediately instead of
   // re-discovering the outage with a full retry cycle on every call.
-  if (openrouterCircuitOpen()) throw markTransient(new Error("OpenRouter circuit open (recent failures) — using local model"));
+  if (!isFallbackEndpoint && openrouterCircuitOpen()) throw markTransient(new Error("OpenRouter circuit open (recent failures) — using local model"));
   const model = opts.model ?? config.openrouterModel;
   const messages: { role: "system" | "user"; content: string }[] = [];
   if (system) messages.push({ role: "system", content: system });
@@ -121,11 +133,11 @@ export async function openrouterGenerateWithMeta(
     for (let attempt = 1; ; attempt++) {
       let r: Response;
       try {
-        r = await fetch(`${config.openrouterBaseUrl}/chat/completions`, {
+        r = await fetch(`${endpointBase}/chat/completions`, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            "Authorization": `Bearer ${config.openrouterApiKey}`,
+            "Authorization": `Bearer ${endpointKey}`,
             // OpenRouter uses these to track per-app usage on dashboards and to
             // gate access to free-tier models. Required for production traffic.
             "HTTP-Referer": config.openrouterAppUrl,
@@ -146,17 +158,24 @@ export async function openrouterGenerateWithMeta(
             // (400 "`temperature` is deprecated for this model") — omit it
             // there; every other provider/model keeps the explicit value.
             ...(/^claude-fable/i.test(model) ? {} : { temperature: opts.temperature ?? 0.3 }),
-            max_tokens: opts.maxTokens ?? 1024,
+            // OpenAI's direct API dropped `max_tokens` for the gpt-5.x
+            // family (400 unsupported_parameter, caught live 2026-07-12
+            // testing the provider-pool fallback) — it wants
+            // `max_completion_tokens`. OpenRouter + Anthropic-compat still
+            // take `max_tokens`.
+            ...(endpointBase.includes("api.openai.com")
+              ? { max_completion_tokens: opts.maxTokens ?? 1024 }
+              : { max_tokens: opts.maxTokens ?? 1024 }),
           }),
           signal: ctrl.signal,
         });
       } catch (e: any) {
         // Network-level failure (DNS, reset, abort) — transient, retry.
         if (attempt < MAX_ATTEMPTS) { await sleep(backoffMs(attempt)); continue; }
-        cbRecordFailure(); // sustained connection failure → trip the breaker
+        if (!isFallbackEndpoint) cbRecordFailure(); // sustained connection failure → trip the breaker
         throw markTransient(new Error(`OpenRouter request failed after ${attempt} attempts: ${e?.message ?? e}`));
       }
-      if (r.ok) { res = r; cbRecordSuccess(); break; }
+      if (r.ok) { res = r; if (!isFallbackEndpoint) cbRecordSuccess(); break; }
       const body = await r.text();
       // FREE DAILY QUOTA (free-models-per-day) — a persistent daily cap, NOT a
       // transient blip. Do NOT retry (all attempts will 429) and open the circuit
@@ -164,14 +183,14 @@ export async function openrouterGenerateWithMeta(
       // day. This is what was leaking a raw 429 into report deliverables.
       if (r.status === 429 && isDailyQuotaBody(body)) {
         const resetHdr = Number(r.headers.get("x-ratelimit-reset"));
-        cbTripDailyQuota(Number.isFinite(resetHdr) ? resetHdr : undefined);
+        if (!isFallbackEndpoint) cbTripDailyQuota(Number.isFinite(resetHdr) ? resetHdr : undefined);
         throw markTransient(new Error(`OpenRouter 429 (free daily quota exhausted): ${body.slice(0, 200)}`));
       }
       // CREDITS EXHAUSTED — persistent until a human tops up. Do NOT retry,
       // trip the breaker, and mark transient so the caller falls back to the
       // local model instead of failing the task.
       if (r.status === 402 || isBillingBody(body)) {
-        cbTripBilling();
+        if (!isFallbackEndpoint) cbTripBilling();
         throw markTransient(new Error(`Provider credits exhausted (HTTP ${r.status}) — completed locally instead. Top up the provider account. ${body.slice(0, 200)}`));
       }
       if (TRANSIENT_STATUS.has(r.status) && attempt < MAX_ATTEMPTS) {
@@ -185,7 +204,7 @@ export async function openrouterGenerateWithMeta(
       const err = new Error(`OpenRouter ${r.status}: ${body.slice(0, 400)}`);
       // A drained transient status (sustained 429/5xx) also trips the breaker so
       // the next calls skip straight to local. Config errors (401/400) do not.
-      if (TRANSIENT_STATUS.has(r.status)) { markTransient(err); cbRecordFailure(); }
+      if (TRANSIENT_STATUS.has(r.status)) { markTransient(err); if (!isFallbackEndpoint) cbRecordFailure(); }
       throw err;
     }
     if (!res.body) throw new Error("OpenRouter: empty response body");

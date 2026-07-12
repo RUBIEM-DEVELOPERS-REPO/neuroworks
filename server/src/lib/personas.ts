@@ -3,6 +3,7 @@ import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ollamaGenerate } from "./ollama.js";
 import { personaLanguageDirective } from "./language-prompts.js";
+import { readPersonaProfileSuffix } from "./persona-profile.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const STATE_DIR = resolve(__dirname, "../../../.neuroworks");
@@ -1234,9 +1235,10 @@ export function personaSystemSuffix(p: Persona | null): string {
   // personaLanguageDirective's doc comment for why ordering matters here).
   // Absent language = say nothing, inherit the org default untouched.
   const languageBlock = p.language ? "\n\n" + personaLanguageDirective(p.language) : "";
+  const profileBlock = readPersonaProfileSuffix(p.id);
   // Clawbot is the catch-all generalist — no lane to police.
-  if (p.id === "clawbot") return body + languageBlock;
-  return LANE_DISCIPLINE_PREAMBLE + body + languageBlock;
+  if (p.id === "clawbot") return body + languageBlock + profileBlock;
+  return LANE_DISCIPLINE_PREAMBLE + body + languageBlock + profileBlock;
 }
 
 function buildSuffixBody(p: Persona): string {

@@ -28,6 +28,7 @@ export function Settings() {
       </Card>
 
       <LanguageSection />
+      <ResponseStyleSection />
 
       <ModelsSection />
 
@@ -119,6 +120,64 @@ function LanguageSection() {
             }`}
           >
             <div className="text-sm font-medium">{l.name}</div>
+          </button>
+        ))}
+      </div>
+    </Card>
+  );
+}
+
+// Org-wide answer style. "Caveman" = radically terse agent replies (no
+// filler, no pleasantries, fragments fine) with every number, name, link,
+// and citation kept. Server side: OnboardingState.responseStyle →
+// injectLanguagePrompt in language-prompts.ts (synth/direct only).
+function ResponseStyleSection() {
+  const [style, setStyle] = useState<"standard" | "caveman">("standard");
+  const [busy, setBusy] = useState(false);
+  const [saved, setSaved] = useState(false);
+
+  useEffect(() => {
+    api.getOnboarding().then(r => {
+      if ((r.state as any)?.responseStyle) setStyle((r.state as any).responseStyle);
+    }).catch(() => {});
+  }, []);
+
+  async function choose(next: "standard" | "caveman") {
+    if (next === style || busy) return;
+    setBusy(true); setSaved(false);
+    try {
+      await api.setOnboarding({ completed: true, responseStyle: next } as any);
+      setStyle(next);
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2500);
+    } catch { /* keep previous on failure */ }
+    finally { setBusy(false); }
+  }
+
+  return (
+    <Card title="Answer style">
+      <div className="text-xs text-cream-300/70 mb-3">
+        How agents write their answers. Caveman mode is radically terse — filler and pleasantries go, every fact, number, and citation stays.
+      </div>
+      {saved && <div className="text-xs text-leaf-400 bg-leaf-500/10 border border-leaf-500/30 rounded-md px-3 py-2 mb-3">Saved — applies to the next task.</div>}
+      <div className="grid grid-cols-2 gap-2">
+        {([
+          { code: "standard" as const, name: "Standard", hint: "Full professional prose" },
+          { code: "caveman" as const, name: "Caveman", hint: "Terse. Substance only." },
+        ]).map(o => (
+          <button
+            key={o.code}
+            type="button"
+            onClick={() => choose(o.code)}
+            disabled={busy}
+            className={`p-3 rounded-lg border text-center transition-colors disabled:opacity-50 ${
+              style === o.code
+                ? "bg-violet-500/10 border-violet-500/50 ring-1 ring-violet-500/30 text-cream-50"
+                : "bg-ink-950 border-ink-800 text-cream-300 hover:border-violet-500/30"
+            }`}
+          >
+            <div className="text-sm font-medium">{o.name}</div>
+            <div className="text-[11px] text-cream-300/50 mt-0.5">{o.hint}</div>
           </button>
         ))}
       </div>

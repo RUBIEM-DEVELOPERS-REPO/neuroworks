@@ -4,6 +4,7 @@ import { marked } from "marked";
 import { api } from "../lib/api";
 import { Card } from "./Card";
 import { TraceView } from "./TraceView";
+import { LinkPreview } from "./LinkPreview";
 
 export function ResultPanel({ job }: { job: any }) {
   if (!job) return null;
@@ -738,7 +739,7 @@ function StepResultPreview({ tool, result }: { tool: string; result: any }) {
     return (
       <ul className="mt-1.5 space-y-0.5 text-[11px]">
         {result.results.slice(0, 3).map((w: any, i: number) => (
-          <li key={i} className="truncate"><a href={w.url} target="_blank" rel="noopener noreferrer" className="text-violet-400 hover:text-violet-500">{w.title}</a></li>
+          <li key={i} className="truncate"><LinkPreview href={w.url} className="text-violet-400 hover:text-violet-500">{w.title}</LinkPreview></li>
         ))}
         {result.results.length > 3 && <li className="text-[10px] text-cream-300/40 italic">+{result.results.length - 3} more</li>}
       </ul>

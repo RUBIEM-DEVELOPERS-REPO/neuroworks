@@ -39,6 +39,12 @@ const COST_PER_1K_INPUT: Record<string, number> = {
   "anthropic/opus": 0.005,
   "anthropic/sonnet": 0.003,
   "anthropic/haiku": 0.001,
+  // OpenAI direct (BYO provider / pool fallback) — approximate flagship vs
+  // mini split; gpt-5.x flagship-tier and mini-tier ballparks.
+  "openai/flagship": 0.00125,
+  "openai/mini": 0.00025,
+  // Gemini Flash via OpenRouter (paid large tier) — flash-class pricing.
+  "gemini/flash": 0.0003,
   minimax: 0.0002,
 };
 const COST_PER_1K_OUTPUT: Record<string, number> = {
@@ -50,6 +56,9 @@ const COST_PER_1K_OUTPUT: Record<string, number> = {
   "anthropic/opus": 0.025,
   "anthropic/sonnet": 0.015,
   "anthropic/haiku": 0.005,
+  "openai/flagship": 0.010,
+  "openai/mini": 0.002,
+  "gemini/flash": 0.0025,
   minimax: 0.0002,
 };
 
@@ -60,6 +69,11 @@ function costTier(model: string): string {
   if (/^claude-opus/i.test(model)) return "anthropic/opus";
   if (/^claude-sonnet/i.test(model)) return "anthropic/sonnet";
   if (/^claude-haiku/i.test(model)) return "anthropic/haiku";
+  // OpenAI direct ids (gpt-5.x family from the BYO provider / pool fallback).
+  if (/^gpt-\d[\d.]*-?(mini|nano)/i.test(model)) return "openai/mini";
+  if (/^gpt-\d/i.test(model)) return "openai/flagship";
+  // Gemini via OpenRouter ("google/gemini-3.5-flash" etc).
+  if (/gemini.*flash/i.test(model)) return "gemini/flash";
   if (/opus|gpt-4\.5|gpt-4-?turbo|claude-3-5-sonnet|claude-opus/i.test(model)) return "openrouter/large";
   if (/gpt-4o(?!-mini)|claude-sonnet|claude-3-haiku|llama-3-70b|mixtral/i.test(model)) return "openrouter/medium";
   return "openrouter/small";

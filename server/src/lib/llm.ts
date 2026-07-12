@@ -321,6 +321,34 @@ async function generateWithMetaInner(prompt: string, system?: string, opts: LLMC
     } catch (e: any) {
       const fallbackOn = process.env.NEUROWORKS_OR_FALLBACK_OLLAMA !== "0";
       if (isTransientError(e) && fallbackOn && !streamed) {
+        // PROVIDER-POOL FAILOVER (2026-07-12): before dropping all the way
+        // to the 3B local model, walk the other registered providers —
+        // OpenAI as the designated secondary, Anthropic last (priciest).
+        // Same OpenAI-compatible client, different endpoint+key+model; each
+        // fallback call bypasses OR's circuit breaker (see openrouter.ts).
+        // Complexity tier is preserved: a complex task falls to the
+        // fallback's LARGE model, everything else to its cheap small one.
+        // Local Ollama stays the final safety net, exactly as before.
+        try {
+          const { getFallbackChain } = await import("./model-providers.js");
+          const isComplex = opts.complexity === "high" || isTooBigForLocal(prompt, system);
+          for (const fp of getFallbackChain()) {
+            const fbModel = isComplex ? fp.largeModel : fp.smallModel;
+            try {
+              console.warn(`[llm] active provider failed — trying ${fp.label} (${fbModel})`);
+              if (opts.onRoutingDecision) {
+                try { opts.onRoutingDecision({ backend: "openrouter", model: fbModel, reason: `active provider unavailable — failover to ${fp.label}`, tokenEstimate }); } catch { /* consumer error */ }
+              }
+              return await openrouterGenerateWithMeta(prompt, system, {
+                model: fbModel, onToken, maxTokens: opts.maxTokens, temperature: opts.temperature,
+                endpoint: { baseUrl: fp.baseUrl, apiKey: fp.apiKey },
+              });
+            } catch (fe: any) {
+              if (streamed) throw fe; // tokens reached the consumer — can't switch again
+              console.warn(`[llm] fallback ${fp.label} also failed: ${String(fe?.message ?? fe).slice(0, 120)}`);
+            }
+          }
+        } catch { /* pool unreadable — fall through to local */ }
         const localModel = opts.profile ? await pickModelFor(opts.profile, config.ollamaModel) : config.ollamaModel;
         console.warn(`[llm] OpenRouter transient failure — falling back to local ${localModel}: ${String(e?.message ?? e).slice(0, 140)}`);
         if (opts.onRoutingDecision) {

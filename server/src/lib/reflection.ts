@@ -500,6 +500,14 @@ export async function runReflection(opts: { windowHours?: number; force?: boolea
     } catch (e: any) {
       console.warn(`[reflection] Intellinexus publish failed (non-fatal): ${e?.message ?? e}`);
     }
+    // Reflection -> living persona profiles. Only personas that actually ran
+    // a task today get considered (stats.byPersona) — see persona-profile.ts.
+    try {
+      const { maybeUpdatePersonaProfiles } = await import("./persona-profile.js");
+      await maybeUpdatePersonaProfiles(stats.byPersona, text);
+    } catch (e: any) {
+      console.warn(`[reflection] persona profile update failed (non-fatal): ${e?.message ?? e}`);
+    }
     const result: ReflectionResult = { date: stats.date, path, stats, reflection: text, generatedAt, modelUsed };
     lastResult = result;
     // Surface the reflection on the Calendar by registering a Job record.

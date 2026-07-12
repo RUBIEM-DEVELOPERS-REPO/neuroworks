@@ -156,6 +156,18 @@ export async function ensureWorker(opts: { waitForReady?: boolean } = {}): Promi
 // Sequential spawn (not Promise.all) so the children don't all boot + warm their
 // model in the same instant and spike the box. Best-effort: a worker that fails
 // to come up is logged and skipped; the ones that did start still serve.
+// Count managed workers whose HTTP port is actually SERVING right now — the
+// honest "reachable neuro" number. managedWorkerCount() counts live child
+// processes, but a child can be up while its port isn't accepting yet (still
+// warming its model) or has silently wedged. The pool target must be measured
+// against reachability, not process liveness, or a flaky worker leaves the
+// fleet permanently one short (the "shows 3 of 4" bug, 2026-07-13).
+async function reachableWorkerCount(): Promise<number> {
+  const ports = [...workers.values()].filter(w => !w.child.killed).map(w => w.port);
+  const results = await Promise.all(ports.map(p => isPortServing(p).catch(() => false)));
+  return results.filter(Boolean).length;
+}
+
 export async function ensurePool(target: number): Promise<{ running: number }> {
   const want = Math.max(1, Math.min(MAX_WORKERS, Math.floor(target)));
   // First make sure at least one exists (also adopts a manually-started or
@@ -167,7 +179,26 @@ export async function ensurePool(target: number): Promise<{ running: number }> {
     const r = await ensureExtraWorker({ reason: `eager pool warm-up → target ${want}`, waitForReady: false }).catch(() => null);
     if (!r || managedWorkerCount() <= before) break; // at cap, or spawn didn't add — stop
   }
-  return { running: managedWorkerCount() };
+  // RECONCILE: the spawn loop counts processes, but a freshly-spawned worker
+  // isn't reachable until it has bound its port and warmed its model (~45s).
+  // FIRST give the workers we already spawned time to become reachable —
+  // measuring immediately returns 0 and would trigger a storm of unnecessary
+  // extra spawns (the 9-workers-for-a-target-of-4 bug, 2026-07-13). Only after
+  // a warm-up grace window do we top up a GENUINE shortfall (a worker that
+  // spawned but never came up), bounded so an un-spawnable slot can't loop.
+  const WARMUP_DEADLINE = Date.now() + 90_000;
+  while (Date.now() < WARMUP_DEADLINE) {
+    if (await reachableWorkerCount() >= want) return { running: want };
+    await new Promise(r => setTimeout(r, 3_000));
+  }
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const reachable = await reachableWorkerCount();
+    if (reachable >= want) break;
+    console.log(`  ⓦ pool reconcile: ${reachable}/${want} reachable after warm-up — topping up (attempt ${attempt + 1}/2)`);
+    const r = await ensureExtraWorker({ reason: `pool reconcile → ${want}`, waitForReady: true }).catch(() => null);
+    if (!r) break; // at MAX_WORKERS cap — nothing more we can do
+  }
+  return { running: await reachableWorkerCount() };
 }
 
 // Scale UP: ensure one MORE managed worker exists, up to MAX_WORKERS.
@@ -227,7 +258,7 @@ async function spawnOnPort(port: number): Promise<WorkerHandle> {
       workers.set(port, handle);
       // Pre-register so pollPeers picks it up immediately, even before the
       // periodic auto-discovery scan would have noticed.
-      registerPeer(handle.url, "registered", `managed worker (pid ${handle.child.pid}, port ${port})`);
+      registerPeer(handle.url, "managed", `managed worker (pid ${handle.child.pid}, port ${port})`);
       return handle;
     })();
     pendingByPort.set(port, pending);
@@ -255,6 +286,13 @@ function spawnWorker(port: number): Promise<WorkerHandle> {
     // Prevent the child from itself trying to spawn another worker — that
     // would chain infinitely. Children are leaves.
     NEUROWORKS_AUTO_SPAWN_WORKER: "0",
+    // Parent-death watchdog: the worker self-terminates if THIS primary
+    // process disappears without a graceful shutdown (crash, OOM, SIGKILL).
+    // Graceful shutdown already reaps children via shutdownManagedWorker();
+    // this covers the ungraceful case so a dead primary never leaves a fleet
+    // of orphaned workers holding ports (observed 2026-07-13 after a forced
+    // primary kill left 9 parentless workers listening).
+    NEUROWORKS_PARENT_PID: String(process.pid),
   };
   console.log(`  ⓦ spawning managed worker on port ${port}…`);
   // Run the server package's OWN `dev` script from the server dir. We avoid the

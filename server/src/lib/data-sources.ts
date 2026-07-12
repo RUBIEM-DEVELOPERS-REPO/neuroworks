@@ -72,9 +72,19 @@ export function getSource(id: string): DataSource | undefined {
   return load().find(s => s.id === id);
 }
 
+// Resolve a source by label OR id. The planner is TOLD the label AND the id
+// (the companyDataContext hint lists "id=…"), and it frequently passes the id
+// even when the task named the label — every db.* call then failed with
+// "source not found" and the agent aborted (live 2026-07-13). Accept exact id,
+// exact label (case-insensitive), then a substring label match so a slightly
+// off label ("Neon" for "Neon Cloud DB") still resolves.
 export function getSourceByLabel(label: string): DataSource | undefined {
-  const lower = label.toLowerCase();
-  return load().find(s => s.label.toLowerCase() === lower);
+  const raw = label.trim();
+  const lower = raw.toLowerCase();
+  const list = load();
+  return list.find(s => s.id === raw)
+    ?? list.find(s => s.label.toLowerCase() === lower)
+    ?? list.find(s => s.label.toLowerCase().includes(lower) || lower.includes(s.label.toLowerCase()));
 }
 
 export function addSource(input: Omit<DataSource, "id" | "createdAt">): DataSource {

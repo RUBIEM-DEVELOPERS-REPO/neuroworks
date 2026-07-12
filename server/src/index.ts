@@ -347,6 +347,23 @@ const server = app.listen(config.port, config.bindHost, () => {
     console.warn(`  ⚠ persona template backfill failed: ${e?.message ?? e}`);
   }
 
+  // Parent-death watchdog (managed workers only). worker-manager.ts sets
+  // NEUROWORKS_PARENT_PID when it spawns us; if that primary process vanishes
+  // ungracefully (crash/OOM/SIGKILL — graceful shutdown reaps us directly),
+  // exit so we don't linger as an orphan holding a port. process.kill(pid, 0)
+  // sends no signal, just probes existence: it throws ESRCH once the parent
+  // is gone.
+  if (config.role !== "primary" && process.env.NEUROWORKS_PARENT_PID) {
+    const parentPid = Number(process.env.NEUROWORKS_PARENT_PID);
+    if (Number.isFinite(parentPid) && parentPid > 0) {
+      const wd = setInterval(() => {
+        try { process.kill(parentPid, 0); }
+        catch { console.warn(`  ⏻ parent primary (pid ${parentPid}) gone — worker self-terminating`); process.exit(0); }
+      }, 5_000);
+      wd.unref();
+    }
+  }
+
   // Auto-spawn a managed worker POOL if we are the primary. With >1 worker,
   // concurrent tasks fan out across the pool (least-loaded routing) instead of
   // funnelling to a single agent — the "only one agent working" fix. Pool size

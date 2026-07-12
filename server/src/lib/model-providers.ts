@@ -163,14 +163,61 @@ export function applyToRuntime(p: ModelProvider | null): void {
   if (p.kind === "anthropic") {
     config.openrouterModel = (process.env.ANTHROPIC_SMALL_MODEL ?? "").trim() || "claude-haiku-4-5";
     config.openrouterLargeModel = (process.env.ANTHROPIC_LARGE_MODEL ?? "").trim() || p.model;
+  } else if (p.kind === "openrouter") {
+    // FREE-FIRST tiering (2026-07-12 "most cost-affordable org" pass): the
+    // small tier — planning, extraction, everyday synth, i.e. the vast
+    // majority of calls — rides a strong FREE OpenRouter model; only
+    // complexity:"high" / oversized prompts hand off to the paid model the
+    // operator picked for this provider. OPENROUTER_MODEL env still pins
+    // the small tier explicitly.
+    config.openrouterModel = (process.env.OPENROUTER_MODEL ?? "").trim() || "nvidia/nemotron-3-super-120b-a12b:free";
+    config.openrouterLargeModel = p.model;
   } else {
-    // Non-Anthropic providers: same model for both tiers (tier split disabled)
-    // — leaving the env's large model in place would send an alien model id
-    // to this provider's endpoint on big/complex synths → 404.
+    // Other direct providers (OpenAI/Groq/Together/custom): same model for
+    // both tiers — leaving the env's large model in place would send an
+    // alien model id to this provider's endpoint on big/complex synths → 404.
     config.openrouterModel = p.model;
     config.openrouterLargeModel = p.model;
   }
   config.openrouterEnabled = config.openrouterApiKey.length > 0;
+}
+
+// Per-kind small-tier defaults for FALLBACK calls (the provider's own stored
+// `model` is its large tier). Kept conservative-cheap: fallbacks exist for
+// availability, not quality escalation.
+const FALLBACK_SMALL_MODEL: Partial<Record<ProviderKind, string>> = {
+  openai: "gpt-5.4-mini",
+  anthropic: "claude-haiku-4-5",
+  openrouter: "nvidia/nemotron-3-super-120b-a12b:free",
+};
+
+export type FallbackProvider = {
+  kind: ProviderKind;
+  label: string;
+  baseUrl: string;
+  apiKey: string; // decrypted — in-memory only, never serialized
+  smallModel: string;
+  largeModel: string;
+};
+
+// The NON-active registered providers, decrypted and ordered for failover:
+// OpenAI first (the designated secondary), then everything else, Anthropic
+// last (premium — most expensive per token, so it's the last resort, not the
+// second call). llm.ts walks this chain when the active provider's call
+// fails transiently or its circuit is open.
+export function getFallbackChain(): FallbackProvider[] {
+  const rank = (k: ProviderKind) => (k === "openai" ? 0 : k === "anthropic" ? 2 : 1);
+  return load()
+    .filter(p => !p.active && plainKey(p))
+    .sort((a, b) => rank(a.kind) - rank(b.kind))
+    .map(p => ({
+      kind: p.kind,
+      label: p.label,
+      baseUrl: p.baseUrl,
+      apiKey: plainKey(p),
+      smallModel: FALLBACK_SMALL_MODEL[p.kind] ?? p.model,
+      largeModel: p.model,
+    }));
 }
 
 // Called once at boot: re-apply the active provider so a UI-added key survives

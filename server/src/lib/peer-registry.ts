@@ -8,7 +8,14 @@
 
 import { config } from "../config.js";
 
-export type PeerSource = "env" | "discovered" | "registered";
+// "managed" = a worker THIS primary spawned (worker-manager.ts). We know it's
+// ours and know it takes ~50s to warm its model — so it is exempt from the
+// consecutive-fail auto-drop (a warming worker fails health probes, and once
+// dropped it left the probe set and never rejoined → the "shows 3 of 4
+// neuros" bug, 2026-07-13). Managed peers stay probed forever; they rejoin the
+// instant they answer, and a truly-dead one just shows down without polluting
+// the active set's drop logic.
+export type PeerSource = "env" | "discovered" | "registered" | "managed";
 
 type Entry = {
   url: string;
@@ -88,7 +95,10 @@ export function noteHealthResult(url: string, ok: boolean) {
     if (e.dropped) e.dropped = false; // auto-rejoin
   } else {
     e.consecutiveFails++;
-    if (e.consecutiveFails >= DROP_AFTER_CONSECUTIVE_FAILS) e.dropped = true;
+    // Managed workers are never hard-dropped — they're ours and may just be
+    // warming (a fresh worker fails probes for ~50s). Staying in the active
+    // set means pollPeers keeps probing, so it rejoins the moment it answers.
+    if (e.source !== "managed" && e.consecutiveFails >= DROP_AFTER_CONSECUTIVE_FAILS) e.dropped = true;
   }
 }
 

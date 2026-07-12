@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { marked } from "marked";
 import { api } from "../lib/api";
+import { LinkPreview } from "../components/LinkPreview";
 
 // Customer-facing result document. The Tasks page shows technical detail
 // (steps, models, durations); this page is the polished read — title, the
@@ -205,7 +206,7 @@ function OutcomeDetail({ kind, payload }: { kind: string; payload: any }) {
                         </>
                       ) : (
                         <>
-                          <a href={s.url} target="_blank" rel="noopener noreferrer" className="text-violet-400 hover:text-violet-500">{s.title || s.url}</a>
+                          <LinkPreview href={s.url} className="text-violet-400 hover:text-violet-500">{s.title || s.url}</LinkPreview>
                           <div className="text-[11px] text-cream-300/50 font-mono break-all">{s.url}</div>
                         </>
                       )}
@@ -245,7 +246,11 @@ function OutcomeDetail({ kind, payload }: { kind: string; payload: any }) {
                 <li key={i} className="text-[12px] flex items-start gap-2">
                   <span className={`mt-1 inline-block w-1 h-1 rounded-full flex-shrink-0 ${w.ok === false ? "bg-coral-500" : "bg-leaf-500"}`} />
                   <div className="min-w-0">
-                    <a href={w.url} target="_blank" rel="noopener noreferrer" className={`${w.ok === false ? "text-coral-400" : "text-violet-400 hover:text-violet-500"}`}>{w.title || w.url}</a>
+                    {w.ok === false ? (
+                      <span className="text-coral-400">{w.title || w.url}</span>
+                    ) : (
+                      <LinkPreview href={w.url} className="text-violet-400 hover:text-violet-500">{w.title || w.url}</LinkPreview>
+                    )}
                     <div className="text-[11px] text-cream-300/50 font-mono break-all">{w.url}</div>
                     {w.error && <div className="text-[11px] text-coral-400/70 mt-0.5">{w.error}</div>}
                   </div>
@@ -297,7 +302,7 @@ function OutcomeDetail({ kind, payload }: { kind: string; payload: any }) {
       <ul className="space-y-1">
         {(payload.results ?? []).map((w: any, i: number) => (
           <li key={i} className="text-[12px]">
-            <a href={w.url} target="_blank" rel="noopener noreferrer" className="text-violet-400 hover:text-violet-500">{w.title}</a>
+            <LinkPreview href={w.url} className="text-violet-400 hover:text-violet-500">{w.title}</LinkPreview>
             <div className="text-[11px] text-cream-300/50 font-mono break-all">{w.url}</div>
             {w.snippet && <div className="text-[11px] text-cream-300/70 mt-0.5">{w.snippet}</div>}
           </li>
@@ -891,7 +896,7 @@ function Sources({ runs }: { runs: any[] }) {
               {s.kind === "vault" ? (
                 <Link to={`/knowledge/${s.path}`} className="text-violet-400 hover:text-violet-500 font-mono text-xs break-all">{s.path}</Link>
               ) : s.kind === "url" ? (
-                <a href={s.url} target="_blank" rel="noopener noreferrer" className="text-violet-400 hover:text-violet-500 break-all">{s.title || s.url}</a>
+                <LinkPreview href={s.url} className="text-violet-400 hover:text-violet-500 break-all">{s.title || s.url}</LinkPreview>
               ) : s.kind === "repo" ? (
                 <a href={`https://github.com/${s.owner}/${s.name}`} target="_blank" rel="noopener noreferrer" className="text-violet-400 hover:text-violet-500 font-mono text-xs">{s.owner}/{s.name}{s.path ? ` · ${s.path}` : ""}</a>
               ) : (

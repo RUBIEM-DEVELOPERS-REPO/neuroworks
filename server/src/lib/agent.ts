@@ -8,6 +8,8 @@ import { openrouterCircuitOpen, openrouterDailyQuotaExhausted, openrouterBilling
 import { PLAN_SYSTEM, POLISHED_DIRECT, POLISHED_SYNTH, TRIVIAL_DIRECT } from "./agent-prompts.js";
 import { injectLanguagePrompt } from "./language-prompts.js";
 import { classifyDeliverable, taskWantsResearch } from "./deliverable.js";
+import { newOffloadRun, offloadLargeFields, recoverFullText } from "./context-offload.js";
+import { listSources as listDataSources } from "./data-sources.js";
 
 // Shared local-filesystem detector — "does this task point at a file on the
 // operator's PC?" Used at three points (the planner's system-prompt hint,
@@ -571,6 +573,12 @@ const FATAL_ERROR_RE = /\b(?:401|403|model not found|model not pulled|API key|in
 const STEP_RETRY_BACKOFF_MS = [1500, 4000, 8000];
 
 export async function executePlan(p: Plan, push: (msg: string) => void, onProgress?: (runs: StepRun[]) => void): Promise<{ runs: StepRun[]; hadWrites: boolean; budgets?: { llm: number; io: number; idlePeers: number }; subagentTimings?: { wave: number; elapsedMs: number; ioCount: number; llmCount: number }[] }> {
+  // Per-run offload archive id — see context-offload.ts. Large step-result
+  // fields get archived under .neuroworks/offload/<offloadRunId>/ and
+  // replaced in the running history with a short preview, so steps 2..N of
+  // a long plan don't each carry a full copy of step 1's raw scrape/read
+  // through their own LLM calls.
+  const offloadRunId = newOffloadRun();
   const runs: StepRun[] = p.steps.map(step => ({ step, ok: false, durationMs: 0 }));
   let hadWrites = false;
   for (const step of p.steps) {
@@ -668,7 +676,8 @@ export async function executePlan(p: Plan, push: (msg: string) => void, onProgre
         // ollama.generate returns { text, model } so we capture the model used.
         // Other tools just leave modelUsed undefined.
         const modelUsed = result && typeof result === "object" && "model" in result ? String((result as any).model) : undefined;
-        runs[i] = { step, ok: true, result, durationMs: Date.now() - t0, startedAt: t0, modelUsed };
+        const offloadedResult = offloadLargeFields(offloadRunId, i, step.tool, result);
+        runs[i] = { step, ok: true, result: offloadedResult, durationMs: Date.now() - t0, startedAt: t0, modelUsed };
         onProgress?.([...runs]);
         // A human.request step means the plan cannot proceed without the
         // operator — stop launching later waves. The caller detects the
@@ -1325,7 +1334,45 @@ export async function planAndExecute(
     push(`Building the day plan for ${date} — meetings, scheduled tasks, dated memory commitments, and carryover.`);
     return { steps: [{ tool: "calendar.plan_day", args: { date }, label: humanStepLabel("calendar.plan_day", { date }) }], summary: "Daily briefing from the day plan", waves: [] };
   };
-  let p = buildMemoryPlan() ?? buildBriefingPlan() ?? heuristicPlan(bareTask, { hasAttachments: /\nAttached documents \(user uploaded as context/.test(task) }) ?? { steps: [], summary: undefined, waves: [] };
+  // Deterministic DB plan — same pattern as buildMemoryPlan/buildBriefingPlan.
+  // When the task names a REGISTERED data source (or clearly asks about "the
+  // database"), route straight to db.query question-mode: the primitive
+  // fetches the schema, generates SQL from the question, executes, and
+  // returns labeled result sets for the synth. Without this, "query the Neon
+  // Cloud DB and summarize" went to a WEB search three runs straight
+  // (2026-07-12) — the free-tier LLM planner never chose the db.* chain even
+  // with the registered-databases hint in its prompt.
+  const buildDbPlan = (): Plan | null => {
+    if (fromTemplate) return null;
+    // WRITE INTENT → do NOT hijack into read-only question-mode. Question-mode
+    // generates SELECT-only SQL; a task that asks to INSERT/UPDATE/DELETE (or
+    // literally names db.write) must reach the LLM planner / explicit-tool
+    // path so the real db.write HITL primitive runs. Routing it here silently
+    // ran a SELECT and the synth then FABRICATED a successful write with
+    // placeholder row values (live 2026-07-13 — 0 rows actually landed).
+    if (/\b(?:db\.write|insert\s+into|update\s+\w+\s+set|delete\s+from|create\s+a?\s*(?:new\s+)?(?:requisition|record|row|entry)|add\s+a?\s*(?:new\s+)?(?:requisition|record|row|entry)|write\s+to)\b/i.test(bareTask)) return null;
+    try {
+      const sources = listDataSources();
+      if (sources.length === 0) return null;
+      const lower = bareTask.toLowerCase();
+      const labeled = sources.find(s => s.label && lower.includes(s.label.toLowerCase()));
+      const genericDb = /\b(?:database|data\s+sources?|db|sql|postgres(?:ql)?|mysql|mongodb|sqlite|mssql)\b/i.test(bareTask);
+      // Verbs that make this a DATA request, not a config/admin request
+      // ("delete the database connection" should not run queries).
+      const wantsData = /\b(?:quer(?:y|ies)|summari[sz]e|how\s+many|count|total|recent|latest|list|show|what(?:'s|\s+is)?\s+in|look\s+into|analy[sz]e|report|findings|stored)\b/i.test(bareTask);
+      if (!wantsData || (!labeled && !genericDb)) return null;
+      const target = labeled ?? (sources.length === 1 ? sources[0] : null);
+      if (!target) return null; // several sources, none named — let the LLM planner disambiguate
+      push(`Recognised a database question — querying "${target.label}" (${target.kind}) directly.`);
+      const args = { source: target.label, question: bareTask.slice(0, 500) };
+      return {
+        steps: [{ tool: "db.query", args, rationale: "task asks about a registered company data source — schema-aware question-mode query instead of web research", label: humanStepLabel("db.query", args) }],
+        summary: `Query ${target.label} and summarize the findings`,
+        waves: [[0]],
+      };
+    } catch { return null; }
+  };
+  let p = buildMemoryPlan() ?? buildBriefingPlan() ?? buildDbPlan() ?? heuristicPlan(bareTask, { hasAttachments: /\nAttached documents \(user uploaded as context/.test(task) }) ?? { steps: [], summary: undefined, waves: [] };
   if (p.steps.length > 0) {
     // Customer-facing context-tier badge based on what the plan touches.
     // Helps the customer see "this answer drew on your vault" vs "this
@@ -1404,6 +1451,39 @@ export async function planAndExecute(
         const raw = JSON.stringify(later.args ?? {});
         if (raw.includes(`$step_${i}.matches`)) {
           later.args = JSON.parse(raw.replaceAll(`$step_${i}.matches`, `$step_${i}.entries`));
+        }
+      }
+    }
+  }
+  // PLAN REPAIR — fs.find_in pointed at a folder the task didn't ask for.
+  // "Summarize all the documents in my downloads that refer to X" contains
+  // both the word "documents" (as a noun for files) and "downloads" (the
+  // actual folder) — the LLM planner picked folder='documents' from the
+  // noun and searched the wrong place (4 identical live failures on
+  // 2026-07-12, all "succeeded" at job level while the answer said
+  // "searched Documents, found nothing"). The possessive form is the
+  // disambiguator: "my downloads" is a folder reference, bare "documents"
+  // is not. When the task names exactly ONE folder that way, it wins over
+  // whatever the planner chose.
+  {
+    const folderWord = (w: string) =>
+      /^download/i.test(w) ? "downloads"
+      : /^(documents?|docs)$/i.test(w) ? "documents"
+      : /^photos$/i.test(w) ? "pictures"
+      : w.toLowerCase();
+    const mentions = new Set(
+      [...bareTask.matchAll(/\b(?:my|the)\s+(downloads?|desktop|documents?|docs|music|pictures|photos|videos)\s+(?:folder\b)?/gi)]
+        .map(m => folderWord(m[1])),
+    );
+    if (mentions.size === 1) {
+      const wanted = [...mentions][0];
+      for (const step of p.steps) {
+        if (step.tool !== "fs.find_in" && step.tool !== "fs.list_external") continue;
+        const current = String(step.args?.folder ?? "").toLowerCase();
+        if (step.tool === "fs.find_in" && current && current !== "all" && folderWord(current) !== wanted) {
+          push(`Plan repair: task says "my ${wanted}" but the plan searched ${current} — correcting the folder.`);
+          (step.args as Record<string, unknown>).folder = wanted;
+          if (step.label) step.label = humanStepLabel("fs.find_in", step.args ?? {});
         }
       }
     }
@@ -2370,8 +2450,24 @@ export function heuristicPlan(task: string, opts: { hasAttachments?: boolean } =
   //     caught by aboutMatch / webSearchMatch above.
   //   • No URL in the task (URLs go to web.scrape via the earlier
   //     heuristic).
+  // DB-intent override for the research shortcut below. "Query the Neon
+  // Cloud DB data source and summarize the findings" carries research-y
+  // words ("summarize the findings") that fired this shortcut and sent the
+  // task to a WEB search — which came back with public Neon marketing docs
+  // instead of touching db.query at all (live 2026-07-12, first external-DB
+  // integration test). Same failure family as the FinanceFlow incident:
+  // heuristicPlan runs before the LLM planner, so plan()'s registered-
+  // databases hint never gets a chance. When the task names a database
+  // concept OR a registered data-source label, fall through to the LLM
+  // planner, which knows the db.list_sources → db.schema → db.query chain.
+  let dbIntent = /\b(?:database|data\s+sources?|db|sql|postgres(?:ql)?|mysql|mongodb|sqlite|mssql)\b/i.test(t);
+  if (!dbIntent) {
+    try {
+      dbIntent = listDataSources().some(s => s.label && t.toLowerCase().includes(s.label.toLowerCase()));
+    } catch { /* registry unreadable — keep regex verdict */ }
+  }
   const researchTrigger = detectResearchSignals(t);
-  if (researchTrigger && t.length >= 60 && !/https?:\/\/\S+/.test(t)) {
+  if (researchTrigger && !dbIntent && t.length >= 60 && !/https?:\/\/\S+/.test(t)) {
     // Extract a focused research query. Try in order:
     //   1. "look up X" / "research X" / "investigate X" anywhere in body
     //   2. "benchmarks for X" / "the current state of X"
@@ -3289,7 +3385,12 @@ function resolveValue(v: any, runs: StepRun[]): any {
     const base = runs[idx]?.result;
     if (base === undefined) return v;
     const direct = path ? deepGet(base, path) : base;
-    if (direct !== undefined) return direct;
+    // An explicit reference to a field gets the REAL bytes back, even if
+    // that field was archived by context-offload.ts to shrink what rides
+    // through the plan's intermediate steps — otherwise a later step that
+    // forwards this value verbatim (e.g. vault.write content: "$step_N.text")
+    // would silently write the short preview instead of the real content.
+    if (direct !== undefined) return typeof direct === "string" ? recoverFullText(direct) : direct;
     // Planner-shape-error fallback. The planner sometimes writes
     // "$step_0.path" or "$step_0.content" when the actual result is a
     // collection-shaped object (matches[], results[], etc.). Without this
@@ -3332,7 +3433,7 @@ function resolveValue(v: any, runs: StepRun[]): any {
     // (reading 'slice')". That was the recurring general-task crash where
     // a plan referenced `$step_N.missingField` (B4 in the bug review).
     if (target === undefined) return "";
-    if (typeof target === "string") return target;
+    if (typeof target === "string") return recoverFullText(target);
     const serialized = JSON.stringify(target);
     return serialized === undefined ? "" : serialized.slice(0, 4000);
   });

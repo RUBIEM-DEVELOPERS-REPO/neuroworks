@@ -14,9 +14,11 @@ import {
 import { BrandMark } from "./BrandMark";
 import { GlitterBackground } from "./GlitterBackground";
 import { PixelDriftText } from "./PixelDriftText";
+import { WeightHoverText } from "./WeightHoverText";
 import { CommandPalette } from "./CommandPalette";
 import { Kbd, MetaKey } from "./Kbd";
 import { api, setToken, type User } from "../lib/api";
+import { preloadRoute, preloadLikelyRoutes } from "../lib/routePreload";
 
 type NavItem = {
   to: string;
@@ -135,6 +137,8 @@ export function Layout({ children }: { children: ReactNode }) {
     navigate("/login");
   }
   useEffect(() => { tick(); const i = setInterval(tick, 5000); return () => clearInterval(i); }, []);
+  // Warm the chunks a user almost always opens next, once the app is idle.
+  useEffect(() => { preloadLikelyRoutes(); }, []);
 
   const statusOk = health?.ready === true;
   const statusLabel = !health ? "connecting" : statusOk ? "All systems nominal" : "Degraded, check Settings";
@@ -142,7 +146,7 @@ export function Layout({ children }: { children: ReactNode }) {
   const renderNavItem = (n: NavItem) => {
     const Icon = n.icon;
     return (
-      <NavLink key={n.to} to={n.to} className={({ isActive }) =>
+      <NavLink key={n.to} to={n.to} onMouseEnter={() => preloadRoute(n.to)} onFocus={() => preloadRoute(n.to)} className={({ isActive }) =>
         `flex items-center gap-3 px-3 py-2 rounded-md text-sm transition-colors ${isActive ? "bg-ink-800 text-cream-50" : "text-cream-300 hover:text-cream-50 hover:bg-ink-800/60"}`
       }>
         <Icon size={16} className="text-cream-300/70 shrink-0" />
@@ -195,7 +199,9 @@ export function Layout({ children }: { children: ReactNode }) {
               <div className="w-[168px] h-8">
                 <PixelDriftText text="NeuroWorks" />
               </div>
-              <div className="text-[10px] text-cream-300/70 mt-1 tracking-[0.18em] uppercase">The Intelligent Organization</div>
+              <div className="text-[10px] text-cream-300/70 mt-1 tracking-[0.18em] uppercase">
+                <WeightHoverText label="The Intelligent Organization" fromWeight={400} toWeight={800} staggerMs={25} />
+              </div>
             </div>
           </Link>
         </div>
@@ -240,12 +246,12 @@ export function Layout({ children }: { children: ReactNode }) {
           </div>
           <div className="flex items-center gap-2">
             {persona && (
-              <Link to="/personas" className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-full border bg-violet-500/10 border-violet-500/30 text-violet-300" title="Active persona">
+              <Link to="/personas" className="nw-shiny-pill flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-full border bg-violet-500/10 border-violet-500/30 text-violet-300" title="Active persona">
                 <span className="w-1.5 h-1.5 rounded-full bg-violet-400" />
                 {persona.name} <span className="opacity-60">· {persona.role}</span>
               </Link>
             )}
-            <div className={`flex items-center gap-2 text-xs px-3 py-1.5 rounded-full border ${statusOk ? "bg-leaf-500/10 border-leaf-500/30 text-leaf-400" : "bg-flame-500/10 border-flame-500/30 text-flame-400"}`}>
+            <div className={`nw-shiny-pill flex items-center gap-2 text-xs px-3 py-1.5 rounded-full border ${statusOk ? "bg-leaf-500/10 border-leaf-500/30 text-leaf-400" : "bg-flame-500/10 border-flame-500/30 text-flame-400"}`}>
               <span className={`inline-block w-1.5 h-1.5 rounded-full ${statusOk ? "bg-leaf-500" : "bg-flame-500 animate-pulse"}`} />
               {statusLabel}
             </div>
