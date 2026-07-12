@@ -7,6 +7,7 @@ import {
 } from "lucide-react";
 import { api } from "../lib/api";
 import { useAudioRecorder } from "../lib/useAudioRecorder";
+import { useLiveTranscription } from "../lib/useLiveTranscription";
 import { BrandMark } from "../components/BrandMark";
 import { ResultPanel } from "../components/ResultPanel";
 import { Kbd, MetaKey } from "../components/Kbd";
@@ -106,20 +107,48 @@ export function Chat() {
     return fresh;
   });
   const [draft, setDraft] = useState("");
-  // Voice input — record a prompt with the mic, then transcribe server-side via
-  // /api/stt (AssemblyAI). The transcript is appended to the draft so the user
-  // can edit or send as normal. sttEnabled gates the button on the server key.
+  // Voice input — two paths. Primary: live streaming (useLiveTranscription)
+  // opens a WebSocket straight to AssemblyAI and updates the draft AS the
+  // user talks — no waiting for the recording to end. Fallback: if live
+  // streaming fails to even connect (old browser, blocked WebSocket, mic
+  // permission edge cases), silently drops to the old record-then-batch-
+  // transcribe flow (useAudioRecorder + POST /api/stt) so the mic still
+  // works, just without the live-typing effect. sttEnabled gates the button
+  // on the server key (shared by both paths).
   const recorder = useAudioRecorder();
+  const live = useLiveTranscription();
   const [sttEnabled, setSttEnabled] = useState(false);
   const [transcribing, setTranscribing] = useState(false);
   const [sttError, setSttError] = useState<string | null>(null);
+  // What the draft looked like before this recording session started (so
+  // live text is appended after whatever the user had already typed, not
+  // overwriting it), and the finalized (end_of_turn: true) transcript
+  // accumulated so far this session — interim text is layered on top of
+  // this each time it updates, not appended to it.
+  const micBaseDraftRef = useRef("");
+  const committedTurnsRef = useRef("");
   // Plan-first: draft a plan and route it to Approvals instead of running now.
   const [planFirst, setPlanFirst] = useState(false);
   useEffect(() => { api.sttStatus().then(s => setSttEnabled(s.enabled)).catch(() => setSttEnabled(false)); }, []);
 
+  function composeMicDraft(interim: string): string {
+    const base = micBaseDraftRef.current;
+    const committed = committedTurnsRef.current;
+    const sep1 = base.trim() && committed ? " " : "";
+    const withCommitted = base.trim() ? base.replace(/\s+$/, "") + sep1 + committed : committed;
+    if (!interim) return withCommitted;
+    const sep2 = withCommitted.trim() ? " " : "";
+    return withCommitted.replace(/\s+$/, "") + sep2 + interim;
+  }
+
   async function toggleMic() {
     if (transcribing) return;
     setSttError(null);
+
+    if (live.active) {
+      live.stop();
+      return;
+    }
     if (recorder.recording) {
       const blob = await recorder.stop();
       if (!blob) return;
@@ -139,7 +168,26 @@ export function Chat() {
       } finally {
         setTranscribing(false);
       }
-    } else {
+      return;
+    }
+
+    micBaseDraftRef.current = draft;
+    committedTurnsRef.current = "";
+    try {
+      await live.start((transcript, isFinal) => {
+        if (isFinal) {
+          committedTurnsRef.current = committedTurnsRef.current
+            ? committedTurnsRef.current.replace(/\s+$/, "") + " " + transcript
+            : transcript;
+          setDraft(composeMicDraft(""));
+        } else {
+          setDraft(composeMicDraft(transcript));
+        }
+      });
+    } catch {
+      // Live path never got a WebSocket open — useLiveTranscription already
+      // set its own error state for display; fall back to the old flow
+      // rather than leave the mic button dead.
       await recorder.start();
     }
   }
@@ -349,6 +397,7 @@ export function Chat() {
 
   async function send() {
     // Stop any in-progress recording so it doesn't dangle after send.
+    if (live.active) live.stop();
     if (recorder.recording) void recorder.stop();
     const topic = draft.trim();
     // Allow empty topic when attachments alone carry the intent — e.g.
@@ -860,27 +909,31 @@ export function Chat() {
                 onClick={toggleMic}
                 disabled={transcribing}
                 className={`w-12 h-12 rounded-xl flex items-center justify-center border transition-colors disabled:opacity-60 ${
-                  recorder.recording
+                  live.active || recorder.recording
                     ? "bg-coral-500/20 border-coral-500/50 text-coral-300 animate-pulse"
                     : "bg-ink-900 hover:bg-ink-850 border-ink-800 hover:border-violet-500/40 text-cream-300 hover:text-cream-100"
                 }`}
-                title={recorder.recording ? "Stop & transcribe" : transcribing ? "Transcribing…" : "Record a prompt"}
-                aria-label={recorder.recording ? "Stop and transcribe" : "Record a prompt"}
-                aria-pressed={recorder.recording}
+                title={live.active ? "Stop listening" : recorder.recording ? "Stop & transcribe" : transcribing ? "Transcribing…" : "Speak a prompt"}
+                aria-label={live.active ? "Stop listening" : recorder.recording ? "Stop and transcribe" : "Speak a prompt"}
+                aria-pressed={live.active || recorder.recording}
               >
-                {transcribing ? <Loader2 size={16} className="animate-spin" /> : recorder.recording ? <Square size={16} /> : <Mic size={18} />}
+                {transcribing ? <Loader2 size={16} className="animate-spin" /> : (live.active || recorder.recording) ? <Square size={16} /> : <Mic size={18} />}
               </button>
             )}
             <button type="submit" disabled={busy || (!draft.trim() && pendingAttachments.length === 0)} className="inline-flex items-center gap-1.5 bg-violet-500 hover:bg-violet-600 disabled:opacity-40 text-white px-5 py-3 rounded-xl text-sm font-medium">
               <Send size={14} /> Send
             </button>
           </div>
-          {(recorder.recording || transcribing || sttError || recorder.error) && (
+          {(live.active || recorder.recording || transcribing || sttError || live.error || recorder.error) && (
             <div className="max-w-3xl mx-auto mt-2 px-1 text-[11px]">
-              {(sttError || recorder.error) ? (
-                <span className="text-coral-400 inline-flex items-center gap-1"><AlertTriangle size={11} /> {sttError ?? recorder.error}</span>
+              {(sttError || live.error || recorder.error) ? (
+                <span className="text-coral-400 inline-flex items-center gap-1"><AlertTriangle size={11} /> {sttError ?? live.error ?? recorder.error}</span>
               ) : transcribing ? (
                 <span className="text-cream-300/60 inline-flex items-center gap-1.5"><Loader2 size={11} className="animate-spin" /> Transcribing…</span>
+              ) : live.active ? (
+                <span className="text-cream-300/60 inline-flex items-center gap-1.5">
+                  <span className="w-1.5 h-1.5 rounded-full bg-coral-500 animate-pulse" /> Listening… your words appear as you speak — tap the square when done
+                </span>
               ) : (
                 <span className="text-cream-300/60 inline-flex items-center gap-1.5">
                   <span className="w-1.5 h-1.5 rounded-full bg-coral-500 animate-pulse" /> Recording… tap the square to transcribe

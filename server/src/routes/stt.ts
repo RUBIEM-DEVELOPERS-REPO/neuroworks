@@ -1,17 +1,29 @@
 import { Router } from "express";
 
-// Speech-to-text via AssemblyAI. The browser records a short prompt and POSTs
-// the audio (base64) here; we upload it to AssemblyAI, kick off a transcript,
-// poll to completion, and return the text. The API key stays server-side
-// (NEUROWORKS_ASSEMBLYAI_API_KEY) so it never reaches the frontend bundle.
+// Speech-to-text via AssemblyAI, two paths:
 //
-// AssemblyAI's flow is async: /upload -> /transcript -> poll /transcript/:id.
-// For short chat prompts this completes in a few seconds; we hold the request
-// open and poll on the server so the client just awaits one call.
+//   POST /            — batch: browser records a whole clip and POSTs it
+//                        (base64); we upload it, kick off a transcript, poll
+//                        to completion, and return the text. Simple, but the
+//                        user sees nothing until well after they stop talking.
+//
+//   GET  /realtime-token — mints a short-lived, single-use AssemblyAI
+//                        streaming token (Universal-Streaming v3) so the
+//                        BROWSER can open its own WebSocket straight to
+//                        AssemblyAI and get partial transcripts back as the
+//                        user speaks. The real API key never leaves this
+//                        server — only a token that expires in ~60s and is
+//                        good for exactly one session. See
+//                        web/src/lib/useLiveTranscription.ts for the client
+//                        side of this (raw PCM capture + the WebSocket).
+//
+// Both share the same NEUROWORKS_ASSEMBLYAI_API_KEY — an account with batch
+// transcription enabled has streaming enabled too, no separate opt-in.
 
 export const sttRouter = Router();
 
 const AAI = "https://api.assemblyai.com/v2";
+const AAI_STREAMING = "https://streaming.assemblyai.com/v3";
 const KEY = () => (process.env.NEUROWORKS_ASSEMBLYAI_API_KEY ?? "").trim();
 const MAX_AUDIO_BYTES = 25 * 1024 * 1024;
 const POLL_TIMEOUT_MS = 90_000;
@@ -23,6 +35,32 @@ sttRouter.get("/status", (_req, res) => {
     provider: "assemblyai",
     hint: KEY() ? undefined : "set NEUROWORKS_ASSEMBLYAI_API_KEY in clawbot/.env and restart to enable the chat mic",
   });
+});
+
+sttRouter.get("/realtime-token", async (_req, res) => {
+  const key = KEY();
+  if (!key) {
+    return res.status(400).json({ error: "speech-to-text not configured", hint: "set NEUROWORKS_ASSEMBLYAI_API_KEY in clawbot/.env and restart" });
+  }
+  try {
+    // 60s is comfortably enough to establish the WebSocket right after the
+    // client fetches this (the token is consumed on connect, not held for
+    // the whole recording — max_session_duration_seconds governs how long
+    // the resulting SESSION can run, left at its 3h default).
+    const r = await fetch(`${AAI_STREAMING}/token?expires_in_seconds=60`, {
+      headers: { authorization: key },
+    });
+    if (!r.ok) {
+      const t = await r.text();
+      if (r.status === 401) return res.status(401).json({ error: "AssemblyAI rejected the API key (401)" });
+      return res.status(502).json({ error: `AssemblyAI token request failed (${r.status})`, detail: t.slice(0, 300) });
+    }
+    const j = (await r.json()) as { token?: string; expires_in_seconds?: number };
+    if (!j.token) return res.status(502).json({ error: "AssemblyAI returned no token" });
+    res.json({ token: j.token, expiresInSeconds: j.expires_in_seconds ?? 60, sampleRate: 16000 });
+  } catch (e: any) {
+    res.status(500).json({ error: e?.message ?? String(e) });
+  }
 });
 
 sttRouter.post("/", async (req, res) => {

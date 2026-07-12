@@ -387,6 +387,7 @@ export const api = {
   planTask: (task: string) => req<{ jobId: string; status: string }>("/api/tasks/plan", { method: "POST", body: JSON.stringify({ task }) }),
   sttStatus: () => req<{ enabled: boolean; provider: string; hint?: string }>("/api/stt/status"),
   transcribe: (audioBase64: string) => req<{ ok: true; text: string; language: string | null }>("/api/stt", { method: "POST", body: JSON.stringify({ audioBase64 }) }),
+  sttRealtimeToken: () => req<{ token: string; expiresInSeconds: number; sampleRate: number }>("/api/stt/realtime-token"),
   terminalStatus: () => req<{ enabled: boolean; cwd: string; shell: "powershell" | "bash"; platform: string; hint?: string }>("/api/terminal/status"),
   terminalExec: (command: string, cwd?: string) => req<{
     ok: true;
