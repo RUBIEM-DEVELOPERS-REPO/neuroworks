@@ -12,6 +12,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { BrandMark } from "./BrandMark";
+import { GlitterBackground } from "./GlitterBackground";
 import { CommandPalette } from "./CommandPalette";
 import { Kbd, MetaKey } from "./Kbd";
 import { api, setToken, type User } from "../lib/api";
@@ -184,6 +185,7 @@ export function Layout({ children }: { children: ReactNode }) {
 
   return (
     <div className="flex h-full">
+      <GlitterBackground />
       <aside className="w-60 shrink-0 bg-ink-900 border-r border-ink-800 flex flex-col">
         <div className="px-5 py-5">
           <Link to="/dashboard" className="flex items-center gap-2.5">
