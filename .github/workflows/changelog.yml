@@ -1,0 +1,42 @@
+name: changelog
+
+# Regenerates CHANGELOG.md from git log on every push to main, so it can't go
+# stale the way a hand-maintained changelog does. Commits the update back
+# with [skip ci] in the message — GitHub natively skips running ANY workflow
+# on a push whose head commit message contains that marker, which is what
+# breaks the otherwise-infinite push -> workflow -> push loop.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: changelog-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  update-changelog:
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Update CHANGELOG.md
+        run: node .github/scripts/update-changelog.mjs
+
+      - name: Commit if changed
+        run: |
+          git config user.name "neuroworks-bot"
+          git config user.email "neuroworks@users.noreply.github.com"
+          git add CHANGELOG.md
+          if git diff --cached --quiet; then
+            echo "No changelog changes."
+            exit 0
+          fi
+          git commit -m "chore: update changelog [skip ci]"
+          git push
