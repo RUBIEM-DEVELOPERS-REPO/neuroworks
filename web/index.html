@@ -13,14 +13,15 @@
          blocks, tabular numbers in cost/data tables — 200+ real uses across
          the app) — no longer used for eyebrow/label text, which was the
          biggest "terminal UI" signal in the old system. -->
-    <!-- Plus Jakarta Sans requested as a wght@200..800 RANGE (not a
-         discrete list) so the browser gets the actual variable-font file —
-         needed for the Dashboard headline's cursor-proximity weight morph
-         (DynamicWeightText), which animates font-variation-settings live.
-         Static usages (font-weight: 500/600/700) render identically either
-         way, so this is a strict upgrade, not a tradeoff. -->
+    <!-- Display face = Playfair Display (transitional serif, variable
+         wght@400..900) for a sleeker, more editorial/luxury feel on headings
+         and the wordmark. Plus Jakarta Sans is kept as a variable range
+         (wght@200..800) because DynamicWeightText / WeightHoverText animate
+         font-variation-settings live on it and the particle wordmark samples
+         its glyphs. Inter carries body copy; JetBrains Mono for code/tabular
+         numbers. -->
     <link
-      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@200..800&family=JetBrains+Mono:wght@400;500&display=swap"
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@200..800&family=Playfair+Display:ital,wght@0,400..900;1,400..900&family=JetBrains+Mono:wght@400;500&display=swap"
       rel="stylesheet" />
     <title>NeuroWorks · The AI Workforce</title>
   </head>

@@ -133,10 +133,25 @@ export function getConnectorPublic(idOrLabel: string): ConnectorPublic | undefin
 }
 
 // Internal — returns the connector with secrets DECRYPTED. Never expose directly.
+// Resolution order: exact id, exact label, then FUZZY — substring either way,
+// then token overlap. Users refer to a connector by a loose name ("finance
+// flow" for "Aiia FinanceFlow") and the strict exact-label match returned
+// "not found" (live 2026-07-13), so the agent reported a non-existent failure.
 function findConnector(idOrLabel: string): Connector | undefined {
   const list = load();
   const key = idOrLabel.trim().toLowerCase();
-  return list.find(c => c.id === idOrLabel) ?? list.find(c => c.label.toLowerCase() === key);
+  const exact = list.find(c => c.id === idOrLabel) ?? list.find(c => c.label.toLowerCase() === key);
+  if (exact) return exact;
+  const substr = list.find(c => c.label.toLowerCase().includes(key) || key.includes(c.label.toLowerCase()));
+  if (substr) return substr;
+  // Token overlap: every content token of the query appears in the label.
+  const stop = new Set(["the", "of", "a", "an", "connector", "system", "app", "api"]);
+  const qTokens = key.split(/[^a-z0-9]+/).filter(t => t && !stop.has(t));
+  if (qTokens.length === 0) return undefined;
+  return list.find(c => {
+    const label = c.label.toLowerCase();
+    return qTokens.every(t => label.includes(t));
+  });
 }
 
 function normalizeAuth(input: any): ConnectorAuth {

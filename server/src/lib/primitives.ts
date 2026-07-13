@@ -648,19 +648,66 @@ export const primitives: Primitive[] = [
   },
   {
     name: "db.write",
-    description: "INSERT/UPDATE/DELETE on a database source. Requires operator approval (HITL gate). The approval request shows the SQL, target source, and estimated impact. Only works on sources configured with writes enabled (readonly=false).",
+    description: "INSERT/UPDATE/DELETE on a database source. Only works on sources with writes enabled (readonly=false). Pass EITHER `query` (an explicit SQL statement) OR `intent` (natural language, SQL sources only — e.g. 'create a $10 requisition for a bucket'): with `intent` the live schema is fetched and one INSERT/UPDATE statement is generated from it. dryRun defaults false so the write actually lands; pass dryRun true to preview the SQL without executing.",
     readonly: false,
     args: [
       { name: "source", type: "string", required: true, description: "Source label (case-insensitive)" },
-      { name: "query", type: "string", required: true, description: "SQL statement (INSERT/UPDATE/DELETE)" },
-      { name: "dryRun", type: "boolean", required: false, description: "If true, show what would happen without executing (default true for safety)" },
+      { name: "query", type: "string", required: false, description: "SQL statement (INSERT/UPDATE/DELETE). Omit when using `intent`." },
+      { name: "intent", type: "string", required: false, description: "Natural-language description of the write (SQL sources only) — the INSERT/UPDATE SQL is generated from the live schema." },
+      { name: "dryRun", type: "boolean", required: false, description: "If true, show the SQL without executing. Default FALSE — the write executes." },
     ],
     handler: async (args) => {
       const source = getSourceByLabel(String(args.source));
       if (!source) throw new Error(`Data source "${args.source}" not found`);
       if (source.readonly) throw new Error(`Source "${args.source}" is read-only — request the operator to enable writes in Company Data settings`);
-      const sql = String(args.query);
-      const dryRun = args.dryRun !== false;
+      let sql = String(args.query ?? "").trim();
+      const intent = String(args.intent ?? "").trim();
+      // Intent-mode: schema → LLM-generated single mutating statement. Exists
+      // so an action task ("$10 requisition in the financeflow") produces a
+      // REAL write instead of the free planner running a web search and the
+      // synth fabricating "Added (Draft)" over a write that never happened
+      // (live 2026-07-13). SQL sources only — needs a schema.
+      if (!sql && intent) {
+        if (!["postgres", "mysql", "sqlite", "mssql"].includes(source.kind)) {
+          throw new Error(`db.write intent-mode only supports SQL sources (this source is ${source.kind}) — pass explicit 'query' SQL instead`);
+        }
+        const { describeSource, runQuery: runQ } = await import("./data-sources.js");
+        const { llmGenerate } = await import("./llm.js");
+        const schema = await describeSource(source);
+        // Annotate NOT-NULL, no-default columns as REQUIRED so the model fills
+        // ALL of them in one shot — a requisitions row needs description AND
+        // category AND ..., and fixing them one-per-repair burned the retry
+        // budget (live 2026-07-13). Postgres only; other kinds fall back to the
+        // plain schema + the repair loop below.
+        const requiredByTable = new Map<string, Set<string>>();
+        if (source.kind === "postgres") {
+          try {
+            const rq = await runQ(source, `SELECT table_schema, table_name, column_name FROM information_schema.columns WHERE is_nullable='NO' AND column_default IS NULL AND table_schema NOT IN ('pg_catalog','information_schema')`, 10000);
+            for (const row of rq.rows) {
+              const key = `${row.table_schema}.${row.table_name}`;
+              if (!requiredByTable.has(key)) requiredByTable.set(key, new Set());
+              requiredByTable.get(key)!.add(String(row.column_name));
+            }
+          } catch { /* annotation is best-effort — repair loop covers gaps */ }
+        }
+        const schemaText = schema.tables.map(t => {
+          const req = requiredByTable.get(t.name);
+          return `${t.name}(${t.columns.map(c => `${c.name} ${c.type}${req?.has(c.name) ? " REQUIRED" : ""}`).join(", ")})`;
+        }).join("\n");
+        const sys = `You translate an action into ONE ${source.kind} write statement (INSERT or UPDATE only — never DELETE/DROP/TRUNCATE). Output ONLY the SQL, no markdown, no prose. Use only tables/columns from the schema. You MUST provide a value for EVERY column marked REQUIRED — infer sensible values from the intent (e.g. reuse the item name for a description, pick a reasonable category). For an id column use gen_random_uuid() (postgres); for created/updated timestamps use NOW(); for status use a pending/draft-style default if the intent doesn't specify. Add a RETURNING clause listing the key columns so the caller can confirm what landed.`;
+        const raw = await llmGenerate(`Schema:\n${schemaText}\n\nAction: ${intent}\n\nSQL:`, sys, { profile: "extraction", complexity: "high", temperature: 0 });
+        sql = raw.replace(/^```[a-z]*\n?|```$/gm, "").trim();
+        // Guard: intent-mode must never emit a destructive statement even if
+        // the model ignores the instruction.
+        if (/\b(delete\s+from|drop\s+|truncate\s+|alter\s+)/i.test(sql)) {
+          throw new Error("db.write intent-mode refused: generated a destructive statement (DELETE/DROP/TRUNCATE/ALTER). Use explicit `query` if this is truly intended.");
+        }
+        if (!/^\s*(insert|update|with)\b/i.test(sql)) {
+          throw new Error(`db.write intent-mode: generated SQL was not an INSERT/UPDATE (got: ${sql.slice(0, 120)})`);
+        }
+      }
+      if (!sql) throw new Error("db.write: pass either 'query' (SQL) or 'intent' (natural language)");
+      const dryRun = args.dryRun === true;
       if (dryRun) {
         // Return a preview without executing.
         return {
@@ -671,10 +718,52 @@ export const primitives: Primitive[] = [
           message: `Preview of write to "${source.label}". A human operator will review this before execution. Submit with dryRun=false to execute.`,
         };
       }
-      const result = await runQuery(source, sql);
+      const wasIntent = !String(args.query ?? "").trim() && !!intent;
+      let result;
+      try {
+        result = await runQuery(source, sql);
+      } catch (e0: any) {
+        // Intent-mode repair loop: a generated INSERT that violates a
+        // constraint (missing NOT-NULL column, bad value) fails atomically —
+        // nothing was written — so it's safe to feed the DB error back and
+        // regenerate. Up to 3 passes because a wide table can surface one
+        // missing REQUIRED column per attempt (live 2026-07-13). Only for
+        // intent-mode + constraint/column errors, never an operator's explicit
+        // `query`.
+        let lastErr: any = e0;
+        const repairable = (m: string) => /(not-null|null value|violates|constraint|column|does not exist|invalid input|syntax)/i.test(m);
+        if (!wasIntent || !repairable(String(e0?.message ?? e0))) throw e0;
+        const { describeSource, runQuery: rq2 } = await import("./data-sources.js");
+        const { llmGenerate } = await import("./llm.js");
+        const schema = await describeSource(source);
+        const requiredByTable = new Map<string, Set<string>>();
+        if (source.kind === "postgres") {
+          try {
+            const rr = await rq2(source, `SELECT table_schema, table_name, column_name FROM information_schema.columns WHERE is_nullable='NO' AND column_default IS NULL AND table_schema NOT IN ('pg_catalog','information_schema')`, 10000);
+            for (const row of rr.rows) { const k = `${row.table_schema}.${row.table_name}`; if (!requiredByTable.has(k)) requiredByTable.set(k, new Set()); requiredByTable.get(k)!.add(String(row.column_name)); }
+          } catch { /* best-effort */ }
+        }
+        const schemaText = schema.tables.map((t: any) => `${t.name}(${t.columns.map((c: any) => `${c.name} ${c.type}${requiredByTable.get(t.name)?.has(c.name) ? " REQUIRED" : ""}`).join(", ")})`).join("\n");
+        for (let attempt = 0; attempt < 3; attempt++) {
+          const fixRaw = await llmGenerate(
+            `Schema (columns marked REQUIRED are NOT NULL and must be given a value):\n${schemaText}\n\nThis ${source.kind} write failed:\n${sql}\nError: ${String(lastErr?.message ?? lastErr).slice(0, 300)}\n\nRegenerate ONE corrected INSERT/UPDATE that fills EVERY REQUIRED column with a sensible value from the intent: "${intent}". Output ONLY the SQL. Keep the RETURNING clause.`,
+            `You fix ${source.kind} write SQL. Output only the corrected INSERT/UPDATE statement, no prose.`,
+            { profile: "extraction", complexity: "high", temperature: 0 },
+          );
+          const fixed = fixRaw.replace(/^```[a-z]*\n?|```$/gm, "").trim();
+          if (/\b(delete\s+from|drop\s+|truncate\s+|alter\s+)/i.test(fixed) || !/^\s*(insert|update|with)\b/i.test(fixed)) {
+            throw new Error(`db.write repair produced an unusable statement: ${fixed.slice(0, 120)}`);
+          }
+          sql = fixed;
+          try { result = await runQuery(source, sql); break; }
+          catch (er: any) { lastErr = er; if (attempt === 2 || !repairable(String(er?.message ?? er))) throw er; }
+        }
+      }
+      if (!result) throw new Error("db.write: no result after repair attempts");
       return {
         source: source.label,
         kind: source.kind,
+        sql,
         affected: result.rowCount,
         columns: result.columns,
         rows: result.rows,

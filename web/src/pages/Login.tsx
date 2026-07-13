@@ -39,7 +39,7 @@ export function Login() {
         const r = await api.login(email.trim(), password);
         setToken(r.token);
         showToast(`Signed in as ${r.user.name}`, "success");
-        navigate("/dashboard");
+        navigate("/chat");
       }
     } catch (e: any) {
       setErr(e?.message ?? String(e));

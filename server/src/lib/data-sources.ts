@@ -82,9 +82,32 @@ export function getSourceByLabel(label: string): DataSource | undefined {
   const raw = label.trim();
   const lower = raw.toLowerCase();
   const list = load();
-  return list.find(s => s.id === raw)
+  const hit = list.find(s => s.id === raw)
     ?? list.find(s => s.label.toLowerCase() === lower)
     ?? list.find(s => s.label.toLowerCase().includes(lower) || lower.includes(s.label.toLowerCase()));
+  if (hit) return hit;
+  // Reverse-direction match: does the QUERY contain a source's IDENTIFYING
+  // tokens? Requiring every query token to appear in the source (the earlier
+  // approach) broke the moment a task carried payload words — "create a $12
+  // requisition for a test mop" has "test"/"mop"/"priority" that are nowhere
+  // in any source's metadata, so nothing resolved (live 2026-07-13). Instead:
+  // each source contributes distinctive tokens from its label + notes (minus
+  // generic DB nouns); the source with the most of those present in the query
+  // wins, as long as at least one distinctive token hits.
+  const GENERIC = new Set(["db", "database", "cloud", "data", "source", "the", "system", "external", "test", "aws", "postgres", "postgresql", "mysql", "sqlite", "server", "prod", "production", "staging"]);
+  const qWords = new Set(lower.split(/[^a-z0-9]+/).filter(Boolean));
+  let best: DataSource | undefined;
+  let bestScore = 0;
+  for (const s of list) {
+    const idTokens = `${s.label} ${s.notes ?? ""}`.toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .filter(t => t.length >= 3 && !GENERIC.has(t) && !/^\d+$/.test(t));
+    const uniq = new Set(idTokens);
+    let score = 0;
+    for (const t of uniq) if (qWords.has(t)) score += 1;
+    if (score > bestScore) { bestScore = score; best = s; }
+  }
+  return bestScore >= 1 ? best : undefined;
 }
 
 export function addSource(input: Omit<DataSource, "id" | "createdAt">): DataSource {

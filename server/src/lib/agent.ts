@@ -9,7 +9,7 @@ import { PLAN_SYSTEM, POLISHED_DIRECT, POLISHED_SYNTH, TRIVIAL_DIRECT } from "./
 import { injectLanguagePrompt } from "./language-prompts.js";
 import { classifyDeliverable, taskWantsResearch } from "./deliverable.js";
 import { newOffloadRun, offloadLargeFields, recoverFullText } from "./context-offload.js";
-import { listSources as listDataSources } from "./data-sources.js";
+import { listSources as listDataSources, getSourceByLabel } from "./data-sources.js";
 
 // Shared local-filesystem detector — "does this task point at a file on the
 // operator's PC?" Used at three points (the planner's system-prompt hint,
@@ -1355,7 +1355,13 @@ export async function planAndExecute(
       const sources = listDataSources();
       if (sources.length === 0) return null;
       const lower = bareTask.toLowerCase();
-      const labeled = sources.find(s => s.label && lower.includes(s.label.toLowerCase()));
+      // Exact-label mention first, then the FUZZY resolver (label + notes token
+      // overlap) so "query the db of the finance flow" resolves to the source
+      // whose notes describe it as the finance system, even with several DBs
+      // registered (live 2026-07-13 — two postgres sources, neither labeled
+      // "finance flow", sent the task to a web search).
+      const labeled = sources.find(s => s.label && lower.includes(s.label.toLowerCase()))
+        ?? getSourceByLabel(bareTask);
       const genericDb = /\b(?:database|data\s+sources?|db|sql|postgres(?:ql)?|mysql|mongodb|sqlite|mssql)\b/i.test(bareTask);
       // Verbs that make this a DATA request, not a config/admin request
       // ("delete the database connection" should not run queries).
@@ -1372,7 +1378,32 @@ export async function planAndExecute(
       };
     } catch { return null; }
   };
-  let p = buildMemoryPlan() ?? buildBriefingPlan() ?? buildDbPlan() ?? heuristicPlan(bareTask, { hasAttachments: /\nAttached documents \(user uploaded as context/.test(task) }) ?? { steps: [], summary: undefined, waves: [] };
+  // Deterministic DB WRITE plan. An action against an external system
+  // ("$10 requisition in the financeflow", "add a record to X") must produce a
+  // REAL db.write, not a web search the synth then narrates as a fake success
+  // ("Added — Draft", live 2026-07-13). Fires only for create/add intent on a
+  // resolvable, WRITABLE source; routes to db.write intent-mode (schema →
+  // INSERT). If the source is read-only we do NOT fabricate — fall through so
+  // the agent reports it can't write rather than inventing a result.
+  const buildDbWritePlan = (): Plan | null => {
+    if (fromTemplate) return null;
+    const CREATE_RE = /\b(?:create|add|make|log|record|file|submit|raise|enter|insert)\b/i;
+    const OBJECT_RE = /\b(requisition|record|entry|expense|receipt|budget|row|order|invoice|ticket)\b/i;
+    if (!(CREATE_RE.test(bareTask) && OBJECT_RE.test(bareTask))) return null;
+    try {
+      const target = getSourceByLabel(bareTask);
+      if (!target) return null;      // no matching source — LLM planner / connector path handles it
+      if (target.readonly) return null; // writable sources only — never fabricate a write
+      push(`Recognised an external write — creating a record in "${target.label}" via db.write.`);
+      const args = { source: target.label, intent: bareTask.slice(0, 500), dryRun: false };
+      return {
+        steps: [{ tool: "db.write", args, rationale: "action task targets a writable registered data source — generate the INSERT from the live schema and execute", label: humanStepLabel("db.write", { source: target.label }) }],
+        summary: `Write a record to ${target.label}`,
+        waves: [[0]],
+      };
+    } catch { return null; }
+  };
+  let p = buildMemoryPlan() ?? buildBriefingPlan() ?? buildDbWritePlan() ?? buildDbPlan() ?? heuristicPlan(bareTask, { hasAttachments: /\nAttached documents \(user uploaded as context/.test(task) }) ?? { steps: [], summary: undefined, waves: [] };
   if (p.steps.length > 0) {
     // Customer-facing context-tier badge based on what the plan touches.
     // Helps the customer see "this answer drew on your vault" vs "this

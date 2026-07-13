@@ -13,7 +13,7 @@ import { lazy, Suspense } from "react";
 // Workforce card actually renders, so the dashboard's initial JS stays flat.
 const WorkforceGlobe = lazy(() => import("../components/WorkforceGlobe").then(m => ({ default: m.WorkforceGlobe })));
 import { t, loadSavedLanguage } from "../lib/i18n";
-import { MapPin, Building2, Globe, BookOpen, Plug, Zap, ShieldCheck, Server, Flag } from "lucide-react";
+import { MapPin, Building2, Globe, BookOpen, Plug, Zap, ShieldCheck, Server, Flag, Users, User as UserIcon } from "lucide-react";
 import type { SectorInfo, KnowledgePack } from "../lib/api";
 
 export function Dashboard() {
@@ -48,10 +48,18 @@ export function Dashboard() {
   // Running jobs — the Workforce card derives live sub-agents (in-flight plan
   // steps; parallel waves = several sub-agents) from these.
   const [running, setRunning] = useState<any[]>([]);
+  // Human side of the org — for the Workforce card's people/agent breakdown
+  // and the "where time goes" panel lifted from the Cost page.
+  const [org, setOrg] = useState<{ total: number; byLayer: Record<string, number>; byWorkMode: Record<string, number> } | null>(null);
+  const [timeA, setTimeA] = useState<any | null>(null);
+  const [users, setUsers] = useState<any[]>([]);
+  // Live neuro count = reachable fleet (self + peers) + installed external
+  // agents — the number the Mission Control "organization" card shows.
+  const liveNeuros = (fleet ? 1 + (fleet.peers ?? []).filter((p: any) => p.ok && p.ready).length : 0) + externalAgents.filter(a => a.installed).length;
 
   async function load() {
     try {
-      const [t, j, p, peers, ext, ob, depts, packs, st] = await Promise.all([
+      const [t, j, p, peers, ext, ob, depts, packs, st, orgOv, ta, us] = await Promise.all([
         api.listTemplates(),
         api.listJobs().catch(() => ({ jobs: [] as any[] })),
         api.listPersonas().catch(() => ({ active: null, personas: [] } as any)),
@@ -61,9 +69,32 @@ export function Dashboard() {
         api.listDepartments().catch(() => ({ departments: [] as any[] })),
         api.listKnowledgePacks().catch(() => ({ packs: [] as KnowledgePack[] })),
         api.status().catch(() => null),
+        api.orgOverview().catch(() => null),
+        api.timeAnalysis(30).catch(() => null),
+        api.listUsers().catch(() => ({ users: [] as any[] })),
       ]);
       setTemplates(t.templates);
-      setRecent(j.jobs.slice(0, 4));
+      // Real recent activity: the last 20 jobs that represent actual user
+      // tasks, newest first. Drop the internal/system kinds (peer delegations
+      // — the primary-side twin of an ad-hoc job, daily reflections, and bare
+      // knowledge-base searches) so the feed reads as "what the org did", not
+      // plumbing. Sort by finished-or-started time so a just-completed task
+      // surfaces at the top even if the list arrived unordered.
+      const meaningful = (j.jobs ?? [])
+        .filter((x: any) => {
+          const kind = String(x.kind ?? "");
+          if (kind.startsWith("peer:")) return false;
+          if (kind.startsWith("reflection:")) return false;
+          if (kind === "knowledge:search-brain") return false;
+          return true;
+        })
+        .sort((a: any, b: any) => {
+          const ta = new Date(a.finishedAt ?? a.startedAt ?? 0).getTime();
+          const tb = new Date(b.finishedAt ?? b.startedAt ?? 0).getTime();
+          return tb - ta;
+        })
+        .slice(0, 20);
+      setRecent(meaningful);
       setRunning((j.jobs ?? []).filter((x: any) => x.status === "running" || x.status === "pending"));
       setPersona(p.active);
       setPersonas(Array.isArray(p.personas) ? p.personas : []);
@@ -71,6 +102,9 @@ export function Dashboard() {
       setExternalAgents(ext.agents ?? []);
       setAllDepartments(depts.departments ?? []);
       if (st?.orgStatus) setOrgStatus(st.orgStatus);
+      if (orgOv) setOrg(orgOv);
+      if (ta) setTimeA(ta);
+      setUsers(Array.isArray(us.users) ? us.users : []);
       if (ob.state) {
         setOnboarding(ob.state);
         loadSavedLanguage();
@@ -188,14 +222,20 @@ export function Dashboard() {
               <div className="font-display text-lg text-cream-50 capitalize">{orgStatus.computeMode.replace("-", " ")}</div>
               <div className="text-[11px] text-cream-300/50 mt-1">{orgStatus.computeMode === "local-only" ? "All inference on this machine" : "Some inference may use a cloud LLM"}</div>
             </Link>
-            <div className="bg-ink-900 border border-ink-800 rounded-xl p-4">
-              <div className="flex items-center gap-2 text-xs text-cream-300/60 mb-1.5"><Globe size={13} /> Data residency</div>
-              <div className={`font-display text-lg capitalize ${orgStatus.dataResidency === "local" ? "text-leaf-400" : "text-amber-400"}`}>{orgStatus.dataResidency}</div>
-              <div className="text-[11px] text-cream-300/50 mt-1">{orgStatus.dataResidency === "local" ? "Task content stays on this machine" : "Confirm your DPA data-sharing agreement"}</div>
-            </div>
+            {/* People + machines at a glance — the org breakdown, replacing
+                the old Data residency card. Neuros (agents) live/total plus
+                the human headcount, so Mission Control shows the whole
+                workforce, not just policies + systems. */}
+            <Link to="/users" className="bg-ink-900 border border-ink-800 hover:border-violet-500/40 rounded-xl p-4 transition-colors">
+              <div className="flex items-center gap-2 text-xs text-cream-300/60 mb-1.5"><Users size={13} /> The organization</div>
+              <div className="font-display text-2xl text-cream-50">{liveNeuros} <span className="text-sm text-cream-300/50">neuros</span> · {org?.total ?? 0} <span className="text-sm text-cream-300/50">people</span></div>
+              <div className="text-[11px] text-cream-300/50 mt-1 truncate">{(org?.byWorkMode?.human ?? 0) + (org?.byWorkMode?.hybrid ?? 0)} hands-on · {personas.length} roles defined</div>
+            </Link>
           </div>
         </section>
       )}
+
+      <WhereTimeGoes timeA={timeA} />
 
       {activeSectorInfo && (featuredDepartments.length > 0 || knowledgePack || (activeSectorInfo.suggestedIntegrations?.length ?? 0) > 0) && (
         <section>
@@ -328,7 +368,7 @@ export function Dashboard() {
         <Card title="Recent activity" className="col-span-2">
           {recent.length === 0 && <div className="text-sm text-cream-300/60">No tasks yet. Pick one above to delegate something.</div>}
           {recent.length > 0 && (
-            <ul className="divide-y divide-ink-800">
+            <ul className="divide-y divide-ink-800 max-h-96 overflow-y-auto scrollbar-thin">
               {recent.map(j => (
                 <li key={j.id} className="py-2.5 flex items-center justify-between gap-3">
                   <div className="flex items-center gap-3 min-w-0">
@@ -345,7 +385,7 @@ export function Dashboard() {
           )}
         </Card>
         <Card title="Workforce">
-          <ClawbotFleet fleet={fleet} externalAgents={externalAgents} running={running} templatesCount={templates?.length} tasksToday={recent.length} personasCount={personas.length} />
+          <ClawbotFleet fleet={fleet} externalAgents={externalAgents} running={running} templatesCount={templates?.length} tasksToday={recent.length} personasCount={personas.length} org={org} users={users} />
         </Card>
       </section>
 
@@ -355,17 +395,79 @@ export function Dashboard() {
   );
 }
 
+function fmtMs(ms: number): string {
+  if (!ms || ms < 1000) return "0s";
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  return `${h}h ${m % 60}m`;
+}
+
+// "Where time goes" — the waste detector, lifted from the Cost page so the
+// operator sees the agent-vs-waiting-vs-human-work split on the dashboard
+// without a detour. Same TimeAnalysis payload (/api/tasks/time-analysis).
+function WhereTimeGoes({ timeA }: { timeA: any | null }) {
+  if (!timeA || !timeA.totals || timeA.totals.totalMs <= 0) return null;
+  return (
+    <section>
+      <div className="flex items-baseline justify-between mb-3 px-1">
+        <div className="text-xs uppercase tracking-[0.25em] text-cream-300/60">Where time goes — last {timeA.days} days</div>
+        <Link to="/cost" className="text-xs text-cream-300 hover:text-cream-50">Full cost breakdown →</Link>
+      </div>
+      <div className="bg-ink-900 border border-ink-800 rounded-xl p-4">
+        <p className="text-xs text-cream-300/60 mb-3">{timeA.verdict}</p>
+        <div className="h-3 rounded-full overflow-hidden flex mb-2 bg-ink-950">
+          <div className="bg-violet-500" style={{ width: `${timeA.totals.pct.agent}%` }} title={`Agent runtime ${timeA.totals.pct.agent}%`} />
+          <div className="bg-amber-500" style={{ width: `${timeA.totals.pct.humanWait}%` }} title={`Waiting on humans ${timeA.totals.pct.humanWait}%`} />
+          <div className="bg-leaf-500" style={{ width: `${timeA.totals.pct.humanWork}%` }} title={`Human work ${timeA.totals.pct.humanWork}%`} />
+        </div>
+        <div className="flex gap-4 text-xs text-cream-300/60 mb-4 flex-wrap">
+          <span><span className="inline-block w-2 h-2 rounded-full bg-violet-500 mr-1" />Agent runtime {timeA.totals.pct.agent}% ({fmtMs(timeA.totals.agentMs)})</span>
+          <span><span className="inline-block w-2 h-2 rounded-full bg-amber-500 mr-1" />Waiting on humans {timeA.totals.pct.humanWait}% ({fmtMs((timeA.totals.humanWaitMs ?? 0) + (timeA.totals.openWaitMs ?? 0))})</span>
+          <span><span className="inline-block w-2 h-2 rounded-full bg-leaf-500 mr-1" />Human work {timeA.totals.pct.humanWork}% ({timeA.humanWorkHours}h)</span>
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          {(timeA.slowestAgentTypes ?? []).length > 0 && (
+            <div>
+              <div className="text-xs font-semibold text-cream-200 mb-1.5">Slowest agent task types</div>
+              {timeA.slowestAgentTypes.slice(0, 5).map((t: any) => (
+                <div key={t.type} className="flex justify-between text-xs text-cream-300/60 py-0.5">
+                  <span className="font-mono truncate">{t.type}</span><span className="shrink-0 ml-2">{fmtMs(t.ms)}</span>
+                </div>
+              ))}
+            </div>
+          )}
+          {(timeA.longestWaits ?? []).length > 0 && (
+            <div>
+              <div className="text-xs font-semibold text-cream-200 mb-1.5">Longest waits on a human</div>
+              {timeA.longestWaits.slice(0, 5).map((w: any, i: number) => (
+                <div key={i} className="flex justify-between text-xs text-cream-300/60 py-0.5">
+                  <span className="truncate">{w.open ? "⏳ " : ""}{w.title}</span><span className="shrink-0 ml-2">{fmtMs(w.waitMs)}{w.open ? " · still waiting" : ""}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
+
 // Live snapshot of the running clawbot fleet. Each row is one clawbot — self
 // or peer — with current inflight count, role, and ready state. Replaces the
 // previous hardcoded "1 (clawbot)" line which was a lie the moment a worker
 // peer came online.
-function ClawbotFleet({ fleet, externalAgents, running, templatesCount, tasksToday, personasCount }: {
+function ClawbotFleet({ fleet, externalAgents, running, templatesCount, tasksToday, personasCount, org, users }: {
   fleet: { self: any; peers: any[] } | null;
   externalAgents: any[];
   running: any[];
   templatesCount?: number;
   tasksToday: number;
   personasCount: number;
+  org: { total: number; byLayer: Record<string, number>; byWorkMode: Record<string, number> } | null;
+  users: any[];
 }) {
   if (!fleet) return <div className="text-sm text-cream-300/60">Loading fleet…</div>;
 
@@ -472,6 +574,31 @@ function ClawbotFleet({ fleet, externalAgents, running, templatesCount, tasksTod
         })}
       </div>
 
+      {/* The PEOPLE in the org, in the same roster as the machines — so the
+          card shows the whole workforce (humans + neuros), not just agents.
+          Real accounts from /api/users; work mode (agent-assisted / hybrid /
+          hands-on) shown as the subtitle. */}
+      {users.length > 0 && (
+        <div className="border-t border-ink-800 pt-2.5 mt-2.5 space-y-1.5">
+          <div className="text-[10px] uppercase tracking-wider text-cream-300/50 mb-1">People · {users.length}</div>
+          {users.slice(0, 8).map((u, i) => (
+            <div key={`u-${i}`} className="flex items-center justify-between gap-2 px-2 py-1.5 rounded-md bg-ink-950 border border-ink-800">
+              <div className="flex items-center gap-2 min-w-0">
+                <span className="w-5 h-5 rounded-full bg-gradient-to-br from-leaf-500/40 to-violet-500/40 grid place-items-center text-[9px] font-semibold text-cream-50 shrink-0">
+                  {String(u.name ?? u.email ?? "?").split(" ").map((p: string) => p[0]).slice(0, 2).join("").toUpperCase()}
+                </span>
+                <div className="min-w-0">
+                  <div className="text-xs text-cream-100 truncate">{u.name ?? u.email}</div>
+                  <div className="text-[10px] text-cream-300/50 truncate">{u.department ? `${u.department} · ` : ""}{u.role ?? "member"}</div>
+                </div>
+              </div>
+              <span className="text-[10px] font-mono shrink-0 text-cream-300/50 flex items-center gap-1"><UserIcon size={9} />{u.workMode === "human" ? "hands-on" : u.workMode === "hybrid" ? "hybrid" : "person"}</span>
+            </div>
+          ))}
+          {users.length > 8 && <Link to="/users" className="block text-center text-[11px] text-violet-400 hover:text-violet-300 pt-1">+{users.length - 8} more · manage people →</Link>}
+        </div>
+      )}
+
       {/* Live sub-agents spawned by running tasks. */}
       {subAgents.length > 0 && (
         <div className="border-t border-ink-800 pt-2.5">
@@ -494,7 +621,7 @@ function ClawbotFleet({ fleet, externalAgents, running, templatesCount, tasksTod
         </div>
       )}
 
-      <div className="border-t border-ink-800 pt-2.5 space-y-2 text-xs">
+      <div className="border-t border-ink-800 pt-2.5 space-y-2 text-xs mt-2.5">
         <div className="flex justify-between"><span className="text-cream-300/70">Neuros online</span><span className="text-cream-100 font-mono">{activeCount}/{bots.length}</span></div>
         {subAgents.length > 0 && <div className="flex justify-between"><span className="text-cream-300/70">Sub-agents active</span><span className="text-violet-300 font-mono">{subAgents.length}</span></div>}
         {externalAgents.length > 0 && <div className="flex justify-between"><span className="text-cream-300/70">External agents</span><span className="text-cream-100 font-mono">{externalAgents.filter(a => a.installed).length}/{externalAgents.length}</span></div>}

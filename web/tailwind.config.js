@@ -32,11 +32,15 @@ export default {
         leaf: { 400: "#3fb3a0", 500: "#269684" },                    // Cipher Mint
       },
       fontFamily: {
-        // Warmer, rounder display face (2026-07-12) — replaces Space
-        // Grotesk's geometric/crypto-adjacent letterforms for headings and
-        // the wordmark, without touching body copy (Inter) or the
-        // legitimate monospace uses (JetBrains Mono — code, tabular data).
-        display: ["'Plus Jakarta Sans'", "system-ui", "sans-serif"],
+        // Display face = Playfair Display (2026-07-13) — a transitional serif
+        // for a sleeker, editorial/luxury feel on headings. Body copy stays
+        // Inter; monospace stays JetBrains Mono (code, tabular data).
+        display: ["'Playfair Display'", "Georgia", "serif"],
+        // Plus Jakarta Sans kept as a named family for the two components that
+        // animate its variable weight (DynamicWeightText, WeightHoverText) and
+        // the particle wordmark (PixelDriftText) — a serif's thin strokes
+        // sample poorly into particles, so those stay on the sans variable face.
+        jakarta: ["'Plus Jakarta Sans'", "system-ui", "sans-serif"],
         sans: ["Inter", "system-ui", "sans-serif"],
         mono: ["'JetBrains Mono'", "ui-monospace", "monospace"],
       },
